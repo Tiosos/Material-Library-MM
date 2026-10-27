@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 原型运行产物（由 build_db.py 生成，不入库）
+proto/*.sqlite
+proto/*.sqlite-journal
+proto/*.db
+proto/*.csv
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 本地环境变量
+.env
+*.local

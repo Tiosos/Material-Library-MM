@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://materiallib.local/schema/material.v1.json",
+  "title": "Universal Material Record (UMR) v1",
+  "description": "材料库交换格式。一行一条 JSONL 即可批量导入；单条用于 API 请求/响应。",
+  "type": "object",
+  "required": ["material_uid", "category", "name"],
+  "additionalProperties": false,
+  "properties": {
+    "material_uid": {
+      "type": "string",
+      "pattern": "^mat_[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$",
+      "description": "ULID 前缀 mat_。跨系统永久稳定，外部系统一律引用它。"
+    },
+    "rev": { "type": "integer", "minimum": 1, "default": 1 },
+    "status": {
+      "type": "string",
+      "enum": ["active", "draft", "archived", "superseded"],
+      "default": "active"
+    },
+    "superseded_by": { "type": ["string", "null"] },
+
+    "category": {
+      "type": "string",
+      "enum": ["board", "edging", "glass", "timber", "benchtop", "hardware",
+               "appliance", "custom", "hire", "consumable", "generic"],
+      "description": "材料大类，对应 joineryflow 的 9 张物理表 + 2 个兜底类。"
+    },
+    "product_type": {
+      "type": ["string", "null"],
+      "maxLength": 64,
+      "description": "细分类型，保留来源系统的页签/类型（Glass、Supplies、Paint、Laminate Benchtop…）。"
+    },
+    "name": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "description": { "type": ["string", "null"] },
+    "brand": { "type": ["string", "null"], "maxLength": 128 },
+    "model_no": { "type": ["string", "null"], "maxLength": 64 },
+
+    "default_supplier": { "type": ["string", "null"], "maxLength": 255 },
+    "default_supplier_ref": { "type": ["string", "null"], "maxLength": 255 },
+    "lead_time_days": { "type": ["integer", "null"], "minimum": 0 },
+    "unit": {
+      "type": ["string", "null"],
+      "description": "计量单位（UM）。sheet/ea/m/m2/L/roll/kg/box/pair/set",
+      "examples": ["sheet", "ea", "m", "m2", "L", "roll"]
+    },
+    "currency": { "type": "string", "pattern": "^[A-Z]{3}$", "default": "AUD" },
+    "unit_cost": { "type": ["number", "null"], "minimum": 0, "description": "当前不含税单价（缓存值）" },
+    "cost_basis": {
+      "type": "string",
+      "enum": ["ex_gst", "inc_gst", "ex_tax", "inc_tax"],
+      "default": "ex_gst"
+    },
+
+    "image_url": { "type": ["string", "null"] },
+    "product_url": { "type": ["string", "null"] },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": { "type": "string", "enum": ["image", "pdf", "datasheet", "cert", "link", "other"] },
+          "url": { "type": "string" },
+          "title": { "type": "string" }
+        },
+        "required": ["kind", "url"]
+      }
+    },
+
+    "attributes": {
+      "type": "object",
+      "description": "类型专属字段。键由 material_profile 定义，未定义键允许但标记为 custom。",
+      "additionalProperties": true,
+      "examples": [
+        { "thickness_mm": 16, "colour": "Black", "substrate": "MDF", "sheet_len_mm": 3600, "sheet_wid_mm": 1200 },
+        { "glass_type": "Toughened", "thickness_mm": 6, "edge_finish": "Polished" }
+      ]
+    },
+
+    "tags": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "synonyms": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true,
+      "description": "别名/俗称/错拼。缺省搜索靠它兜底（melamine→laminate，mdf→medium density fibreboard）。"
+    },
+
+    "identifiers": {
+      "type": "array",
+      "description": "跨系统编码簿。导入时按 (kind,value,source_system) 去重。",
+      "items": {
+        "type": "object",
+        "required": ["kind", "value"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["sku", "barcode", "ean", "supplier_code", "legacy_id", "catalog_code",
+                     "internal_ref", "slab_id", "model_no", "cv_code", "contract_ref", "other"]
+          },
+          "value": { "type": "string" },
+          "source_system": { "type": ["string", "null"] },
+          "is_primary": { "type": "boolean", "default": false }
+        }
+      }
+    },
+
+    "prices": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["unit_cost"],
+        "properties": {
+          "supplier": { "type": ["string", "null"] },
+          "unit_cost": { "type": "number", "minimum": 0 },
+          "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+          "cost_basis": { "type": "string", "enum": ["ex_gst", "inc_gst", "ex_tax", "inc_tax"] },
+          "qty_break": { "type": ["number", "null"] },
+          "valid_from": { "type": "string", "format": "date" },
+          "valid_to": { "type": ["string", "null"], "format": "date" },
+          "source_system": { "type": ["string", "null"] }
+        }
+      }
+    },
+
+    "relations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["to_uid", "kind"],
+        "properties": {
+          "to_uid": { "type": "string" },
+          "kind": {
+            "type": "string",
+            "enum": ["substitute", "accessory", "supersedes", "bundled_with", "similar"]
+          },
+          "note": { "type": ["string", "null"] }
+        }
+      }
+    },
+
+    "source_system": { "type": ["string", "null"], "examples": ["joineryflow", "filemaker", "manual"] },
+    "source_id": { "type": ["string", "null"] },
+    "source_payload": { "type": ["object", "null"] },
+    "imported_at": { "type": ["string", "null"], "format": "date-time" },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1, "default": 1 },
+
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "created_by": { "type": ["string", "null"] },
+    "updated_by": { "type": ["string", "null"] }
+  }
+}

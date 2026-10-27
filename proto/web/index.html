@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Material Library · 材料库查询</title>
+<style>
+  :root{
+    --bg:#f7f8fa; --panel:#fff; --line:#e4e7ec; --line2:#eef0f4;
+    --ink:#111827; --ink2:#4b5563; --ink3:#8b94a3;
+    --accent:#1f5eff; --accent-soft:#eef3ff;
+    --ok:#0f8a5f; --warn:#b45309; --warn-soft:#fef6e7; --arch:#9aa2b1;
+    --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--bg); color:var(--ink);
+    font:14px/1.5 Inter,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--accent);text-decoration:none}
+  button{font:inherit;cursor:pointer}
+
+  /* ---------- header ---------- */
+  header{
+    position:sticky;top:0;z-index:20;background:var(--panel);
+    border-bottom:1px solid var(--line);
+  }
+  .hrow{max-width:1360px;margin:0 auto;padding:12px 20px;display:flex;gap:16px;align-items:center}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:650;letter-spacing:-.01em;white-space:nowrap}
+  .brand .dot{width:9px;height:9px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+  .brand small{font-weight:400;color:var(--ink3);font-size:12px;margin-left:2px}
+  .searchwrap{flex:1;position:relative;max-width:720px}
+  .searchwrap input{
+    width:100%;padding:10px 92px 10px 36px;font-size:15px;color:var(--ink);
+    background:#fbfcfd;border:1px solid var(--line);border-radius:9px;outline:none;
+    transition:border-color .12s,box-shadow .12s;
+  }
+  .searchwrap input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);background:#fff}
+  .searchwrap .icon{position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--ink3);font-size:14px}
+  .searchwrap .kbd{
+    position:absolute;right:12px;top:50%;transform:translateY(-50%);
+    font:11px/1 var(--mono);color:var(--ink3);background:#fff;border:1px solid var(--line);
+    border-radius:5px;padding:4px 6px;
+  }
+  .btn{
+    border:1px solid var(--line);background:#fff;color:var(--ink2);
+    padding:8px 12px;border-radius:8px;white-space:nowrap;font-size:13px;
+  }
+  .btn:hover{border-color:#c9cfda;color:var(--ink)}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  .btn.primary:hover{background:#1a50e0}
+
+  /* ---------- level bar ---------- */
+  .levelbar{max-width:1360px;margin:0 auto;padding:0 20px 11px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .pill{
+    font-size:12px;padding:4px 10px;border-radius:20px;border:1px solid var(--line);
+    color:var(--ink2);background:#fff;display:inline-flex;align-items:center;gap:6px;
+  }
+  .pill b{font-weight:600;color:var(--ink)}
+  .pill.relaxed{border-color:#f0d9a8;background:var(--warn-soft);color:var(--warn)}
+  .pill.fuzzy{border-color:#f0d9a8;background:var(--warn-soft);color:var(--warn)}
+  .pill.none{border-color:#f3c2c2;background:#fdf2f2;color:#b42318}
+  .pill.and,.pill.exact,.pill.prefix{border-color:#bfe6d2;background:#f0fbf5;color:var(--ok)}
+  .tryit{font-size:12.5px;color:var(--ink3)}
+  .tryit code{
+    font:12px var(--mono);background:#fff;border:1px solid var(--line);
+    padding:2px 6px;border-radius:5px;cursor:pointer;color:var(--ink2);
+  }
+  .tryit code:hover{border-color:var(--accent);color:var(--accent)}
+
+  /* ---------- layout ---------- */
+  .wrap{max-width:1360px;margin:0 auto;padding:0 20px 60px;display:grid;grid-template-columns:212px 1fr;gap:22px}
+  @media (max-width:900px){.wrap{grid-template-columns:1fr}aside{display:none}}
+
+  aside{position:sticky;top:96px;align-self:start;max-height:calc(100vh - 120px);overflow:auto}
+  .fgroup{margin-bottom:20px}
+  .fgroup h4{margin:0 0 8px;font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink3);font-weight:600}
+  .fitem{
+    display:flex;justify-content:space-between;gap:8px;padding:5px 8px;border-radius:6px;
+    color:var(--ink2);cursor:pointer;font-size:13px;
+  }
+  .fitem:hover{background:#eef0f4}
+  .fitem.on{background:var(--accent-soft);color:var(--accent);font-weight:550}
+  .fitem span{color:var(--ink3);font:11px var(--mono)}
+  .fitem.on span{color:var(--accent)}
+
+  main{min-width:0}
+  .reshead{display:flex;justify-content:space-between;align-items:baseline;margin:0 0 10px}
+  .reshead h2{margin:0;font-size:15px;font-weight:600}
+  .reshead .meta{font-size:12.5px;color:var(--ink3)}
+
+  .card{
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:13px 15px;margin-bottom:9px;cursor:pointer;transition:border-color .12s,box-shadow .12s;
+  }
+  .card:hover{border-color:#c3cbd8;box-shadow:0 1px 6px rgba(16,24,40,.05)}
+  .card.sel{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+  .c1{display:flex;gap:12px;align-items:baseline}
+  .c1 .nm{font-weight:600;font-size:14.5px;letter-spacing:-.01em}
+  .c1 .nm mark{background:#fff3bf;color:inherit;border-radius:2px;padding:0 1px}
+  .c1 .cost{margin-left:auto;font:13px var(--mono);color:var(--ink);white-space:nowrap}
+  .c1 .cost em{font-style:normal;color:var(--ink3);font-size:11px}
+  .c2{margin-top:5px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;font-size:12.5px;color:var(--ink2)}
+  .badge{
+    font:11px/1.5 var(--mono);padding:1px 6px;border-radius:4px;
+    background:#f1f3f7;color:var(--ink2);border:1px solid var(--line2);
+  }
+  .badge.cat{background:var(--accent-soft);color:var(--accent);border-color:#dbe5ff}
+  .badge.arch{background:#f3f4f6;color:var(--arch);text-decoration:line-through}
+  .attr{color:var(--ink3);font:11.5px var(--mono)}
+  .matched{font-size:12px;color:var(--warn)}
+
+  .empty{
+    background:var(--panel);border:1px dashed var(--line);border-radius:10px;
+    padding:32px;text-align:center;color:var(--ink2);
+  }
+  .empty b{display:block;font-size:15px;color:var(--ink);margin-bottom:6px}
+  .empty .sg{margin-top:12px}
+  .empty .sg button{border:1px solid var(--accent);color:var(--accent);background:#fff;padding:6px 14px;border-radius:7px}
+
+  /* ---------- drawer ---------- */
+  .scrim{position:fixed;inset:0;background:rgba(16,24,40,.28);opacity:0;pointer-events:none;transition:opacity .15s;z-index:30}
+  .scrim.on{opacity:1;pointer-events:auto}
+  .drawer{
+    position:fixed;top:0;right:0;height:100%;width:min(480px,94vw);background:var(--panel);
+    border-left:1px solid var(--line);z-index:31;transform:translateX(100%);
+    transition:transform .18s ease;overflow:auto;padding:20px 22px 60px;
+  }
+  .drawer.on{transform:none}
+  .drawer h3{margin:0 0 3px;font-size:17px;letter-spacing:-.01em}
+  .drawer .sub{color:var(--ink3);font-size:12.5px;margin-bottom:16px}
+  .dclose{position:absolute;top:14px;right:16px;border:none;background:none;color:var(--ink3);font-size:20px;line-height:1}
+  .sec{margin:18px 0 0}
+  .sec h5{margin:0 0 7px;font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink3);font-weight:600}
+  table.kv{width:100%;border-collapse:collapse;font-size:13px}
+  table.kv td{padding:5px 0;border-bottom:1px solid var(--line2);vertical-align:top}
+  table.kv td:first-child{color:var(--ink3);width:44%}
+  table.kv td:last-child{font-family:var(--mono);font-size:12.5px}
+  .chips{display:flex;flex-wrap:wrap;gap:6px}
+  .uidbox{
+    display:flex;gap:6px;align-items:center;margin-top:6px;
+    font:12px var(--mono);background:#f7f8fa;border:1px solid var(--line);border-radius:7px;padding:8px 10px;
+  }
+  .uidbox span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink2)}
+  .uidbox button{border:1px solid var(--line);background:#fff;border-radius:5px;padding:3px 8px;font-size:11.5px;color:var(--ink2)}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="hrow">
+    <div class="brand"><span class="dot"></span>Material Library <small>通用材料库 · 原型 v1</small></div>
+    <div class="searchwrap">
+      <span class="icon">⌕</span>
+      <input id="q" autocomplete="off" spellcheck="false"
+             placeholder="搜材料：blum hinge / 16mm black / thickness:18 / 台面 …">
+      <span class="kbd">/ 聚焦</span>
+    </div>
+    <button class="btn" id="expJson">导出 JSONL</button>
+    <button class="btn" id="expCsv">导出 CSV</button>
+  </div>
+  <div class="levelbar">
+    <span class="pill" id="level">浏览全部</span>
+    <span class="tryit" id="tryit"></span>
+  </div>
+</header>
+
+<div class="wrap">
+  <aside>
+    <div class="fgroup"><h4>分类</h4><div id="fCat"></div></div>
+    <div class="fgroup"><h4>品牌</h4><div id="fBrand"></div></div>
+    <div class="fgroup"><h4>供应商</h4><div id="fSup"></div></div>
+  </aside>
+
+  <main>
+    <div class="reshead">
+      <h2 id="resTitle">全部材料</h2>
+      <span class="meta" id="resMeta"></span>
+    </div>
+    <div id="list"></div>
+  </main>
+</div>
+
+<div class="scrim" id="scrim"></div>
+<div class="drawer" id="drawer"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const state = { q:'', category:'', brand:'', supplier:'', results:[], uid:null };
+let timer = null;
+
+const LEVEL_CLS = { exact:'exact', and:'and', prefix:'prefix', relaxed:'relaxed', fuzzy:'fuzzy', none:'none', browse:'', filter:'' };
+const EXAMPLES = ['blum soft close hinge','blu','blum hinge 450','luminux','tempered glass','台面','thickness:18 colour:black','mdf 18 white'];
+
+/* ---------------- 搜索 ---------------- */
+async function run(){
+  const p = new URLSearchParams({q:state.q, limit:60});
+  if(state.category) p.set('category', state.category);
+  if(state.brand)    p.set('brand', state.brand);
+  if(state.supplier) p.set('supplier', state.supplier);
+  const r = await fetch('/api/search?'+p).then(x=>x.json());
+  state.results = r.results || [];
+  render(r);
+  renderFacets(r.facets || {});
+}
+
+function render(r){
+  const lp = $('#level');
+  lp.className = 'pill ' + (LEVEL_CLS[r.level] || '');
+  lp.textContent = r.level === 'browse'
+    ? `浏览全部 · ${r.total} 条`
+    : `${r.level_label} · ${r.total} 条`;
+
+  $('#tryit').innerHTML = '试试：' + EXAMPLES.map(e=>`<code>${esc(e)}</code>`).join(' ');
+  $('#tryit').querySelectorAll('code').forEach(c =>
+    c.onclick = () => { $('#q').value = c.textContent; state.q = c.textContent; run(); });
+
+  $('#resTitle').textContent = state.q ? `“${state.q}” 的结果` : '全部材料';
+  $('#resMeta').textContent = state.q ? `解析：${JSON.stringify(r.parsed)}` : '';
+
+  const box = $('#list');
+  if(!r.total){
+    box.innerHTML = `<div class="empty">
+      <b>没有命中任何材料</b>
+      ${r.suggestion ? `<div class="sg">你是不是要找 <button id="sgBtn">${esc(r.suggestion)}</button> ？</div>`
+                     : `<div>换个说法试试，或者用更短的关键词。</div>`}
+    </div>`;
+    const b = $('#sgBtn');
+    if(b) b.onclick = () => { $('#q').value = r.suggestion; state.q = r.suggestion; run(); };
+    return;
+  }
+
+  box.innerHTML = r.results.map((m,i)=>{
+    const attrs = Object.entries(m.attributes||{}).slice(0,4)
+      .map(([k,v])=>`<span class="attr">${esc(k)}:${esc(v)}</span>`).join(' · ');
+    const cost = m.unit_cost!=null
+      ? `<span class="cost">$${Number(m.unit_cost).toLocaleString()} <em>/ ${esc(m.unit||'')}</em></span>` : '';
+    return `<div class="card ${state.uid===m.material_uid?'sel':''}" data-i="${i}">
+      <div class="c1">
+        <span class="nm">${esc(m.name)}</span>
+        ${m.status==='archived'?'<span class="badge arch">archived</span>':''}
+        ${cost}
+      </div>
+      <div class="c2">
+        <span class="badge cat">${esc(m.category)}</span>
+        ${m.brand?`<span>${esc(m.brand)}</span>`:''}
+        ${m.default_supplier?`<span class="attr">${esc(m.default_supplier)}</span>`:''}
+        ${m.lead_time_days?`<span class="attr">${m.lead_time_days}d</span>`:''}
+      </div>
+      ${attrs?`<div class="c2">${attrs}</div>`:''}
+      ${m._matched?`<div class="matched">↳ 模糊匹配到 “${esc(m._matched)}”</div>`:''}
+    </div>`;
+  }).join('');
+
+  box.querySelectorAll('.card').forEach(c =>
+    c.onclick = () => openDetail(state.results[+c.dataset.i].material_uid));
+}
+
+function renderFacets(f){
+  const mk = (host, map, key) => {
+    const el = $('#'+host);
+    const cur = state[key];
+    el.innerHTML = Object.entries(map).map(([k,v])=>
+      `<div class="fitem ${cur===k?'on':''}" data-k="${esc(k)}">${esc(k)}<span>${v}</span></div>`).join('');
+    el.querySelectorAll('.fitem').forEach(i => i.onclick = () => {
+      state[key] = state[key] === i.dataset.k ? '' : i.dataset.k;
+      run();
+    });
+  };
+  mk('fCat', f.category||{}, 'category');
+  mk('fBrand', f.brand||{}, 'brand');
+  mk('fSup', f.default_supplier||{}, 'supplier');
+}
+
+/* ---------------- 详情 ---------------- */
+async function openDetail(uid){
+  state.uid = uid;
+  const d = await fetch('/api/material/'+uid).then(x=>x.json());
+  const rows = Object.entries(d.attributes||{});
+  $('#drawer').innerHTML = `
+    <button class="dclose" id="dc">×</button>
+    <h3>${esc(d.name)}</h3>
+    <div class="sub">${esc(d.category)}${d.product_type?' · '+esc(d.product_type):''}
+      ${d.brand?' · '+esc(d.brand):''} ${d.status==='archived'?' · 已归档':''}</div>
+
+    <div class="sec"><h5>商务</h5>
+      <table class="kv">
+        <tr><td>单价</td><td>${d.unit_cost!=null?'$'+Number(d.unit_cost).toLocaleString()+' / '+esc(d.unit||'')+' ('+esc(d.cost_basis||'ex_gst')+')':'—'}</td></tr>
+        <tr><td>默认供应商</td><td>${esc(d.default_supplier||'—')}</td></tr>
+        <tr><td>交期</td><td>${esc(d.lead_time_days??'—')} 天</td></tr>
+      </table>
+    </div>
+
+    ${rows.length?`<div class="sec"><h5>属性</h5><table class="kv">${
+      rows.map(([k,v])=>`<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('')}</table></div>`:''}
+
+    ${(d.identifiers||[]).length?`<div class="sec"><h5>编码簿</h5><table class="kv">${
+      d.identifiers.map(i=>`<tr><td>${esc(i.kind)}${i.is_primary?' ★':''}</td><td>${esc(i.value)}</td></tr>`).join('')}</table></div>`:''}
+
+    ${(d.prices||[]).length?`<div class="sec"><h5>价格历史</h5><table class="kv">${
+      d.prices.map(p=>`<tr><td>${esc(p.valid_from||'')}${p.supplier?' · '+esc(p.supplier):''}</td><td>$${Number(p.unit_cost).toLocaleString()}</td></tr>`).join('')}</table></div>`:''}
+
+    ${(d.synonyms||[]).length?`<div class="sec"><h5>同义词</h5><div class="chips">${
+      d.synonyms.map(s=>`<span class="badge">${esc(s)}</span>`).join('')}</div></div>`:''}
+
+    ${(d.relations||[]).length?`<div class="sec"><h5>关系</h5><table class="kv">${
+      d.relations.map(r=>`<tr><td>${esc(r.kind)}</td><td>${esc(r.to_name||r.to_uid)}</td></tr>`).join('')}</table></div>`:''}
+
+    <div class="sec"><h5>跨系统主键</h5>
+      <div class="uidbox"><span>${esc(d.material_uid)}</span><button id="cpUid">复制</button></div>
+    </div>
+
+    <div class="sec"><h5>导出</h5>
+      <button class="btn" id="dlOne">下载这条 UMR (JSON)</button>
+    </div>`;
+  $('#drawer').classList.add('on'); $('#scrim').classList.add('on');
+  $('#dc').onclick = closeDetail;
+  $('#cpUid').onclick = () => navigator.clipboard.writeText(d.material_uid);
+  $('#dlOne').onclick = () => {
+    const blob = new Blob([JSON.stringify(d,null,2)],{type:'application/json'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = d.material_uid+'.json'; a.click();
+  };
+}
+function closeDetail(){
+  state.uid = null;
+  $('#drawer').classList.remove('on'); $('#scrim').classList.remove('on');
+}
+
+/* ---------------- 事件 ---------------- */
+$('#q').addEventListener('input', e => {
+  state.q = e.target.value;
+  clearTimeout(timer); timer = setTimeout(run, 180);
+});
+$('#scrim').onclick = closeDetail;
+document.addEventListener('keydown', e => {
+  if(e.key === '/' && document.activeElement !== $('#q')){ e.preventDefault(); $('#q').focus(); }
+  if(e.key === 'Escape') closeDetail();
+});
+$('#expJson').onclick = () => location.href = '/api/export?format=jsonl&q='+encodeURIComponent(state.q);
+$('#expCsv').onclick  = () => location.href = '/api/export?format=csv&q='+encodeURIComponent(state.q);
+
+run();
+</script>
+</body>
+</html>
