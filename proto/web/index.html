@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Material Library · 材料库查询</title>
+<title>Material Library · Material Search</title>
 <style>
   :root{
     --bg:#f7f8fa; --panel:#fff; --line:#e4e7ec; --line2:#eef0f4;
@@ -151,32 +151,32 @@
 
 <header>
   <div class="hrow">
-    <div class="brand"><span class="dot"></span>Material Library <small>通用材料库 · 原型 v1</small></div>
+    <div class="brand"><span class="dot"></span>Material Library <small>Universal Material Library · prototype v1</small></div>
     <div class="searchwrap">
       <span class="icon">⌕</span>
       <input id="q" autocomplete="off" spellcheck="false"
-             placeholder="搜材料：blum hinge / 16mm black / thickness:18 / 台面 …">
-      <span class="kbd">/ 聚焦</span>
+             placeholder="Search materials: blum hinge / 16mm black / thickness:18 / countertop …">
+      <span class="kbd">/ to focus</span>
     </div>
-    <button class="btn" id="expJson">导出 JSONL</button>
-    <button class="btn" id="expCsv">导出 CSV</button>
+    <button class="btn" id="expJson">Export JSONL</button>
+    <button class="btn" id="expCsv">Export CSV</button>
   </div>
   <div class="levelbar">
-    <span class="pill" id="level">浏览全部</span>
+    <span class="pill" id="level">Browsing all</span>
     <span class="tryit" id="tryit"></span>
   </div>
 </header>
 
 <div class="wrap">
   <aside>
-    <div class="fgroup"><h4>分类</h4><div id="fCat"></div></div>
-    <div class="fgroup"><h4>品牌</h4><div id="fBrand"></div></div>
-    <div class="fgroup"><h4>供应商</h4><div id="fSup"></div></div>
+    <div class="fgroup"><h4>Category</h4><div id="fCat"></div></div>
+    <div class="fgroup"><h4>Brand</h4><div id="fBrand"></div></div>
+    <div class="fgroup"><h4>Supplier</h4><div id="fSup"></div></div>
   </aside>
 
   <main>
     <div class="reshead">
-      <h2 id="resTitle">全部材料</h2>
+      <h2 id="resTitle">All materials</h2>
       <span class="meta" id="resMeta"></span>
     </div>
     <div id="list"></div>
@@ -193,9 +193,9 @@ const state = { q:'', category:'', brand:'', supplier:'', results:[], uid:null }
 let timer = null;
 
 const LEVEL_CLS = { exact:'exact', and:'and', prefix:'prefix', relaxed:'relaxed', fuzzy:'fuzzy', none:'none', browse:'', filter:'' };
-const EXAMPLES = ['blum soft close hinge','blu','blum hinge 450','luminux','tempered glass','台面','thickness:18 colour:black','mdf 18 white'];
+const EXAMPLES = ['blum soft close hinge','blu','blum hinge 450','luminux','tempered glass','countertop','thickness:18 colour:black','mdf 18 white'];
 
-/* ---------------- 搜索 ---------------- */
+/* ---------------- search ---------------- */
 async function run(){
   const p = new URLSearchParams({q:state.q, limit:60});
   if(state.category) p.set('category', state.category);
@@ -211,22 +211,22 @@ function render(r){
   const lp = $('#level');
   lp.className = 'pill ' + (LEVEL_CLS[r.level] || '');
   lp.textContent = r.level === 'browse'
-    ? `浏览全部 · ${r.total} 条`
-    : `${r.level_label} · ${r.total} 条`;
+    ? `Browsing all · ${r.total} items`
+    : `${r.level_label} · ${r.total} items`;
 
-  $('#tryit').innerHTML = '试试：' + EXAMPLES.map(e=>`<code>${esc(e)}</code>`).join(' ');
+  $('#tryit').innerHTML = 'Try: ' + EXAMPLES.map(e=>`<code>${esc(e)}</code>`).join(' ');
   $('#tryit').querySelectorAll('code').forEach(c =>
     c.onclick = () => { $('#q').value = c.textContent; state.q = c.textContent; run(); });
 
-  $('#resTitle').textContent = state.q ? `“${state.q}” 的结果` : '全部材料';
-  $('#resMeta').textContent = state.q ? `解析：${JSON.stringify(r.parsed)}` : '';
+  $('#resTitle').textContent = state.q ? `Results for “${state.q}”` : 'All materials';
+  $('#resMeta').textContent = state.q ? `Parsed: ${JSON.stringify(r.parsed)}` : '';
 
   const box = $('#list');
   if(!r.total){
     box.innerHTML = `<div class="empty">
-      <b>没有命中任何材料</b>
-      ${r.suggestion ? `<div class="sg">你是不是要找 <button id="sgBtn">${esc(r.suggestion)}</button> ？</div>`
-                     : `<div>换个说法试试，或者用更短的关键词。</div>`}
+      <b>No matching materials</b>
+      ${r.suggestion ? `<div class="sg">Did you mean <button id="sgBtn">${esc(r.suggestion)}</button>?</div>`
+                     : `<div>Try different wording, or use fewer keywords.</div>`}
     </div>`;
     const b = $('#sgBtn');
     if(b) b.onclick = () => { $('#q').value = r.suggestion; state.q = r.suggestion; run(); };
@@ -251,7 +251,7 @@ function render(r){
         ${m.lead_time_days?`<span class="attr">${m.lead_time_days}d</span>`:''}
       </div>
       ${attrs?`<div class="c2">${attrs}</div>`:''}
-      ${m._matched?`<div class="matched">↳ 模糊匹配到 “${esc(m._matched)}”</div>`:''}
+      ${m._matched?`<div class="matched">↳ fuzzy match on “${esc(m._matched)}”</div>`:''}
     </div>`;
   }).join('');
 
@@ -275,7 +275,7 @@ function renderFacets(f){
   mk('fSup', f.default_supplier||{}, 'supplier');
 }
 
-/* ---------------- 详情 ---------------- */
+/* ---------------- detail ---------------- */
 async function openDetail(uid){
   state.uid = uid;
   const d = await fetch('/api/material/'+uid).then(x=>x.json());
@@ -284,37 +284,37 @@ async function openDetail(uid){
     <button class="dclose" id="dc">×</button>
     <h3>${esc(d.name)}</h3>
     <div class="sub">${esc(d.category)}${d.product_type?' · '+esc(d.product_type):''}
-      ${d.brand?' · '+esc(d.brand):''} ${d.status==='archived'?' · 已归档':''}</div>
+      ${d.brand?' · '+esc(d.brand):''} ${d.status==='archived'?' · archived':''}</div>
 
-    <div class="sec"><h5>商务</h5>
+    <div class="sec"><h5>Commercial</h5>
       <table class="kv">
-        <tr><td>单价</td><td>${d.unit_cost!=null?'$'+Number(d.unit_cost).toLocaleString()+' / '+esc(d.unit||'')+' ('+esc(d.cost_basis||'ex_gst')+')':'—'}</td></tr>
-        <tr><td>默认供应商</td><td>${esc(d.default_supplier||'—')}</td></tr>
-        <tr><td>交期</td><td>${esc(d.lead_time_days??'—')} 天</td></tr>
+        <tr><td>Unit price</td><td>${d.unit_cost!=null?'$'+Number(d.unit_cost).toLocaleString()+' / '+esc(d.unit||'')+' ('+esc(d.cost_basis||'ex_gst')+')':'—'}</td></tr>
+        <tr><td>Default supplier</td><td>${esc(d.default_supplier||'—')}</td></tr>
+        <tr><td>Lead time</td><td>${esc(d.lead_time_days??'—')} days</td></tr>
       </table>
     </div>
 
-    ${rows.length?`<div class="sec"><h5>属性</h5><table class="kv">${
+    ${rows.length?`<div class="sec"><h5>Attributes</h5><table class="kv">${
       rows.map(([k,v])=>`<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('')}</table></div>`:''}
 
-    ${(d.identifiers||[]).length?`<div class="sec"><h5>编码簿</h5><table class="kv">${
+    ${(d.identifiers||[]).length?`<div class="sec"><h5>Identifiers</h5><table class="kv">${
       d.identifiers.map(i=>`<tr><td>${esc(i.kind)}${i.is_primary?' ★':''}</td><td>${esc(i.value)}</td></tr>`).join('')}</table></div>`:''}
 
-    ${(d.prices||[]).length?`<div class="sec"><h5>价格历史</h5><table class="kv">${
+    ${(d.prices||[]).length?`<div class="sec"><h5>Price history</h5><table class="kv">${
       d.prices.map(p=>`<tr><td>${esc(p.valid_from||'')}${p.supplier?' · '+esc(p.supplier):''}</td><td>$${Number(p.unit_cost).toLocaleString()}</td></tr>`).join('')}</table></div>`:''}
 
-    ${(d.synonyms||[]).length?`<div class="sec"><h5>同义词</h5><div class="chips">${
+    ${(d.synonyms||[]).length?`<div class="sec"><h5>Synonyms</h5><div class="chips">${
       d.synonyms.map(s=>`<span class="badge">${esc(s)}</span>`).join('')}</div></div>`:''}
 
-    ${(d.relations||[]).length?`<div class="sec"><h5>关系</h5><table class="kv">${
+    ${(d.relations||[]).length?`<div class="sec"><h5>Relations</h5><table class="kv">${
       d.relations.map(r=>`<tr><td>${esc(r.kind)}</td><td>${esc(r.to_name||r.to_uid)}</td></tr>`).join('')}</table></div>`:''}
 
-    <div class="sec"><h5>跨系统主键</h5>
-      <div class="uidbox"><span>${esc(d.material_uid)}</span><button id="cpUid">复制</button></div>
+    <div class="sec"><h5>Cross-system primary key</h5>
+      <div class="uidbox"><span>${esc(d.material_uid)}</span><button id="cpUid">Copy</button></div>
     </div>
 
-    <div class="sec"><h5>导出</h5>
-      <button class="btn" id="dlOne">下载这条 UMR (JSON)</button>
+    <div class="sec"><h5>Export</h5>
+      <button class="btn" id="dlOne">Download this UMR (JSON)</button>
     </div>`;
   $('#drawer').classList.add('on'); $('#scrim').classList.add('on');
   $('#dc').onclick = closeDetail;
@@ -330,7 +330,7 @@ function closeDetail(){
   $('#drawer').classList.remove('on'); $('#scrim').classList.remove('on');
 }
 
-/* ---------------- 事件 ---------------- */
+/* ---------------- events ---------------- */
 $('#q').addEventListener('input', e => {
   state.q = e.target.value;
   clearTimeout(timer); timer = setTimeout(run, 180);

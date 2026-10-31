@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Material Library 原型服务 —— 零依赖（只用标准库 + SQLite FTS5）。
+"""Material Library prototype server — zero dependencies (standard library + SQLite FTS5 only).
 
     python3 serve.py            # http://localhost:8848
-    python3 serve.py 9000       # 换端口
+    python3 serve.py 9000       # change the port
 
-接口
-    GET /                      查询界面
+Endpoints
+    GET /                      search UI
     GET /api/search?q=&category=&brand=&supplier=&limit=
-    GET /api/material/{uid}    单条详情（含价格历史、替代料、编码簿）
+    GET /api/material/{uid}    single record (incl. price history, substitutes, identifier book)
     GET /api/export?q=&format=jsonl|csv
-    GET /api/suggest?q=        输入补全
+    GET /api/suggest?q=        input completion
 """
 from __future__ import annotations
 
@@ -115,17 +115,17 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     if not S.DB_PATH.exists():
-        print("数据库不存在，请先运行: python3 build_db.py")
+        print("Database not found, run this first: python3 build_db.py")
         raise SystemExit(1)
-    print(f"\n  Material Library 原型  →  http://localhost:{PORT}\n")
-    print("  试试这些查询（验证四级降级）：")
-    print("    blum soft close hinge   全文 AND")
-    print("    blu                     前缀（没打完）")
-    print("    blum hinge 450          放宽（丢掉没命中的词）")
-    print("    luminux                 模糊（拼错 → laminex）")
-    print("    tempered glass          同义词 → toughened")
-    print("    台面                     中英文混搜")
-    print("    thickness:18 colour:black   属性过滤\n")
+    print(f"\n  Material Library prototype  →  http://localhost:{PORT}\n")
+    print("  Try these queries (they exercise the four-level degradation):")
+    print("    blum soft close hinge   full-text AND")
+    print("    blu                     prefix (half-typed)")
+    print("    blum hinge 450          relaxed (drops the terms that did not match)")
+    print("    luminux                 fuzzy (typo → laminex)")
+    print("    tempered glass          synonym → toughened")
+    print("    countertop              alias lookup")
+    print("    thickness:18 colour:black   attribute filter\n")
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 

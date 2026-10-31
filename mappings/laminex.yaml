@@ -1,0 +1,57 @@
+# Laminex board price list → UMR v2 (example: board category, variant axis = thickness)
+# The headers look exactly like "free-form supplier headers"; the aliases catch them
+vendor: laminex
+source_system: laminex_pricelist
+
+defaults:
+  category_code: board.melamine.mdf
+  unit: sheet
+  currency: AUD
+  country: AU
+  brand: Laminex
+  supplier: Laminex
+
+extra_headers: attributes
+
+fields:
+  - key: part_no
+    target: identifier
+    kind: supplier_code
+    required: true
+    aliases: ["Product Code", "Code", "SKU", "Item Code", "Material Code"]
+
+  - key: thickness
+    target: measure
+    measure_key: thickness_mm
+    unit: mm
+    transform: number
+    required: true
+    aliases: ["Thickness", "Thickness (mm)", "Sheet Thickness"]
+
+  - key: colour
+    target: attribute
+    aliases: ["Colour", "Color", "Decor", "Colour Name"]
+
+  - key: substrate
+    target: attribute
+    aliases: ["Substrate", "Core", "Board Type"]
+
+  - key: size
+    target: attribute
+    aliases: ["Sheet Size", "Size", "Dimensions"]
+
+  - key: finish
+    target: attribute
+    aliases: ["Finish", "Surface"]
+
+  - key: price
+    target: column
+    column: unit_cost
+    transform: number
+    aliases: ["Price", "Price per sheet", "Unit Price", "Trade Price"]
+
+name_template: "{brand} {thickness}mm {colour} {substrate}"
+family:
+  key: [colour, substrate]
+  axis: [thickness]
+  name_template: "{brand} {colour} {substrate} Melamine"

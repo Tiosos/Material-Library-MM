@@ -1,18 +1,27 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://materiallib.local/schema/material.v1.json",
-  "title": "Universal Material Record (UMR) v1",
-  "description": "材料库交换格式。一行一条 JSONL 即可批量导入；单条用于 API 请求/响应。",
+  "$id": "https://materiallib.local/schema/material.v2.json",
+  "title": "Universal Material Record (UMR) v2",
+  "description": "Material Library interchange format v2. One JSONL line per record is enough for bulk import; a single object is used for API requests/responses. Compared with v1: adds schema_version (without it the schema cannot evolve), category codes, product family, measures, external classification codes, EPD.",
   "type": "object",
-  "required": ["material_uid", "category", "name"],
+  "required": ["schema_version", "material_uid", "category_code", "name"],
   "additionalProperties": false,
   "properties": {
+    "schema_version": {
+      "const": "2",
+      "description": "Contract version. v1 did not have this field, so even add-only changes became breaking changes."
+    },
     "material_uid": {
       "type": "string",
-      "pattern": "^mat_[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$",
-      "description": "ULID 前缀 mat_。跨系统永久稳定，外部系统一律引用它。"
+      "pattern": "^mat_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "ULID, permanently stable across systems. External systems store only it."
     },
     "rev": { "type": "integer", "minimum": 1, "default": 1 },
+    "sync_seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Monotonic sync cursor. Incremental pulls use ?since=<sync_seq>, never updated_at."
+    },
     "status": {
       "type": "string",
       "enum": ["active", "draft", "archived", "superseded"],
@@ -20,37 +29,71 @@
     },
     "superseded_by": { "type": ["string", "null"] },
 
-    "category": {
+    "category_code": {
       "type": "string",
-      "enum": ["board", "edging", "glass", "timber", "benchtop", "hardware",
-               "appliance", "custom", "hire", "consumable", "generic"],
-      "description": "材料大类，对应 joineryflow 的 9 张物理表 + 2 个兜底类。"
+      "description": "Category tree node code, e.g. board.melamine.mdf. The hierarchy is defined by material_category.",
+      "examples": ["board.melamine.mdf", "hardware.hinge", "glass.toughened"]
     },
-    "product_type": {
-      "type": ["string", "null"],
-      "maxLength": 64,
-      "description": "细分类型，保留来源系统的页签/类型（Glass、Supplies、Paint、Laminate Benchtop…）。"
-    },
+    "product_type": { "type": ["string", "null"], "maxLength": 64 },
     "name": { "type": "string", "minLength": 1, "maxLength": 500 },
     "description": { "type": ["string", "null"] },
-    "brand": { "type": ["string", "null"], "maxLength": 128 },
     "model_no": { "type": ["string", "null"], "maxLength": 64 },
 
-    "default_supplier": { "type": ["string", "null"], "maxLength": 255 },
-    "default_supplier_ref": { "type": ["string", "null"], "maxLength": 255 },
-    "lead_time_days": { "type": ["integer", "null"], "minimum": 0 },
+    "brand": {
+      "type": ["object", "null"],
+      "description": "Brand entity. v1 used a bare string, so the same company split into multiple facets.",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": ["integer", "null"] },
+        "name": { "type": "string" }
+      },
+      "required": ["name"]
+    },
+    "supplier": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": ["integer", "null"] },
+        "name": { "type": "string" },
+        "ref": { "type": ["string", "null"], "description": "Supplier-side code" }
+      },
+      "required": ["name"]
+    },
+
+    "family": {
+      "type": ["object", "null"],
+      "description": "Product family. A family is not a record: 16/18/25mm are still 3 material rows that merely share the same family_id.",
+      "additionalProperties": false,
+      "properties": {
+        "family_id": { "type": "string", "pattern": "^fam_[0-9A-HJKMNP-TV-Z]{26}$" },
+        "display_name": { "type": "string" },
+        "axis_keys": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Variant axis, e.g. thickness_mm / sheet_len_mm"
+        }
+      },
+      "required": ["family_id"]
+    },
+    "variant_values": {
+      "type": "object",
+      "description": "This record's values on the variant axes, e.g. {\"thickness_mm\": 18}",
+      "additionalProperties": { "type": ["number", "string", "boolean", "null"] }
+    },
+
     "unit": {
       "type": ["string", "null"],
-      "description": "计量单位（UM）。sheet/ea/m/m2/L/roll/kg/box/pair/set",
-      "examples": ["sheet", "ea", "m", "m2", "L", "roll"]
+      "description": "Pricing unit code, values come from the unit table (mm/m2/sheet/ea/roll…)",
+      "examples": ["sheet", "m2", "ea", "roll"]
     },
     "currency": { "type": "string", "pattern": "^[A-Z]{3}$", "default": "AUD" },
-    "unit_cost": { "type": ["number", "null"], "minimum": 0, "description": "当前不含税单价（缓存值）" },
+    "unit_cost": { "type": ["number", "null"], "minimum": 0 },
     "cost_basis": {
       "type": "string",
       "enum": ["ex_gst", "inc_gst", "ex_tax", "inc_tax"],
       "default": "ex_gst"
     },
+    "lead_time_days": { "type": ["integer", "null"], "minimum": 0 },
 
     "image_url": { "type": ["string", "null"] },
     "product_url": { "type": ["string", "null"] },
@@ -69,12 +112,32 @@
 
     "attributes": {
       "type": "object",
-      "description": "类型专属字段。键由 material_profile 定义，未定义键允许但标记为 custom。",
-      "additionalProperties": true,
-      "examples": [
-        { "thickness_mm": 16, "colour": "Black", "substrate": "MDF", "sheet_len_mm": 3600, "sheet_wid_mm": 1200 },
-        { "glass_type": "Toughened", "thickness_mm": 6, "edge_finish": "Polished" }
-      ]
+      "description": "Fast path: type-specific fields; the key set is constrained by material_profile.field_schema. Numbers you have to stand behind belong in measures.",
+      "additionalProperties": true
+    },
+    "measures": {
+      "type": "array",
+      "description": "Measures with unit and source (v1 had none, so 18mm and 1.8cm were not comparable).",
+      "items": {
+        "type": "object",
+        "required": ["key"],
+        "additionalProperties": false,
+        "properties": {
+          "key": { "type": "string", "examples": ["thickness_mm", "density", "gwp_a1a3"] },
+          "value_num": { "type": ["number", "null"] },
+          "value_text": { "type": ["string", "null"] },
+          "unit": { "type": ["string", "null"], "description": "UCUM code, e.g. mm / m2 / kg/m3" },
+          "tolerance": { "type": ["number", "null"] },
+          "method": { "type": ["string", "null"] },
+          "standard": { "type": ["string", "null"] },
+          "source_system": { "type": ["string", "null"] },
+          "source_ref": { "type": ["string", "null"] },
+          "valid_from": { "type": ["string", "null"], "format": "date" },
+          "valid_to": { "type": ["string", "null"], "format": "date" },
+          "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+          "is_preferred": { "type": "boolean", "default": false }
+        }
+      }
     },
 
     "tags": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
@@ -82,23 +145,39 @@
       "type": "array",
       "items": { "type": "string" },
       "uniqueItems": true,
-      "description": "别名/俗称/错拼。缺省搜索靠它兜底（melamine→laminate，mdf→medium density fibreboard）。"
+      "description": "Aliases / colloquial names / misspellings. Forgiving search falls back on them. Data language is uniformly English."
+    },
+
+    "classifications": {
+      "type": "array",
+      "description": "External classification codes; one material can belong to several systems at the same time.",
+      "items": {
+        "type": "object",
+        "required": ["system", "code"],
+        "additionalProperties": false,
+        "properties": {
+          "system": { "type": "string", "enum": ["etim", "eclass", "unspsc", "uniclass", "gs1_gpc"] },
+          "code": { "type": "string" },
+          "label": { "type": ["string", "null"] }
+        }
+      }
     },
 
     "identifiers": {
       "type": "array",
-      "description": "跨系统编码簿。导入时按 (kind,value,source_system) 去重。",
+      "description": "Identifier. Unique on (kind,value,source_system); source_system is required (v1 allowed it to be empty, but it is part of the primary key).",
       "items": {
         "type": "object",
-        "required": ["kind", "value"],
+        "required": ["kind", "value", "source_system"],
+        "additionalProperties": false,
         "properties": {
           "kind": {
             "type": "string",
-            "enum": ["sku", "barcode", "ean", "supplier_code", "legacy_id", "catalog_code",
+            "enum": ["sku", "barcode", "ean", "gtin", "supplier_code", "legacy_id", "catalog_code",
                      "internal_ref", "slab_id", "model_no", "cv_code", "contract_ref", "other"]
           },
           "value": { "type": "string" },
-          "source_system": { "type": ["string", "null"] },
+          "source_system": { "type": "string", "default": "unknown" },
           "is_primary": { "type": "boolean", "default": false }
         }
       }
@@ -108,13 +187,14 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["unit_cost"],
+        "required": ["unit_cost", "valid_from"],
+        "additionalProperties": false,
         "properties": {
           "supplier": { "type": ["string", "null"] },
           "unit_cost": { "type": "number", "minimum": 0 },
           "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
           "cost_basis": { "type": "string", "enum": ["ex_gst", "inc_gst", "ex_tax", "inc_tax"] },
-          "qty_break": { "type": ["number", "null"] },
+          "qty_break": { "type": ["number", "null"], "minimum": 0 },
           "valid_from": { "type": "string", "format": "date" },
           "valid_to": { "type": ["string", "null"], "format": "date" },
           "source_system": { "type": ["string", "null"] }
@@ -127,26 +207,42 @@
       "items": {
         "type": "object",
         "required": ["to_uid", "kind"],
+        "additionalProperties": false,
         "properties": {
           "to_uid": { "type": "string" },
           "kind": {
             "type": "string",
             "enum": ["substitute", "accessory", "supersedes", "bundled_with", "similar"]
           },
-          "note": { "type": ["string", "null"] }
+          "note": { "type": ["string", "null"] },
+          "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 }
         }
       }
     },
 
-    "source_system": { "type": ["string", "null"], "examples": ["joineryflow", "filemaker", "manual"] },
+    "epd": {
+      "type": ["object", "null"],
+      "description": "Sustainability data placeholder (maps to material_epd). Reserved now, to be wired to openEPD / ILCD+EPD later.",
+      "additionalProperties": false,
+      "properties": {
+        "epd_ref": { "type": ["string", "null"] },
+        "program_operator": { "type": ["string", "null"] },
+        "registration_no": { "type": ["string", "null"] },
+        "gwp_a1a3": { "type": ["number", "null"] },
+        "gwp_total": { "type": ["number", "null"] },
+        "recycled_content_pct": { "type": ["number", "null"] },
+        "valid_from": { "type": ["string", "null"], "format": "date" },
+        "valid_to": { "type": ["string", "null"], "format": "date" },
+        "source_url": { "type": ["string", "null"] },
+        "format": { "type": ["string", "null"], "enum": ["openepd", "ilcd+epd", null] }
+      }
+    },
+
+    "source_system": { "type": ["string", "null"] },
     "source_id": { "type": ["string", "null"] },
-    "source_payload": { "type": ["object", "null"] },
     "imported_at": { "type": ["string", "null"], "format": "date-time" },
     "confidence": { "type": "number", "minimum": 0, "maximum": 1, "default": 1 },
-
     "created_at": { "type": "string", "format": "date-time" },
-    "updated_at": { "type": "string", "format": "date-time" },
-    "created_by": { "type": ["string", "null"] },
-    "updated_by": { "type": ["string", "null"] }
+    "updated_at": { "type": "string", "format": "date-time" }
   }
 }

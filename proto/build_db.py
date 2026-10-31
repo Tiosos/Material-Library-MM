@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""生成原型数据库 materials.sqlite + materials.jsonl（UMR 交换格式示例）。
+"""Generate the prototype database materials.sqlite + materials.jsonl (UMR exchange format sample).
 
-数据结构对齐 schema/material.sql，字段语义对齐 joineryflow catalog 9 表的真实字段
-（board.glass.timber.hardware.edging.benchtop.appliance.custom.hire）。
+The data structure follows schema/material.sql, and field semantics follow the real fields of the
+9 catalog tables in joineryflow
+(board.glass.timber.hardware.edging.benchtop.appliance.custom.hire).
 
-用法:  python3 build_db.py
+Usage:  python3 build_db.py
 """
 from __future__ import annotations
 
@@ -20,12 +21,12 @@ JSONL_PATH = HERE / "data" / "materials.jsonl"
 
 random.seed(20261027)
 
-# 固定基准时间戳：保证每次重建得到完全相同的 uid 与 jsonl，
-# 避免重新生成样例数据时产生无意义的 git diff。
+# Fixed base timestamp: guarantees exactly the same uid and jsonl on every rebuild,
+# so regenerating the sample data never produces a meaningless git diff.
 BASE_TS_MS = 1_763_000_000_000
 
 # --------------------------------------------------------------------------- #
-# ULID 生成（无依赖，够用即可；生产环境用 ulid-py）
+# ULID generation (dependency-free, good enough here; use ulid-py in production)
 # --------------------------------------------------------------------------- #
 _ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
@@ -44,8 +45,8 @@ def _ulid(ts_ms: int | None = None) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# 素材池（品牌取自 joineryflow seed 中的真实供应商：Laminex / Briggs Veneers /
-# CDK Stone / Miele / Winning Appliances / Metalform / Kennards …）
+# Material pools (brands taken from real suppliers in the joineryflow seed: Laminex /
+# Briggs Veneers / CDK Stone / Miele / Winning Appliances / Metalform / Kennards ...)
 # --------------------------------------------------------------------------- #
 BOARDS = [
     # (brand, substrate, finish, colour, thickness, sheet_len, sheet_wid, price, supplier)
@@ -178,25 +179,25 @@ CONSUMABLE = [
     ("Sika", "Sika Silicone Sealant White 300ml", "sealant", "ea", 11.4, "Bunnings Trade"),
 ]
 
-# 俗称 / 别名表：这是"缺省搜索"能兜住错拼和俗称的关键
+# Slang / alias table: this is what lets the "default search" catch misspellings and trade slang
 SYNONYM_HINTS = {
     "melamine": ["laminate board", "melamine board", "malamine", "melimine"],
-    "mdf": ["medium density fibreboard", "medium density fiberboard", "中纤板", "密度板"],
-    "plywood": ["ply", "multiplex", "胶合板"],
-    "hinge": ["hinges", "butt hinge", "concealed hinge", "铰链"],
-    "drawer runner": ["drawer slide", "runner", "glide", "drawer slide rail", "导轨"],
-    "edging": ["edge tape", "edgebanding", "abs tape", "封边"],
-    "benchtop": ["countertop", "worktop", "台面"],
-    "engineered stone": ["caesarstone", "silestone", "quartz", "人造石"],
-    "toughened": ["tempered", "safety glass", "钢化玻璃"],
-    "handle": ["pull", "knob", "拉手"],
-    "screw": ["fastener", "wood screw", "螺丝"],
-    "glue": ["adhesive", "pva", "胶水"],
+    "mdf": ["medium density fibreboard", "medium density fiberboard", "fibreboard", "density board"],
+    "plywood": ["ply", "multiplex", "plywood board"],
+    "hinge": ["hinges", "butt hinge", "concealed hinge", "cabinet hinge"],
+    "drawer runner": ["drawer slide", "runner", "glide", "drawer slide rail", "drawer rail"],
+    "edging": ["edge tape", "edgebanding", "abs tape", "edge banding"],
+    "benchtop": ["countertop", "worktop", "bench top"],
+    "engineered stone": ["caesarstone", "silestone", "quartz", "artificial stone"],
+    "toughened": ["tempered", "safety glass", "toughened glass"],
+    "handle": ["pull", "knob", "cabinet pull"],
+    "screw": ["fastener", "wood screw", "screw fixing"],
+    "glue": ["adhesive", "pva", "wood glue"],
 }
 
 
 def _hints(*parts: str) -> list[str]:
-    """按词表给一条材料补同义词。"""
+    """Add synonyms to a material according to the alias table."""
     out: list[str] = []
     blob = " ".join(p for p in parts if p).lower()
     for key, vals in SYNONYM_HINTS.items():
@@ -206,7 +207,7 @@ def _hints(*parts: str) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
-# 构造 UMR 记录
+# Build UMR records
 # --------------------------------------------------------------------------- #
 def build_records() -> list[dict]:
     recs: list[dict] = []
@@ -340,7 +341,7 @@ def build_records() -> list[dict]:
             synonyms=[sku],
             identifiers=[{"kind": "sku", "value": sku, "source_system": "joineryflow", "is_primary": True}])
 
-    # --- consumable（joineryflow 里是 Supplies/Paint 页签，无独立表） ------- #
+    # --- consumable (a Supplies/Paint tab in joineryflow, no table of its own) ---- #
     for i, (brand, name, ctype, unit, price, sup) in enumerate(CONSUMABLE):
         sku = f"CS-{brand[:3].upper()}-{100 + i}"
         add("consumable", name, brand=brand,
@@ -350,11 +351,11 @@ def build_records() -> list[dict]:
             synonyms=_hints(ctype, brand) + [sku],
             identifiers=[{"kind": "sku", "value": sku, "source_system": "joineryflow", "is_primary": True}])
 
-    # 少量归档样例，验证归档降权但不隐藏
+    # A few archived samples, to verify archived items are down-ranked but not hidden
     for r in random.sample([x for x in recs if x["category"] == "board"], 2):
         r["status"] = "archived"
 
-    # 少量替代料关系
+    # A few substitute-material relations
     by_name = {r["name"]: r for r in recs}
     subs = [("16mm White Melamine MDF", "18mm Grey Melamine MDF", "substitute"),
             ("Blumotion Soft Close Hinge 107° Clip Top", "Sensys Soft Close Hinge 110°", "substitute"),
@@ -368,7 +369,7 @@ def build_records() -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
-# 建库
+# Build the database
 # --------------------------------------------------------------------------- #
 DDL = """
 DROP TABLE IF EXISTS material;
@@ -409,19 +410,19 @@ CREATE TABLE material_identifier (
 CREATE INDEX idx_mat_cat  ON material(category, status);
 CREATE INDEX idx_mat_cost ON material(unit_cost);
 
--- FTS5：列名直接带权重，配合 bm25() 做加权排序
+-- FTS5: the column names carry their weight directly, combined with bm25() for weighted ranking
 CREATE VIRTUAL TABLE material_fts USING fts5(
     material_uid UNINDEXED,
-    ids      ,   -- A 级：全部编码
-    name     ,   -- B 级：名称
-    brand    ,   -- B 级：品牌
-    dims     ,   -- C 级：供应商/类型/单位
-    blob     ,   -- D 级：描述/属性/同义词/标签
+    ids      ,   -- A level: all codes
+    name     ,   -- B level: name
+    brand    ,   -- B level: brand
+    dims     ,   -- C level: supplier/type/unit
+    blob     ,   -- D level: description/attributes/synonyms/tags
     tokenize = 'unicode61 remove_diacritics 2'
 );
 """
 
-# bm25 权重：ids > name/brand > dims > blob
+# bm25 weights: ids > name/brand > dims > blob
 BM25_WEIGHTS = (12.0, 8.0, 5.0, 2.0, 1.0)
 
 
@@ -468,7 +469,7 @@ def main() -> None:
     con.commit()
     con.close()
 
-    # 同时导出 UMR 交换格式（一行一条）
+    # Also export the UMR exchange format (one record per line)
     JSONL_PATH.parent.mkdir(parents=True, exist_ok=True)
     with JSONL_PATH.open("w", encoding="utf-8") as f:
         for r in recs:
@@ -477,9 +478,9 @@ def main() -> None:
     cats = {}
     for r in recs:
         cats[r["category"]] = cats.get(r["category"], 0) + 1
-    print(f"OK  {len(recs)} 条材料 → {DB_PATH.name}")
+    print(f"OK  {len(recs)} materials → {DB_PATH.name}")
     print("    " + "  ".join(f"{k}={v}" for k, v in sorted(cats.items())))
-    print(f"    交换格式样例 → {JSONL_PATH.relative_to(HERE)}")
+    print(f"    exchange format sample → {JSONL_PATH.relative_to(HERE)}")
 
 
 if __name__ == "__main__":

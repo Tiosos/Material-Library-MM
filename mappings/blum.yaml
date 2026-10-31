@@ -1,0 +1,71 @@
+# Blum catalogue / export table → UMR v2
+# No need to change the headers, just change the aliases here. Match order: normalized exact → contains → approximate (0.82)
+vendor: blum
+source_system: blum_catalogue
+
+defaults:
+  category_code: hardware.hinge
+  unit: ea
+  currency: AUD
+  country: AT
+  brand: Blum
+  supplier: Blum
+
+# Unmapped columns go straight into attributes, so a supplier adding a column won't break anything
+extra_headers: attributes
+
+fields:
+  - key: part_no
+    target: identifier
+    kind: supplier_code
+    required: true
+    aliases: ["Part no.", "Part no", "Part No", "Article no.", "Article number",
+              "Artikelnummer", "Item no.", "Item number", "Art. no.", "Cat. no."]
+
+  - key: series
+    target: attribute
+    aliases: ["System", "Product system", "Serie", "System name"]
+
+  - key: hinge
+    target: attribute
+    aliases: ["Hinge", "Product type", "Type", "Produkttyp"]
+
+  - key: boss
+    target: attribute
+    aliases: ["Boss", "Fixing", "Mounting", "Befestigung"]
+
+  - key: spring
+    target: attribute
+    aliases: ["Spring", "Feder"]
+
+  - key: colour
+    target: attribute
+    aliases: ["Colour", "Color", "Finish", "Farbe"]
+
+  - key: application
+    target: attribute
+    aliases: ["Application", "Anwendung"]
+
+  - key: angle
+    target: measure
+    measure_key: opening_angle_deg
+    unit: deg
+    transform: number
+    aliases: ["Opening angle", "Öffnungswinkel", "Angle", "Opening"]
+
+  - key: page
+    target: attribute
+    aliases: ["Page", "Seite"]
+
+  - key: price
+    target: column
+    column: unit_cost
+    transform: number
+    aliases: ["Price", "Unit price", "List price", "Preis", "Trade price"]
+
+# Name and family: family = brand + hinge series + angle + application + colour, variant axis = Boss (INSERTA / Screw-on / Knock-in)
+name_template: "{hinge} {boss} hinge {colour}"
+family:
+  key: [hinge, angle, application, colour]
+  axis: [boss]
+  name_template: "{brand} {hinge} {angle} {application} {colour}"
