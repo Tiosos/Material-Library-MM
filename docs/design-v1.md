@@ -1,4 +1,4 @@
-# Material Library — universal material library · Design v1
+# Material Library — Design v1
 
 > Positioning: **material master data (MDM) that is independent of any business system**. It can be used on its own as a query site, and can also be referenced and imported by joineryflow or any other system via API / file / SDK.
 > Reference source: `github.com/Tiosos/joineryflow` (FastAPI + Postgres + Next.js; the Catalog module has 9 material tables and 14 product types).
