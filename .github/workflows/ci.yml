@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: English-only and syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: No CJK text anywhere in the repository
+        run: python scripts/check_english.py
+
+      - name: Python compiles
+        run: python -m compileall -q proto ingest scripts
+
+      - name: JSON Schema parses
+        run: python -c "import json; json.load(open('schema/material.schema.json', encoding='utf-8'))"
+
+  database:
+    name: Schema, demo and import pipeline
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ml
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      PGHOST: 127.0.0.1
+      PGUSER: postgres
+      PGDATABASE: ml
+      PGPASSWORD: postgres
+      ML_DSN: postgresql://postgres:postgres@127.0.0.1:5432/ml
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install importer dependencies
+        run: pip install --quiet pyyaml "psycopg[binary]" openpyxl
+
+      - name: Load schema, search functions and reference data
+        run: |
+          psql -v ON_ERROR_STOP=1 -q \
+            -f schema/material.sql -f schema/search.sql -f schema/seed.sql
+
+      - name: Acceptance demo (search levels, units, families, sync, write-back)
+        run: psql -v ON_ERROR_STOP=1 -q -f schema/sample_demo.sql
+
+      - name: Search levels are correct
+        run: |
+          test "$(psql -tAc "SELECT level FROM material_search('LAM-MEL-BLK-18') LIMIT 1")" = "exact"
+          test "$(psql -tAc "SELECT level FROM material_search('LAM-MEL') LIMIT 1")" = "prefix"
+          test "$(psql -tAc "SELECT level FROM material_search('laminex black') LIMIT 1")" = "and"
+          test "$(psql -tAc "SELECT level FROM material_search('laminx') LIMIT 1")" = "fuzzy"
+          test "$(psql -tAc "SELECT coalesce((SELECT level FROM material_search('b') LIMIT 1), 'none')")" = "none"
+
+      - name: Import the Blum catalogue extract
+        run: |
+          python scripts/import_file.py \
+            --file ingest/samples/blum_hinges.csv \
+            --mapping mappings/blum.yaml \
+            --dsn "$ML_DSN" --apply --json /tmp/blum.json
+          python - <<'PY'
+          import json
+          stats = json.load(open("/tmp/blum.json"))["stats"]
+          assert stats["new"] == 105, stats
+          assert stats["skipped"] == 0, stats
+          print("first import:", stats)
+          PY
+
+      - name: Re-import is idempotent
+        run: |
+          python scripts/import_file.py \
+            --file ingest/samples/blum_hinges.csv \
+            --mapping mappings/blum.yaml \
+            --dsn "$ML_DSN" --apply --json /tmp/blum2.json
+          python - <<'PY'
+          import json
+          stats = json.load(open("/tmp/blum2.json"))["stats"]
+          assert stats["new"] == 0, stats
+          print("second import:", stats)
+          PY
+
+      - name: Import a board price list with free-form headers
+        run: |
+          python scripts/import_file.py \
+            --file ingest/samples/laminex_boards.csv \
+            --mapping mappings/laminex.yaml \
+            --dsn "$ML_DSN" --apply --json /tmp/laminex.json
+          python - <<'PY'
+          import json
+          stats = json.load(open("/tmp/laminex.json"))["stats"]
+          assert stats["new"] == 4, stats
+          print("laminex import:", stats)
+          PY
+
+      - name: Family aggregation groups the three thicknesses as one product
+        run: |
+          test "$(psql -tAc "SELECT member_count FROM v_family WHERE display_name = 'Laminex Black MDF Melamine'")" = "3"
+          test "$(psql -tAc "SELECT min_thickness_mm::int || '-' || max_thickness_mm::int FROM v_family WHERE display_name = 'Laminex Black MDF Melamine'")" = "16-25"
