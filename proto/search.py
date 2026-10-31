@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""缺省搜索（Graceful Degradation Search）—— 原型实现。
+"""Graceful Degradation Search — prototype implementation.
 
-四级降级链（对应 docs/方案-v1.md 第 5 章）：
+Four-level degradation chain (corresponds to chapter 5 of docs/design-v1.md):
 
-    L0 exact   编码精确命中（identifier 直接命中）
-    L1 prefix  前缀/加权全文 AND —— 所有词都必须出现
-    L2 relaxed 自动放宽为 OR  —— 按"命中了几个词"排序（缺省搜索的核心）
-    L3 fuzzy   trigram/编辑距离容错 + 同义词扩展 + 拼写建议
+    L0 exact   exact code hit (a direct identifier hit)
+    L1 prefix  prefix / weighted full-text AND — every term must appear
+    L2 relaxed automatically relaxes to OR — ranked by "how many terms matched" (the heart of default search)
+    L3 fuzzy   trigram/edit-distance tolerance + synonym expansion + spelling suggestion
 
-任一级有结果就停，并在返回里标注用到了哪一级，界面据此提示用户。
+Stops as soon as a level returns results, and reports which level was used so the UI can tell the user.
 """
 from __future__ import annotations
 
@@ -22,18 +22,18 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 DB_PATH = HERE / "materials.sqlite"
 
-# bm25 列权重：ids > name > brand > dims > blob
+# bm25 column weights: ids > name > brand > dims > blob
 W = (12.0, 8.0, 5.0, 2.0, 1.0)
 
 LEVEL_LABELS = {
-    "exact": "编码精确命中",
-    "and": "全文匹配（所有关键词）",
-    "prefix": "前缀匹配（没打完也算）",
-    "relaxed": "已放宽（部分关键词）",
-    "filter": "按属性筛选",
-    "fuzzy": "模糊匹配（可能拼错）",
-    "none": "没有命中",
-    "browse": "浏览全部",
+    "exact": "Exact code match",
+    "and": "Full-text match (all keywords)",
+    "prefix": "Prefix match (works while typing)",
+    "relaxed": "Relaxed (some keywords)",
+    "filter": "Filtered by attribute",
+    "fuzzy": "Fuzzy match (possible typo)",
+    "none": "No match",
+    "browse": "Browsing all",
 }
 
 _PHRASE = re.compile(r'"([^"]+)"')
@@ -43,9 +43,9 @@ _ASCII = re.compile(r"^[A-Za-z0-9.\-_/]+$")
 @dataclass
 class Query:
     raw: str
-    terms: list[str] = field(default_factory=list)     # 普通词
-    phrases: list[str] = field(default_factory=list)   # "引号短语"
-    excludes: list[str] = field(default_factory=list)  # -排除词
+    terms: list[str] = field(default_factory=list)     # plain terms
+    phrases: list[str] = field(default_factory=list)   # "quoted phrases"
+    excludes: list[str] = field(default_factory=list)  # -excluded terms
     filters: dict[str, str] = field(default_factory=dict)  # key:value
 
 
@@ -68,7 +68,7 @@ def parse_query(raw: str) -> Query:
 
 
 def _esc(term: str) -> str:
-    """FTS5 词项转义：双引号包裹，内部双引号翻倍。"""
+    """FTS5 term escaping: wrap in double quotes and double any inner double quote."""
     return '"' + term.replace('"', '""') + '"'
 
 
@@ -100,7 +100,7 @@ def _fts_prefix(q: Query) -> str | None:
 
 
 # --------------------------------------------------------------------------- #
-# 主检索
+# Main search
 # --------------------------------------------------------------------------- #
 def search(raw: str, category: str = "", brand: str = "", supplier: str = "",
            status: str = "active", limit: int = 40, include_archived: bool = True) -> dict:
@@ -135,7 +135,7 @@ def search(raw: str, category: str = "", brand: str = "", supplier: str = "",
     results: list[dict] = []
     level = "browse"
 
-    # ---------------- F：只有属性过滤、没有关键词（thickness:18 colour:black） ------- #
+    # ---------------- F: attribute filters only, no keywords (thickness:18 colour:black) ------- #
     if not q.terms and not q.phrases and q.filters:
         where, ps = cat_clause()
         rows = con.execute(
@@ -145,7 +145,7 @@ def search(raw: str, category: str = "", brand: str = "", supplier: str = "",
         results = hydrate(rows)
         level = "filter"
 
-    # ---------------- L0：编码精确命中 ---------------- #
+    # ---------------- L0: exact code hit ---------------- #
     if q.terms or q.phrases:
         probe = (q.phrases + q.terms)[0]
         where, ps = cat_clause()
@@ -160,7 +160,7 @@ def search(raw: str, category: str = "", brand: str = "", supplier: str = "",
             results = hydrate(rows)
             level = "exact"
 
-    # ---------------- L1：加权全文 AND ---------------- #
+    # ---------------- L1: weighted full-text AND ---------------- #
     if not results:
         match = _fts_and(q)
         if match:
@@ -178,7 +178,7 @@ def search(raw: str, category: str = "", brand: str = "", supplier: str = "",
                 results = hydrate(rows)
                 level = "and"
 
-    # ---------------- L1.5：前缀放宽（懒得打完） ---------------- #
+    # ---------------- L1.5: prefix relaxation (half-typed) ---------------- #
     if not results:
         match = _fts_prefix(q)
         if match:
@@ -196,7 +196,7 @@ def search(raw: str, category: str = "", brand: str = "", supplier: str = "",
                 results = hydrate(rows)
                 level = "and"
 
-    # ---------------- L2：逐级丢词（保精度优先：先丢掉没命中的词再 AND） ---------------- #
+    # ---------------- L2: drop terms one level at a time (precision first: drop the terms that did not match, then AND) ---------------- #
     if not results and len(q.terms) > 1:
         for drop in range(1, len(q.terms)):
             sub = Query(raw=q.raw, terms=q.terms[:-drop], phrases=q.phrases, excludes=q.excludes)
@@ -218,7 +218,7 @@ def search(raw: str, category: str = "", brand: str = "", supplier: str = "",
                 level = "relaxed"
                 break
 
-    # ---------------- L2.5：放宽为 OR（扩召回兜底） ---------------- #
+    # ---------------- L2.5: relax to OR (recall safety net) ---------------- #
     if not results:
         match = _fts_or(q)
         if match and len(q.terms) + len(q.phrases) > 1:
@@ -236,11 +236,11 @@ def search(raw: str, category: str = "", brand: str = "", supplier: str = "",
                 results = hydrate(rows)
                 level = "relaxed"
 
-    # ---------------- L3：模糊容错（词级相似度，不是整串比） ---------------- #
+    # ---------------- L3: fuzzy tolerance (word-level similarity, not whole-string comparison) ---------------- #
     if not results and (q.terms or q.phrases):
         probe = (q.terms + q.phrases)[0].lower()
         where, ps = cat_clause()
-        # (a) 子串：兜住中文（FTS5 unicode61 不切中文词）
+        # (a) substring: catches untokenised scripts (FTS5 unicode61 does not split CJK words)
         rows = con.execute(
             f"""SELECT m.*, 0.5 AS score FROM material m
                 WHERE (lower(m.name) LIKE '%' || lower(?) || '%'
@@ -253,9 +253,9 @@ def search(raw: str, category: str = "", brand: str = "", supplier: str = "",
             results = hydrate(rows)
             level = "fuzzy"
         else:
-            # (b) 词级编辑距离：拿 probe 跟每个候选的「词袋」比，而不是跟整句比
-            #     "luminux" vs 整名 "16mm White Melamine MDF" 相似度极低，
-            #     vs 单词 "Laminex" 才有意义
+            # (b) word-level edit distance: compare probe with each candidate's "word bag", not with the whole string
+            #     "luminux" vs the full name "16mm White Melamine MDF" scores very low,
+            #     vs the single word "Laminex" it is meaningful
             allrows = con.execute(f"SELECT * FROM material m WHERE {where}", ps).fetchall()
             scored = []
             for r in allrows:
@@ -274,7 +274,7 @@ def search(raw: str, category: str = "", brand: str = "", supplier: str = "",
                 results = scored[:limit]
                 level = "fuzzy"
 
-    # ---------------- 空查询：浏览；有查询但全落空：明确报"没有命中" ---------------- #
+    # ---------------- Empty query: browse; query with no hits: say "no match" outright ---------------- #
     if not results and not q.raw:
         where, ps = cat_clause()
         rows = con.execute(
@@ -286,7 +286,7 @@ def search(raw: str, category: str = "", brand: str = "", supplier: str = "",
     elif not results:
         level = "none"
 
-    # ---------------- 属性过滤（thickness:18 / colour:black） ---------------- #
+    # ---------------- Attribute filtering (thickness:18 / colour:black) ---------------- #
     if q.filters:
         kept = []
         for r in results:
@@ -304,10 +304,11 @@ def search(raw: str, category: str = "", brand: str = "", supplier: str = "",
                     break
             if ok:
                 kept.append(r)
-        # 注意：用了属性过滤就按过滤结果走，哪怕为空——否则会把未过滤的列表误当成结果
+        # Note: once attribute filtering is used, follow the filtered result even if empty —
+        # otherwise the unfiltered list would be mistaken for the result
         results = kept
 
-    # ---------------- 统一反序列化（模糊分支走的是纯 dict） ---------------- #
+    # ---------------- Unified deserialisation (the fuzzy branch works on plain dicts) ---------------- #
     for r in results:
         for k in ("attributes", "synonyms", "relations", "prices"):
             if isinstance(r.get(k), str):
@@ -315,11 +316,11 @@ def search(raw: str, category: str = "", brand: str = "", supplier: str = "",
         if isinstance(r.get("tags"), str):
             r["tags"] = [t for t in r["tags"].split(",") if t]
 
-    # ---------------- 排序加权：相关性 + 常用度 - 归档惩罚 ---------------- #
+    # ---------------- Ranking weights: relevance + popularity - archived penalty ---------------- #
     maxref = max([r["ref_count"] for r in results] or [1]) or 1
     maxscore = max([r.get("score") or 0 for r in results] or [1]) or 1
     for r in results:
-        # 模糊分支的 score 本身就是 0~1 的相似度；FTS 分支是 bm25，做批内归一化
+        # The fuzzy branch score is already a 0~1 similarity; the FTS branch is bm25, normalised within the batch
         rel = (r.get("score") or 0) if level == "fuzzy" else (r.get("score") or 0) / maxscore
         rel = min(1.0, rel)
         pop = (r["ref_count"] or 0) / maxref
@@ -327,7 +328,7 @@ def search(raw: str, category: str = "", brand: str = "", supplier: str = "",
         r["final_score"] = round(max(0.0, 0.70 * rel + 0.30 * pop - pen), 4)
     results.sort(key=lambda r: -r["final_score"])
 
-    # ---------------- Facet ---------------- #
+    # ---------------- Facets ---------------- #
     facets = {}
     for key in ("category", "brand", "default_supplier", "unit"):
         facets[key] = {
@@ -337,7 +338,7 @@ def search(raw: str, category: str = "", brand: str = "", supplier: str = "",
             ).fetchall() if k
         }
 
-    # ---------------- 拼写建议（用词袋，而不是拿整句比） ---------------- #
+    # ---------------- Spelling suggestion (use the word bag, not the whole string) ---------------- #
     suggestion = None
     if level in ("fuzzy", "none") and q.raw:
         freq: dict[str, int] = {}
@@ -346,7 +347,7 @@ def search(raw: str, category: str = "", brand: str = "", supplier: str = "",
                 freq[t] = freq.get(t, 0) + 1
         cands = difflib.get_close_matches(q.raw.lower(), list(freq), n=6, cutoff=0.60)
         cands = [c for c in cands if c != q.raw.lower()]
-        # 优先推荐"库里材料多的那个词"，避免把拼写纠正到一条冷门记录上
+        # Prefer the word with more materials behind it, so a typo is not corrected to an obscure record
         if cands:
             suggestion = max(cands, key=lambda c: (freq[c], difflib.SequenceMatcher(
                 None, q.raw.lower(), c).ratio()))
@@ -372,7 +373,7 @@ _WORD = re.compile(r"[^a-z0-9\u4e00-\u9fff]+")
 
 
 def _wordbag(row: sqlite3.Row) -> list[str]:
-    """一条材料的可比对词袋：名称/品牌/类型/分类/同义词各自拆词。"""
+    """The comparable word bag for one material: name/brand/type/category/synonyms, each split into words."""
     toks: set[str] = set()
     for col in ("name", "brand", "product_type", "category", "default_supplier"):
         val = row[col] if col in row.keys() else None
@@ -415,10 +416,10 @@ def get_one(uid: str) -> dict | None:
 
 if __name__ == "__main__":
     import sys
-    for term in (sys.argv[1:] or ["blum hinge", "blu", "16mm black", "luminux", "mdf", "台面"]):
+    for term in (sys.argv[1:] or ["blum hinge", "blu", "16mm black", "luminux", "mdf", "countertop"]):
         r = search(term)
-        print(f"\n=== {term!r}  →  {r['level']} ({r['level_label']})  {r['total']} 条")
+        print(f"\n=== {term!r}  →  {r['level']} ({r['level_label']})  {r['total']} results")
         for x in r["results"][:5]:
             print(f"   {x['final_score']:.3f}  [{x['category']:10}] {x['name'][:52]:54} ${x['unit_cost']}")
         if r["suggestion"]:
-            print(f"   你是不是要找: {r['suggestion']}")
+            print(f"   Did you mean: {r['suggestion']}")

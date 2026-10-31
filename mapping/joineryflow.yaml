@@ -1,32 +1,32 @@
 # =============================================================================
-# joineryflow Catalog → UMR 映射规范  v1
+# joineryflow Catalog → UMR mapping spec  v1
 #
-# 上游事实来源（写本文件时从 GitHub Tiosos/joineryflow 读取）：
+# Upstream source of truth (read from GitHub Tiosos/joineryflow when writing this file):
 #   apps/api/app/catalog/queries.py  :: REGISTRY / *_FIELDS_TUPLE / ENRICHMENT_SELECT
 #   db/alembic/versions/0007,0017,0067..0079
 #   apps/api/app/catalog/routes.py   :: /catalog/{slug}, /catalog/by-type,
 #                                       /catalog/product-types, /catalog/{slug}/{id}/purchase-history
-#   seed/hartwood_joinery.py         :: 真实材料样例
+#   seed/hartwood_joinery.py         :: real material samples
 #
-# 上游不变式（必须遵守，否则映射会错）：
-#   * 9 张物理表、绝不合并 → 在 UMR 里合并成 1 张 core 表，靠 category 区分
-#   * 公共列：description / notes / default_supplier(_id) / default_lead_time_days
+# Upstream invariants (must be respected, otherwise the mapping will be wrong):
+#   * 9 physical tables, never merged → merge into 1 core table in UMR, distinguished by category
+#   * Common columns: description / notes / default_supplier(_id) / default_lead_time_days
 #     / unit_cost / product_type / synonyms / archived_at,archived_by
-#   * 单价规则：unit_cost 为空时回落到各表自己的成本列
+#   * Unit price rule: when unit_cost is empty, fall back to each table's own cost column
 #       board → cost_per_sheet | hardware → cost | benchtop → cost_per_slab
-#       edging/glass/timber/appliance → cost_per_unit | equipment_hire → 无
-#   * 只软归档（archived_at），不硬删
-#   * 全部按 workspace_id 隔离，跨 workspace 一律 404
+#       edging/glass/timber/appliance → cost_per_unit | equipment_hire → none
+#   * Soft archive only (archived_at), never hard delete
+#   * Everything is isolated by workspace_id; anything across workspaces is always 404
 # =============================================================================
 
 version: 1
 source:
   system: joineryflow
-  connection: postgres  # 直连读；或由 joineryflow 导出 /catalog/by-type 快照
-  workspace_scope: 每个 workspace 导出为独立的 library_namespace，互不混用
+  connection: postgres  # direct connection read; or a /catalog/by-type snapshot exported by joineryflow
+  workspace_scope: each workspace is exported as an independent library_namespace, never mixed
 
 # -----------------------------------------------------------------------------
-# 1. 表 → category
+# 1. Tables → category
 # -----------------------------------------------------------------------------
 tables:
   board_materials:
@@ -65,9 +65,9 @@ tables:
     category: hire
     pk: hire_id
     endpoint: /catalog/equipment-hire
-    note: 需要 project_id，导出时把 project_id 放入 attributes，hire 记录按项目隔离
+    note: requires project_id; on export put project_id into attributes, hire records are isolated by project
 
-# joineryflow 里"只有页签没有独立表"的类型，导入时保持页签语义不丢：
+# Types in joineryflow that "have only a tab and no separate table", keep the tab semantics on import:
 tab_only_types: [Delivery, Supplies, Paint, TG Solid, Laminate, Contractor Manufacturing]
 tab_only_mapping:
   Laminate:                 { table: board_materials,  force_product_type: Laminate }
@@ -78,34 +78,34 @@ tab_only_mapping:
   Contractor Manufacturing: { table: custom_made,        force_product_type: Contractor Manufacturing }
 
 # -----------------------------------------------------------------------------
-# 2. 通用列映射（9 张表共用）
+# 2. Common column mapping (shared by the 9 tables)
 # -----------------------------------------------------------------------------
 common:
-  material_uid:     "mat_<ulid>"          # 首次导入生成，之后固定；同时写入 identifiers.legacy_id
-  category:         "<上表 category>"
-  product_type:     "product_type"        # varchar(64)，为空时用 tab_only 的 force_product_type
-  name:             "description"         # joineryflow 没有独立的 name 列，用 description
+  material_uid:     "mat_<ulid>"          # generated on first import, fixed afterwards; also written to identifiers.legacy_id
+  category:         "<category from the table above>"
+  product_type:     "product_type"        # varchar(64), use the tab_only force_product_type when empty
+  name:             "description"         # joineryflow has no separate name column, use description
   description:      "description"
-  brand:            "brand | manufacturer | laminate_supplier"   # 按表取第一个非空
+  brand:            "brand | manufacturer | laminate_supplier"   # take the first non-null per table
   lead_time_days:   "default_lead_time_days"
   unit:             "um"
   currency:         "'AUD'"
   cost_basis:       "'ex_gst'"
-  unit_cost:        "COALESCE(unit_cost, <own_cost_column>)"     # 见 own_cost_column
-  default_supplier: "default_supplier | supplier | vendor"       # 按表取第一个非空
-  default_supplier_ref: "default_supplier_id → vendors.name（同 workspace 校验）"
+  unit_cost:        "COALESCE(unit_cost, <own_cost_column>)"     # see own_cost_column
+  default_supplier: "default_supplier | supplier | vendor"       # take the first non-null per table
+  default_supplier_ref: "default_supplier_id → vendors.name (same-workspace check)"
   product_url:      "product_website"
   image_url:        "image_blob IS NOT NULL → /catalog/{slug}/{id}/image"
   synonyms:         "synonyms (text[])"
   status:           "archived_at IS NOT NULL → 'archived' ELSE 'active'"
   source_system:    "'joineryflow'"
   source_id:        "material_id | hire_id"
-  source_payload:   "整行 to_jsonb(row)（不含 image_blob）"
+  source_payload:   "whole row to_jsonb(row) (excluding image_blob)"
   imported_at:      "now()"
-  confidence:       "1.00（手工导入 0.80，CV 匹配导入 0.60）"
+  confidence:       "1.00 (manual import 0.80, CV-matched import 0.60)"
 
 # -----------------------------------------------------------------------------
-# 3. 各表专属字段 → attributes（键名保持不变，便于双向回写）
+# 3. Per-table specific fields → attributes (key names stay unchanged, to make two-way write-back easy)
 # -----------------------------------------------------------------------------
 attributes:
   board:
@@ -168,7 +168,7 @@ attributes:
     cable_entry:       cable_entry
     shaped:            shaped
     grain_locked:      grain_locked
-    slab_id:           slab_id          # 同时登记为 identifier(kind=slab_id)
+    slab_id:           slab_id          # also registered as identifier(kind=slab_id)
     own_cost_column:   cost_per_slab
 
   hardware:
@@ -177,23 +177,23 @@ attributes:
     own_cost_column: cost
 
   appliance:
-    model_no:        model_number       # 同时登记为 identifier(kind=model_no)
+    model_no:        model_number       # also registered as identifier(kind=model_no)
     own_cost_column: cost_per_unit
 
   custom:
-    internal_ref:    internal_ref       # 同时登记为 identifier(kind=internal_ref)
+    internal_ref:    internal_ref       # also registered as identifier(kind=internal_ref)
     vendor:          vendor             # → default_supplier
     own_cost_column: cost
 
   hire:
-    contract_ref:    contract_ref       # 同时登记为 identifier(kind=contract_ref)
+    contract_ref:    contract_ref       # also registered as identifier(kind=contract_ref)
     project_id:      project_id
     rate:            rate
     rate_unit:       rate_unit
-    own_cost_column: null               # equipment_hire 没有成本列
+    own_cost_column: null               # equipment_hire has no cost column
 
 # -----------------------------------------------------------------------------
-# 4. identifiers：把散落各表的"码"统一登记
+# 4. identifiers: register the "codes" scattered across tables in one place
 # -----------------------------------------------------------------------------
 identifiers:
   - kind: sku           value: sku            source_system: joineryflow   is_primary: true
@@ -202,15 +202,15 @@ identifiers:
   - kind: model_no      value: model_number   source_system: joineryflow   # appliance
   - kind: contract_ref  value: contract_ref   source_system: joineryflow   # hire
   - kind: legacy_id     value: material_id|hire_id  source_system: joineryflow
-  - kind: cv_code       value: cv_material_mapping.cv_code  source_system: cv  # 供应商 CV 码
+  - kind: cv_code       value: cv_material_mapping.cv_code  source_system: cv  # supplier CV code
 
 # -----------------------------------------------------------------------------
-# 5. 回填（write-back）：UMR 是主数据，改完要能回到 joineryflow
-#    原则：只回写 joineryflow 本来就有的字段，不改它的表结构
+# 5. Write-back: UMR is the master data, changes must be able to go back to joineryflow
+#    Principle: only write back fields joineryflow already has; do not change its table structure
 # -----------------------------------------------------------------------------
 write_back:
   endpoint: "PATCH /catalog/{slug}/{mid}"
-  guarded_by: "catalog:write + workspace 校验"
+  guarded_by: "catalog:write + workspace check"
   fields:
     description:      name
     product_type:     product_type
@@ -219,29 +219,29 @@ write_back:
     default_lead_time_days: lead_time_days
     product_website:  product_url
     synonyms:         synonyms
-  attributes: "展平回各表的同名列（board.colour ← attributes.colour …）"
+  attributes: "flatten back into the same-named columns of each table (board.colour ← attributes.colour …)"
   forbidden:
-    - 不回写 archived_at（归档是 joineryflow 的业务动作）
-    - 不改 quote 上已快照的价格（会改动投标金额）
-    - 不删除行，只软归档
+    - Do not write back archived_at (archiving is a joineryflow business action)
+    - Do not change prices already snapshotted on a quote (it would alter the tender amount)
+    - Do not delete rows, only soft-archive
 
 # -----------------------------------------------------------------------------
-# 6. 增量同步
+# 6. Incremental sync
 # -----------------------------------------------------------------------------
 sync:
-  pull: "GET /catalog/by-type?q=&updated_since=<ts>  （joineryflow 需补 updated_at 列；
-        退化为全量比对 source_payload 的哈希）"
-  push: "PUT /v1/materials/{uid} 幂等；material_uid 已存在则按 rev +1"
-  conflict: "updated_at 新者胜；冲突写 material_conflict 表交人工裁决，不静默覆盖"
-  batch: "1000 行/批，单批事务，失败整批回滚（沿用 joineryflow 的 all-or-nothing 惯例）"
+  pull: "GET /catalog/by-type?q=&updated_since=<ts>  (joineryflow needs an updated_at column;
+        degrade to a full comparison of source_payload hashes)"
+  push: "PUT /v1/materials/{uid} idempotent; if material_uid already exists, rev +1"
+  conflict: "the newer updated_at wins; conflicts go to the material_conflict table for human adjudication, never silently overwritten"
+  batch: "1000 rows per batch, one transaction per batch, the whole batch rolls back on failure (following joineryflow's all-or-nothing convention)"
 
 # -----------------------------------------------------------------------------
-# 7. 导出格式（给其他系统消费）
+# 7. Export formats (for other systems to consume)
 # -----------------------------------------------------------------------------
 export:
-  - format: jsonl        file: materials.jsonl      note: 一行一条 UMR，流式导入
-  - format: csv          file: materials.csv        note: 扁平列 + attributes 展开为 attr_* 列
-  - format: parquet      file: materials.parquet    note: 分析/BI
-  - format: json-schema  file: material.schema.json note: 契约，供消费方生成客户端
-  - format: openapi      file: openapi.yaml         note: 查询与写入接口
-  - format: sql          file: material.sql         note: 消费方可直接建同构表
+  - format: jsonl        file: materials.jsonl      note: one UMR per line, streaming import
+  - format: csv          file: materials.csv        note: flat columns + attributes expanded into attr_* columns
+  - format: parquet      file: materials.parquet    note: analytics / BI
+  - format: json-schema  file: material.schema.json note: contract for consumers to generate clients
+  - format: openapi      file: openapi.yaml         note: query and write API
+  - format: sql          file: material.sql         note: consumers can create an isomorphic table directly

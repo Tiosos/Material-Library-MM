@@ -1,0 +1,5 @@
+# Import pipeline dependencies (Python 3.11+)
+pymupdf>=1.24      # PDF catalogue extraction
+psycopg[binary]>=3.1
+PyYAML>=6.0
+openpyxl>=3.1      # XLSX reading
