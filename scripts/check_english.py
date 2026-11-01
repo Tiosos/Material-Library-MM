@@ -16,13 +16,18 @@ from pathlib import Path
 CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 TEXT_SUFFIXES = {".md", ".sql", ".py", ".json", ".jsonl", ".yaml", ".yml", ".txt", ".html", ".css", ".js", ".gitignore", ""}
 
+# Local-only directories that never hold tracked content. They are skipped by the fallback
+# walk below, so a machine without git or without working pipes still gets a useful answer
+# instead of 1400 hits inside a vendored package.
+SKIP_DIRS = {".git", ".pylibs", ".pg", ".pgdata", ".tmp", ".venv", "venv", "__pycache__", "node_modules"}
+
 
 def tracked_files(root: Path) -> list[Path]:
     try:
         out = subprocess.run(["git", "ls-files", "-z"], cwd=root, capture_output=True, check=True).stdout
         return [root / p for p in out.decode("utf-8").split("\0") if p]
     except Exception:
-        return [p for p in root.rglob("*") if p.is_file() and ".git" not in p.parts]
+        return [p for p in root.rglob("*") if p.is_file() and not SKIP_DIRS.intersection(p.relative_to(root).parts)]
 
 
 def main() -> int:

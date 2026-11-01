@@ -210,6 +210,10 @@
         "additionalProperties": false,
         "properties": {
           "to_uid": { "type": "string" },
+          "to_name": {
+            "type": ["string", "null"],
+            "description": "Read-side convenience: the other material's name, filled by material_detail() so a client can render substitutes without a second call. Ignored on write."
+          },
           "kind": {
             "type": "string",
             "enum": ["substitute", "accessory", "supersedes", "bundled_with", "similar"]

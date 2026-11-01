@@ -1,0 +1,307 @@
+# ---------------------------------------------------------------------------
+# eval/golden.yaml - the search quality contract
+# ---------------------------------------------------------------------------
+# Consumed by scripts/eval_search.py. One file holds both datasets so the thresholds and the
+# case format cannot drift apart:
+#
+#   fixture  eval/fixture.sql loaded into an otherwise empty catalogue (39 rows, deterministic)
+#   blum     the two sample imports loaded (109 rows: 105 Blum hinges, 4 Laminex boards)
+#
+# A case asserts one or more of:
+#   expect_level     the search tier that must answer it (exact, prefix, and, relaxed, fuzzy,
+#                    browse, none). Always checked; a wrong tier is a hard failure.
+#   expect_total     the exact row count that must be reported (use 0 for a negative case)
+#   expect_min_hits  a lower bound on the row count, for cases where the exact number is noise
+#   expect_any       uids that count as relevant. MRR@10 = mean of 1/rank of the first relevant
+#                    row; hit@1 counts a case when the top row is in expect_any
+#   expect_top1      the single uid that must rank first (only where the ordering is a contract)
+#
+# split: tuning cases document behaviour and are reported but not enforced against thresholds;
+# holdout cases are the ones the pass/fail thresholds run on. The split is part of the design:
+# a tuning case may be rewritten when the tiering changes, a holdout case may not be silently
+# edited to make a run green - if a holdout case fails, the search changed and that is the finding.
+# ---------------------------------------------------------------------------
+
+version: 1
+
+thresholds:
+  # Applied to holdout cases only (eval_search.py exits 1 when any of these miss).
+  mrr_at_10: 0.75
+  hit_at_1: 0.60
+  # Share of positive queries that may return nothing. Negative cases (expect_total: 0) are
+  # excluded from this ratio - returning nothing for them is the contract, not a failure.
+  zero_result_max: 0.10
+  # No tolerance: a case whose expect_level is wrong fails the run regardless of rank metrics.
+  level_accuracy: 1.0
+
+datasets:
+
+  fixture:
+    description: >
+      eval/fixture.sql: 39 rows, five search levels, thickness stored in mm and in cm, opening
+      angle in deg, two count units, one family with live, archived and superseded variants.
+    cases:
+
+      # ---- exact: a whole identifier value, case-insensitive --------------------------------
+      - id: fx-exact-identifier
+        split: holdout
+        q: FX-LAM-MEL-BLK-18
+        expect_level: exact
+        expect_total: 1
+        expect_top1: mat_FX000000000000000000BRD018
+        note: The whole supplier code resolves to one board at score 1.0.
+
+      # ---- prefix: identifier prefix, single token, at least four characters ----------------
+      - id: fx-prefix-identifier
+        split: holdout
+        q: FX-LAM-MEL
+        expect_level: prefix
+        expect_min_hits: 3
+        expect_any: [mat_FX000000000000000000BRD016, mat_FX000000000000000000BRD018, mat_FX000000000000000000BRD025]
+        note: Three boards share the prefix; the archived and superseded boards must not appear.
+
+      - id: fx-prefix-hinge-sku
+        split: tuning
+        q: FX-BLM-71B
+        expect_level: prefix
+        expect_min_hits: 5
+        note: Accessories carry the same 71B prefix, so the prefix tier must not assume boards.
+
+      # ---- and: every word must match ------------------------------------------------------
+      - id: fx-and-brand-colour
+        split: tuning
+        q: laminex black
+        expect_level: and
+        expect_min_hits: 3
+        expect_any: [mat_FX000000000000000000BRD016, mat_FX000000000000000000BRD018, mat_FX000000000000000000BRD025]
+
+      - id: fx-and-measure-in-name
+        split: holdout
+        q: laminex 18mm
+        expect_level: and
+        expect_total: 1
+        expect_top1: mat_FX000000000000000000BRD018
+        note: 18mm appears in the name and in the indexed measure, so the AND tier finds one board.
+
+      - id: fx-and-hinge-angle
+        split: tuning
+        q: hinge 155
+        expect_level: and
+        expect_total: 1
+        expect_top1: mat_FX000000000000000000HNG155
+
+      - id: fx-and-brand-colour-model
+        split: holdout
+        q: polytec grey
+        expect_level: and
+        expect_total: 1
+        expect_top1: mat_FX000000000000000000PTC018
+        note: Distinct from the white variant of the same Polytec board.
+
+      # ---- relaxed: some word matches ------------------------------------------------------
+      - id: fx-relaxed-mixed
+        split: tuning
+        q: laminex hinge
+        expect_level: relaxed
+        expect_min_hits: 12
+        note: No row contains both words; the OR tier must still return boards and hinges.
+
+      # ---- fuzzy: one mistyped word --------------------------------------------------------
+      - id: fx-fuzzy-typo
+        split: holdout
+        q: laminx
+        expect_level: fuzzy
+        expect_min_hits: 3
+        expect_any: [mat_FX000000000000000000BRD016, mat_FX000000000000000000BRD018, mat_FX000000000000000000BRD025]
+        note: A misspelt brand must still reach the boards.
+
+      # ---- browse: no query, filters only --------------------------------------------------
+      - id: fx-browse-attribute
+        split: tuning
+        attrs: {colour: Black}
+        expect_level: browse
+        expect_total: 3
+        expect_any: [mat_FX000000000000000000BRD016, mat_FX000000000000000000BRD018, mat_FX000000000000000000BRD025]
+
+      - id: fx-browse-default
+        split: tuning
+        expect_level: browse
+        expect_min_hits: 37
+        note: An empty request lists every live row (37 active of 39 stored).
+
+      # ---- measures: unit-aware windows ----------------------------------------------------
+      - id: fx-measure-mm-window
+        split: tuning
+        measures:
+          thickness_mm: {gte: 17.5, lte: 18.5, unit: mm}
+        expect_level: browse
+        expect_total: 3
+        expect_any: [mat_FX000000000000000000BRD018, mat_FX000000000000000000PTC018, mat_FX000000000000000000PTC019]
+
+      - id: fx-measure-cm-window
+        split: holdout
+        measures:
+          thickness_mm: {gte: 1.75, lte: 1.85, unit: cm}
+        expect_level: browse
+        expect_total: 3
+        expect_any: [mat_FX000000000000000000BRD018, mat_FX000000000000000000PTC018, mat_FX000000000000000000PTC019]
+        note: >
+          The same window asked in centimetres. One board stores thickness as 1.8 cm, the other
+          two as 18.0 mm, so a filter that ignored units would return one row here and three
+          above - this case is why fixture.sql stores one board in cm.
+
+      - id: fx-measure-angle-window
+        split: holdout
+        measures:
+          opening_angle_deg: {lte: 115, unit: deg}
+        expect_level: browse
+        expect_total: 2
+        expect_any: [mat_FX000000000000000000HNG110, mat_FX000000000000000000HTN110]
+        note: Two brands of 110 degree hinge; the 120, 155, 165 and 170 degree ones are out.
+
+      - id: fx-measure-with-query
+        split: tuning
+        q: laminex
+        measures:
+          thickness_mm: {gte: 17.5, lte: 18.5, unit: mm}
+        expect_level: and
+        expect_total: 1
+        expect_top1: mat_FX000000000000000000BRD018
+        note: A query and a measure filter must narrow together, not replace each other.
+
+      # ---- filters on catalogue columns ----------------------------------------------------
+      - id: fx-category-filter
+        split: tuning
+        q: hinge
+        category: hardware.hinge
+        expect_level: and
+        expect_min_hits: 7
+        note: 6 hinges plus the box-of-50 accessory share the category; plates and caps do not.
+
+      # ---- negative: nothing may match -----------------------------------------------------
+      - id: fx-none-gibberish
+        split: holdout
+        q: zzzz
+        expect_level: none
+        expect_total: 0
+        note: The tiers must all report no rows rather than fall back to a fuzzy sweep.
+
+      - id: fx-none-wrong-dimension
+        split: holdout
+        measures:
+          thickness_mm: {gte: 17.5, lte: 18.5, unit: kg}
+        expect_level: none
+        expect_total: 0
+        note: >
+          A thickness window asked in kilograms is a well-formed request for a dimension that no
+          measure has; it must return nothing, not convert silently.
+
+  blum:
+    description: >
+      Both sample imports (ingest/samples/blum_hinges.csv and laminex_boards.csv), 109 rows, real
+      part numbers and real product names. Loaded after the fixture only if the fixture is not
+      wanted; the two datasets are evaluated against separate databases.
+    cases:
+
+      - id: bl-exact-part-71B3590
+        split: holdout
+        q: 71B3590
+        expect_level: exact
+        expect_total: 1
+        expect_top1: mat_0GT4GJ6SKMBAS3RZJ0PQ74T01P
+
+      - id: bl-exact-part-94M3603
+        split: tuning
+        q: 94M3603
+        expect_level: exact
+        expect_total: 1
+        expect_top1: mat_7YQB2Y6W0ASSVY9S371AQJ97NQ
+
+      - id: bl-exact-part-90M2503BP
+        split: holdout
+        q: 90M2503.BP
+        expect_level: exact
+        expect_total: 1
+        expect_top1: mat_1WE7WJ0H129ND9RYXB48825BZ6
+        note: A part number with a dot in it must still match as a whole identifier.
+
+      - id: bl-exact-part-71T9750
+        split: tuning
+        q: 71T9750
+        expect_level: exact
+        expect_total: 1
+        expect_top1: mat_30837PBBW6V6K5VHBZPGYVN2Y9
+
+      # Three more part numbers, chosen from the sample CSV by part number rather than by result:
+      # the blum holdout otherwise scored on two cases, which is too coarse for a 0.60 hit@1 bar.
+      - id: bl-exact-part-71B9650
+        split: holdout
+        q: 71B9650
+        expect_level: exact
+        expect_total: 1
+        expect_top1: mat_6PRHJKGTVZJZBBZRF5EWQQQ448
+
+      - id: bl-exact-part-71B9680
+        split: holdout
+        q: 71B9680
+        expect_level: exact
+        expect_total: 1
+        expect_top1: mat_0RP367TV6YBK35ESS1HZYPX37X
+
+      - id: bl-exact-part-71T3690
+        split: holdout
+        q: 71T3690
+        expect_level: exact
+        expect_total: 1
+        expect_top1: mat_04V9KXY06DBV621H0AW6ZXJVG7
+
+      - id: bl-prefix-part-71B3
+        split: tuning
+        q: 71B3
+        expect_level: prefix
+        expect_min_hits: 9
+        note: Nine part numbers start with 71B3; the prefix tier must return all of them.
+
+      - id: bl-and-clip-blumotion
+        split: holdout
+        q: clip top blumotion
+        expect_level: and
+        expect_min_hits: 100
+        note: Every BLUMOTION CLIP top hinge, whatever the boss and colour variants.
+
+      - id: bl-and-blumotion-110
+        split: holdout
+        q: blumotion 110
+        expect_level: and
+        expect_min_hits: 20
+        note: The angle is an indexed measure value, not only part of the name.
+
+      - id: bl-and-category-hinge
+        split: tuning
+        q: hinge
+        category: hardware.hinge
+        expect_level: and
+        expect_min_hits: 105
+
+      - id: bl-fuzzy-blumotion
+        split: tuning
+        q: blumotin
+        expect_level: fuzzy
+        expect_min_hits: 50
+        note: The typo tier has to carry a dropped letter across a whole product family.
+
+      - id: bl-none-unknown-part
+        split: holdout
+        q: 71Z9999
+        expect_level: none
+        expect_total: 0
+        note: No part number looks like this; a fuzzy sweep over identifiers would invent hits.
+
+      - id: bl-none-brand-not-imported
+        split: holdout
+        q: hettich
+        expect_level: none
+        expect_total: 0
+        note: >
+          Hettich is a real hinge brand that this sample catalogue does not contain. The harness
+          must let a wrong guess end in an empty result rather than a near-miss list.

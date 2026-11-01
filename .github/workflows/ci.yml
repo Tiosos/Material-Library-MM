@@ -26,7 +26,7 @@ jobs:
         run: python scripts/check_english.py
 
       - name: Python compiles
-        run: python -m compileall -q proto ingest scripts
+        run: python -m compileall -q proto ingest scripts api tests
 
       - name: JSON Schema parses
         run: python -c "import json; json.load(open('schema/material.schema.json', encoding='utf-8'))"
@@ -123,3 +123,65 @@ jobs:
         run: |
           test "$(psql -tAc "SELECT member_count FROM v_family WHERE display_name = 'Laminex Black MDF Melamine'")" = "3"
           test "$(psql -tAc "SELECT min_thickness_mm::int || '-' || max_thickness_mm::int FROM v_family WHERE display_name = 'Laminex Black MDF Melamine'")" = "16-25"
+
+  api:
+    name: Read API, contract and search evaluation
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      PGHOST: 127.0.0.1
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PYTHONIOENCODING: utf-8
+      ML_API_DSN: postgresql://postgres:postgres@127.0.0.1:5432/ml_api
+      ML_FIXTURE_DSN: postgresql://postgres:postgres@127.0.0.1:5432/ml_fixture
+      ML_BLUM_DSN: postgresql://postgres:postgres@127.0.0.1:5432/ml_blum
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API and test dependencies
+        run: pip install --quiet -r api/requirements.txt
+
+      # Three databases on purpose: the evaluation corpus must not leak into the sample
+      # catalogue, and the HTTP tests exercise both at once (docs/api-v1.md 9).
+      - name: Prepare databases
+        run: |
+          for db in ml_api ml_fixture ml_blum; do
+            createdb "$db"
+            psql -q -v ON_ERROR_STOP=1 -d "$db"               -f schema/material.sql -f schema/search.sql -f schema/api.sql -f schema/seed.sql
+          done
+          psql -q -v ON_ERROR_STOP=1 -d ml_fixture -f eval/fixture.sql
+          psql -q -v ON_ERROR_STOP=1 -d ml_api -f eval/fixture.sql
+          for db in ml_api ml_blum; do
+            python scripts/import_file.py --file ingest/samples/blum_hinges.csv               --mapping mappings/blum.yaml --dsn "postgresql://postgres:postgres@127.0.0.1:5432/$db" --apply
+            python scripts/import_file.py --file ingest/samples/laminex_boards.csv               --mapping mappings/laminex.yaml --dsn "postgresql://postgres:postgres@127.0.0.1:5432/$db" --apply
+          done
+
+      - name: SQL contract (payloads, totals, cursor, export)
+        run: psql -q -v ON_ERROR_STOP=1 -d ml_api -f scripts/api_contract.sql
+
+      - name: HTTP smoke tests
+        run: python -m pytest -q tests
+        env:
+          ML_DSN: ${{ env.ML_API_DSN }}
+
+      - name: Search evaluation (fixture corpus)
+        run: python scripts/eval_search.py --dsn "$ML_FIXTURE_DSN" --dataset fixture
+
+      - name: Search evaluation (Blum catalogue)
+        run: python scripts/eval_search.py --dsn "$ML_BLUM_DSN" --dataset blum
