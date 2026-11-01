@@ -143,7 +143,7 @@ reason. Because the table already has `PRIMARY KEY (uid_a, uid_b)`, a re-scan up
 
 | Function | Returns | Purpose |
 | --- | --- | --- |
-| `material_duplicate_scan(p_threshold numeric DEFAULT 0.80, p_limit integer DEFAULT 500)` | `jsonb` `{pairs, inserted, updated, threshold}` | fills/refreshes the queue; only `active`/`draft`, only same `category_code`, `similarity(name, name) >= threshold`, skips pairs already `merged` |
+| `material_duplicate_scan(p_threshold numeric DEFAULT 0.80, p_limit integer DEFAULT 500)` | `jsonb` `{pairs, inserted, updated, threshold, candidates}` | fills/refreshes the queue; only `active`/`draft`, only same `category_code`, `similarity(name, name) >= threshold`, skips variants and pairs already `merged` (section 5.3) |
 | `material_duplicate_queue(p_status text DEFAULT 'open', p_limit integer DEFAULT 50, p_offset integer DEFAULT 0)` | `jsonb` `{total, offset, limit, rows:[{uid_a, uid_b, score, status, keep_suggestion, ...}]}` | the review list payload, one call per page |
 | `material_merge_preview(p_keep text, p_merge text)` | `jsonb` | plan + warnings + suggestion ranks; read-only |
 | `material_merge(p_keep text, p_merge text, p_actor text DEFAULT NULL, p_reason text DEFAULT NULL, p_dry_run boolean DEFAULT false)` | `jsonb` | the merge; `p_dry_run` runs the whole thing and rolls back |
@@ -155,10 +155,24 @@ It is a string, never applied automatically.
 
 ### 5.3 Scan blocking (keeps an O(n^2) future honest)
 
-The scan compares only within a block: `(category_code, lower(coalesce(brand_name,'')))`.
-At 109 rows the whole table fits in one block anyway, but the predicate is there so a
-100k-row catalogue does not melt. Pairs are canonicalised with
-`least(uid)/greatest(uid)` to satisfy `uid_a < uid_b`.
+The scan compares only within a block: same `category_code` and same `brand_id`
+(`IS NOT DISTINCT FROM`, so two brandless rows still compare). At 109 rows the whole table
+fits in one block anyway, but the predicate is there so a 100k-row catalogue does not melt.
+Pairs are canonicalised with `least(uid)/greatest(uid)` to satisfy `uid_a < uid_b`.
+
+Three rules keep the queue about products rather than variants, all learned by running the
+scan against the fixture:
+
+1. **Declared axes win.** If the two rows disagree on any key of `variant_values`
+   (`{"thickness_mm": 16}` vs `{"thickness_mm": 18}`), they are variants of one product,
+   not duplicates, and the pair is skipped.
+2. **Digit-masked names are variants.** If the names match once digits are masked
+   (`shelf pin #mm`) but the digit strings differ (`1` vs `2`), it is a size, angle or
+   part-number variant and the pair is skipped. This is what stops the 22 filler rows from
+   producing 109 pairs; without it a fixture scan reported 110 pairs instead of 1.
+3. **Decided pairs stay decided.** A pair already `merged` is never re-queued, and an
+   `ignored` or `merged` row keeps its status and its score (`ON CONFLICT ... WHERE status = 'open'`),
+   so re-running the scan does not nag about decisions a human already made.
 
 ---
 
@@ -251,13 +265,16 @@ is deferred (decision D5).
 
 ### 10.1 Fixture additions (`eval/fixture.sql`)
 
-Three designed pairs, all inside `board.melamine.mdf`, plus one decoy that must NOT pair:
+Three designed pairs in `board.veneer` under brand `Fixture Dup`, plus one decoy that must NOT
+pair. Their categories and measure values were chosen so no existing search golden case moves
+(`eval/golden.yaml`). Row names differ from the plan sketch because a uid must match
+`^mat_[0-9A-HJKMNP-TV-Z]{26}$` and the alphabet has no `U`:
 
 | Pair | Intent |
 | --- | --- |
-| `FX-DUP-A1/A2` | near-identical names, one has thickness in cm, one in mm, one carries an extra price row and a relation |
-| `FX-DUP-B1/B2` | same name, different supplier, one archived -> must never be scanned |
-| `FX-DUP-C1/C2` | same name, different `category_code` -> must not pair (decoy) |
+| `mat_FX...DXPK01/DXPK02` "Fixture Dup Smoked Veneer Panel" (+ "22mm") | the pair to find: similarity 0.8649, thickness `22.0 mm` vs `2.2 cm`, the survivor carries two prices, one relation and its own identifier |
+| `mat_FX...DXPK03/DXPK04` "Fixture Dup Fog Veneer Panel" | names identical, `DXPK04` archived -> must never be scanned (live row measures 19 mm to stay outside the 17.5-18.5 golden window) |
+| `mat_FX...DXPK05/DXPK06` "Fixture Dup Edgeband Tape 22mm" | same name and brand, `board.veneer` vs `edging` -> must not pair (decoy) |
 
 The fixture already cleans `mat_FX%` and `fam_FX%`, so the new rows ride the existing
 re-runnability.
@@ -321,7 +338,7 @@ change to search ranking.
 | Step | Work | Verified by |
 | --- | --- | --- |
 | 0 | Preflight: fresh `ml_t2` database, `schema/merge.sql` stub, `eval/fixture.sql` duplicate pairs | fixture loads, `check_english` OK |
-| 1 | `schema/material.sql` candidate columns + index; `material_duplicate_scan()`; `scripts/duplicate_scan.py` | contract assertions 1-2 |
+| 1 | candidate columns + index and `material_duplicate_scan()` in `schema/merge.sql` (no edits to `material.sql`); `scripts/duplicate_scan.py` | contract assertions 1-2 |
 | 2 | `material_duplicate_queue()` + `material_merge_preview()` | contract assertion 3, preview shows all rule rows |
 | 3 | `material_merge()` + `material_duplicate_ignore()` | contract assertions 4-8 |
 | 4 | API routes + `tests/test_merge.py` + `api/requirements.txt` unchanged | `pytest` green, `GET/POST` walkthrough |

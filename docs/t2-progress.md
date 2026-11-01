@@ -15,7 +15,7 @@ and warnings but not a survivor snapshot).
 | Step | Work | State |
 | --- | --- | --- |
 | 0 | Preflight: `schema/merge.sql`, fixture duplicate pairs, fresh database, this log | [x] |
-| 1 | Candidate columns are already in step 0; `material_duplicate_scan()` + `scripts/duplicate_scan.py` | [ ] |
+| 1 | Candidate columns are already in step 0; `material_duplicate_scan()` + `scripts/duplicate_scan.py` | [x] |
 | 2 | `material_duplicate_queue()` + `material_merge_preview()` | [ ] |
 | 3 | `material_merge()` + `material_duplicate_ignore()` | [ ] |
 | 4 | HTTP routes in `api/main.py` + `tests/test_merge.py` | [ ] |
@@ -86,3 +86,54 @@ Two findings worth remembering:
   members). Running pytest against a fixture-only database fails three tests for that reason,
   not because of a regression: use `newdb.py NAME both` for pytest and `NAME fixture` for the
   fixture evaluation, exactly as the CI job does with `ml_api` / `ml_fixture` / `ml_blum`.
+
+---
+
+## Step 1 - scan and CLI
+
+Shipped:
+
+1. `schema/merge.sql`: `material_duplicate_scan(p_threshold numeric DEFAULT 0.80, p_limit integer DEFAULT 500)`
+   `RETURNS jsonb`, `LANGUAGE sql` (one statement, so the `candidates` CTE is still visible to the
+   final `jsonb_build_object`). Returns `{threshold, pairs, inserted, updated, candidates}`; the
+   candidate list is what `--json` writes, so the CLI does not need a second query.
+2. `scripts/duplicate_scan.py`: `--dsn` (default `ML_DSN`), `--threshold`, `--limit`, `--json`,
+   `--quiet`; prints `scanned N pairs, inserted X, updated Y (threshold T)` plus the first 20 pairs;
+   exits 2 without a DSN, 1 on `psycopg.Error`, 0 otherwise.
+3. `scripts/merge_contract.sql`: psql-runnable `DO $$` block, assertions 1-2 (designed pair queued
+   with score >= 0.80; archived pair and cross-category decoy absent; re-scan updates instead of
+   inserting, queue length stable). Steps 2-3 append to the same file.
+
+Deviations from the plan, with reasons:
+
+- The candidate decision columns and the index stayed in `schema/merge.sql` (step 0) instead of
+  `schema/material.sql`: the merge feature owns its own DDL, and `material.sql` stays a pure
+  description of the base tables. The delivery table in `docs/t2-merge.md` now says so.
+- The scan grew two exclusion rules the design did not have, both found by running it:
+  a pair that disagrees on any `variant_values` key is a variant (16 mm vs 18 mm boards), and a
+  pair whose names match after masking digits but differ in the digits is a variant too
+  (`shelf pin 1mm` vs `shelf pin 2mm`). Without the second rule the fixture produced 110 pairs
+  instead of 1, 109 of them noise from the 22 filler rows. Both rules are now in section 5.3 of
+  the design with the numbers that motivated them.
+- psycopg sends a Python `int` as `smallint` and a `float` as `double precision`, so the CLI call
+  had to be written `material_duplicate_scan(%s::numeric, %s::integer)`; the bare form failed with
+  `UndefinedFunction: function material_duplicate_scan(double precision, smallint) does not exist`.
+
+Verification:
+
+| Command | Expected | Actual |
+| --- | --- | --- |
+| `python .tmp/newdb.py ml_t10 fixture` then assertion script | scan semantics hold | all assertions passed |
+| scan run 1 | `pairs 1, inserted 1, updated 0` | `{'pairs': 1, 'inserted': 1, 'updated': 0, 'threshold': 0.8}` |
+| scan run 2 | `pairs 1, inserted 0, updated 1` | `{'pairs': 1, 'inserted': 0, 'updated': 1}` |
+| queued rows | exactly the designed pair, `open`, score 0.8649 | `[('mat_FX...DXPK01', 'mat_FX...DXPK02', 0.8649, 'open')]` |
+| after `status='merged'` on the pair, scan | not re-reported | `{'pairs': 0, 'inserted': 0, 'updated': 0}` |
+| after `status='ignored'` and score set to 0.10, scan | status and score untouched | `('ignored', 0.1000)`, `inserted 0, updated 0` |
+| scan at threshold 0 on the fixture | decoys still absent | 12 junk pairs, designed pair present, archived and cross-category pair absent |
+| `python .tmp/run_sql.py scripts/merge_contract.sql --db ml_t11` (fixture) | OK | `OK scripts/merge_contract.sql` |
+| same on `ml_t12` (`both`, fixture + samples) | OK | `OK scripts/merge_contract.sql` |
+| `python scripts/check_english.py` | OK | `OK: no CJK text found` |
+
+Note for step 2: `expect_total` in `eval/golden.yaml` was re-checked after the scan runs because
+candidate rows are not materials; `eval_search.py --dataset fixture` on a scanned database still
+passes (the queue is metadata, not catalogue).
