@@ -13,7 +13,9 @@
 --     everything by accident;
 --   * one family with three live variants plus two dead variants (archived, superseded), so
 --     merge/retire behaviour is visible in the same set;
---   * 39 rows in total, small enough to read, large enough that "top-1 of 1 result" is not a
+--   * three duplicate-merge pairs for T2: one the scan must find, one skipped because a side
+--     is archived, one decoy that shares a name and brand but not a category;
+--   * 45 rows in total, small enough to read, large enough that "top-1 of 1 result" is not a
 --     free win.
 --
 -- The file is re-runnable: every row it owns is deleted first, in foreign-key-safe order, and
@@ -34,7 +36,8 @@ INSERT INTO party (kind, canonical_name, country) VALUES
     ('brand', 'Fixture Blum',    'AT'),
     ('brand', 'Fixture Polytec', 'AU'),
     ('brand', 'Fixture Hettich', 'DE'),
-    ('brand', 'Fixture Acme',    'AU');
+    ('brand', 'Fixture Acme',    'AU'),
+    ('brand', 'Fixture Dup',     'AU');
 
 -- ---------------------------------------------------------------------------
 -- Families: one board family with a thickness axis, one hinge family with an angle axis
@@ -49,7 +52,7 @@ INSERT INTO material_family (family_id, family_key, brand_id, series, colour, su
 
 -- ---------------------------------------------------------------------------
 -- Materials: 6 boards (2 live in the second brand), 6 hinges, 4 accessories, 1 archived,
--- 1 superseded, then 22 generated rows. 39 rows in total.
+-- 1 superseded, 6 duplicate-pair rows, then 22 generated rows. 45 rows in total.
 -- ---------------------------------------------------------------------------
 INSERT INTO material (
     material_uid, category_code, product_type, name, brand_id, model_no, family_id,
@@ -137,6 +140,42 @@ UPDATE material SET status = 'archived'
 UPDATE material SET status = 'superseded', superseded_by = 'mat_FX000000000000000000BRD018'
  WHERE material_uid = 'mat_FX000000000000000000RPD018';
 
+-- Duplicate-merge pairs for T2 (see docs/t2-merge.md section 10.1). All of them live in
+-- category board.veneer / brand 'Fixture Dup' or in edging, which no search golden case
+-- touches, so adding them cannot move an existing expect_total. A1/A2 is the pair the scan
+-- must find; B1/B2 is skipped because B2 is archived; C1/C2 is the decoy that shares a name
+-- and brand but sits in a different category, so the scan must not pair it.
+INSERT INTO material (material_uid, category_code, product_type, name, brand_id, model_no,
+                      variant_values, default_supplier_id, unit, currency, unit_cost,
+                      attributes, tags, synonyms, source_system) VALUES
+    ('mat_FX000000000000000000DXPK01', 'board.veneer', 'board', 'Fixture Dup Smoked Veneer Panel',
+     (SELECT id FROM party WHERE canonical_name = 'Fixture Dup'), 'DUP-A1',
+     '{"thickness_mm": 22}', (SELECT id FROM party WHERE canonical_name = 'Fixture Dup'),
+     'sheet', 'AUD', 55.00, '{"colour": "Smoke", "substrate": "MDF"}', ARRAY['board'], ARRAY['veneer'], 'fixture'),
+    ('mat_FX000000000000000000DXPK02', 'board.veneer', 'board', 'Fixture Dup Smoked Veneer Panel 22mm',
+     (SELECT id FROM party WHERE canonical_name = 'Fixture Dup'), 'DUP-A2',
+     '{"thickness_mm": 22}', (SELECT id FROM party WHERE canonical_name = 'Fixture Dup'),
+     'sheet', 'AUD', 57.00, '{"finish": "Satin", "substrate": "MDF"}', ARRAY['board'], ARRAY['veneer', 'panel'], 'fixture_legacy'),
+    ('mat_FX000000000000000000DXPK03', 'board.veneer', 'board', 'Fixture Dup Fog Veneer Panel',
+     (SELECT id FROM party WHERE canonical_name = 'Fixture Dup'), 'DUP-B1', '{}',
+     (SELECT id FROM party WHERE canonical_name = 'Fixture Dup'),
+     'sheet', 'AUD', 48.00, '{"colour": "Fog"}', ARRAY['board'], ARRAY['veneer'], 'fixture'),
+    ('mat_FX000000000000000000DXPK04', 'board.veneer', 'board', 'Fixture Dup Fog Veneer Panel',
+     (SELECT id FROM party WHERE canonical_name = 'Fixture Dup'), 'DUP-B2', '{}',
+     (SELECT id FROM party WHERE canonical_name = 'Fixture Dup'),
+     'sheet', 'AUD', 48.00, '{"colour": "Fog"}', ARRAY['board'], ARRAY['veneer'], 'fixture'),
+    ('mat_FX000000000000000000DXPK05', 'board.veneer', 'board', 'Fixture Dup Edgeband Tape 22mm',
+     (SELECT id FROM party WHERE canonical_name = 'Fixture Dup'), 'DUP-C1', '{}',
+     (SELECT id FROM party WHERE canonical_name = 'Fixture Dup'),
+     'roll', 'AUD', 19.00, '{"colour": "Smoke"}', ARRAY['edging'], ARRAY['tape'], 'fixture'),
+    ('mat_FX000000000000000000DXPK06', 'edging', 'edging', 'Fixture Dup Edgeband Tape 22mm',
+     (SELECT id FROM party WHERE canonical_name = 'Fixture Dup'), 'DUP-C2', '{}',
+     (SELECT id FROM party WHERE canonical_name = 'Fixture Dup'),
+     'roll', 'AUD', 19.00, '{"colour": "Smoke"}', ARRAY['edging'], ARRAY['tape'], 'fixture');
+
+UPDATE material SET status = 'archived'
+ WHERE material_uid = 'mat_FX000000000000000000DXPK04';
+
 -- 22 generated filler rows: distinct names, per-each unit, no family and no measures, so they
 -- exercise "everything else" without competing with any assertion above.
 INSERT INTO material (material_uid, category_code, product_type, name, brand_id, unit, currency, unit_cost, attributes, tags, source_system)
@@ -170,7 +209,12 @@ INSERT INTO material_measure (material_uid, key, value_num, ucum, is_preferred, 
     ('mat_FX000000000000000000HNG155', 'opening_angle_deg', 155.0, 'deg', true, 'fixture'),
     ('mat_FX000000000000000000HNG170', 'opening_angle_deg', 170.0, 'deg', true, 'fixture'),
     ('mat_FX000000000000000000HTN110', 'opening_angle_deg', 110.0, 'deg', true, 'fixture'),
-    ('mat_FX000000000000000000HTN165', 'opening_angle_deg', 165.0, 'deg', true, 'fixture');
+    ('mat_FX000000000000000000HTN165', 'opening_angle_deg', 165.0, 'deg', true, 'fixture'),
+    -- the duplicate pair stores 22 mm twice in two different units on purpose: a merge that
+    -- ignored units would leave the keeper with two preferred thickness rows
+    ('mat_FX000000000000000000DXPK01', 'thickness_mm', 22.0, 'mm', true, 'fixture'),
+    ('mat_FX000000000000000000DXPK02', 'thickness_mm', 2.2,  'cm', true, 'fixture_legacy'),
+    ('mat_FX000000000000000000DXPK03', 'thickness_mm', 19.0, 'mm', true, 'fixture');
 
 -- ---------------------------------------------------------------------------
 -- Identifiers: whole-value exact matches and one prefix that spans three boards
@@ -189,18 +233,33 @@ INSERT INTO material_identifier (material_uid, kind, value, source_system, is_pr
     ('mat_FX000000000000000000ACC050', 'supplier_code', 'FX-BLM-71B050', 'fixture', true),
     ('mat_FX000000000000000000ACC010', 'supplier_code', 'FX-BLM-173L8100', 'fixture', true),
     ('mat_FX000000000000000000ACC020', 'supplier_code', 'FX-HTN-908020', 'fixture', true),
-    ('mat_FX000000000000000000ACC030', 'supplier_code', 'FX-HTN-907030', 'fixture', true);
+    ('mat_FX000000000000000000ACC030', 'supplier_code', 'FX-HTN-907030', 'fixture', true),
+    -- duplicate pair identities: distinct codes, so a merge has to move one row across
+    ('mat_FX000000000000000000DXPK01', 'supplier_code', 'FX-DUP-VEN-22', 'fixture', true),
+    ('mat_FX000000000000000000DXPK02', 'supplier_code', 'FX-DUP-VEN-22A', 'fixture_legacy', true),
+    ('mat_FX000000000000000000DXPK03', 'supplier_code', 'FX-DUP-FOG-18', 'fixture', true),
+    ('mat_FX000000000000000000DXPK04', 'supplier_code', 'FX-DUP-FOG-18', 'fixture_legacy', true),
+    ('mat_FX000000000000000000DXPK05', 'supplier_code', 'FX-DUP-TAPE-22', 'fixture', true),
+    ('mat_FX000000000000000000DXPK06', 'supplier_code', 'FX-DUP-TAPE-22', 'fixture_legacy', true);
 
 -- ---------------------------------------------------------------------------
 -- One price row and one relation: enough for the detail contract, not enough to bloat the file
 -- ---------------------------------------------------------------------------
 INSERT INTO material_price (material_uid, supplier_id, unit_cost, currency, cost_basis, valid_from, source_system) VALUES
     ('mat_FX000000000000000000BRD018', (SELECT id FROM party WHERE canonical_name = 'Fixture Laminex'),
-     42.00, 'AUD', 'ex_gst', DATE '2026-01-01', 'fixture');
+     42.00, 'AUD', 'ex_gst', DATE '2026-01-01', 'fixture'),
+    -- the survivor in the duplicate pair carries its own price history, which a merge must move
+    ('mat_FX000000000000000000DXPK02', (SELECT id FROM party WHERE canonical_name = 'Fixture Dup'),
+     57.00, 'AUD', 'ex_gst', DATE '2026-02-01', 'fixture_legacy'),
+    ('mat_FX000000000000000000DXPK02', (SELECT id FROM party WHERE canonical_name = 'Fixture Dup'),
+     54.00, 'AUD', 'ex_gst', DATE '2026-05-01', 'fixture_legacy');
 
 INSERT INTO material_relation (from_uid, to_uid, kind, note, confidence) VALUES
     ('mat_FX000000000000000000HNG170', 'mat_FX000000000000000000HNG155', 'substitute',
-     'Use the 155 degree hinge when the 170 degree one is out of stock', 0.80);
+     'Use the 155 degree hinge when the 170 degree one is out of stock', 0.80),
+    -- a relation hanging off the survivor: after the merge it must point at the keeper
+    ('mat_FX000000000000000000DXPK02', 'mat_FX000000000000000000BRD018', 'similar',
+     'Same smoked veneer look, different core', 0.70);
 
 -- Keep the statistics honest: the fixture is small, but a stale plan on an empty import would
 -- make the first evaluation run in a fresh database slower than everything after it.
