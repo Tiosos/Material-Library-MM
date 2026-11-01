@@ -201,7 +201,7 @@ Edit the material pool at the top of `proto/build_db.py` (`BOARDS` / `HARDWARE` 
 - [ ] Real-data ETL (joineryflow database connection or exported snapshot)
 - [ ] write-back executor (the request table is ready, the PATCH executor is not done)
 
-**Next step: MCP server on the read API (a design document first, per `docs/t1b-progress.md`), then the real-data ETL.** T1b closed the two gaps the read API used to advertise: families collapse by default (`expand=variants` returns the records) and `format=json` exports the versioned envelope validated by `schema/export.schema.json`. `docs/t2-merge.md` §9 explains recovery without an `unmerge()`.
+**Next step: MCP server on the read API - the design is `docs/mcp-server.md` (seven read-only tools, one `materials://{uid}` resource, stdio by default, 1.5 days); then the real-data ETL.** T1b closed the two gaps the read API used to advertise: families collapse by default (`expand=variants` returns the records) and `format=json` exports the versioned envelope validated by `schema/export.schema.json`. `docs/t2-merge.md` §9 explains recovery without an `unmerge()`.
 
 ---
 
