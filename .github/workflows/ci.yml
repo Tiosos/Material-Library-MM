@@ -197,7 +197,7 @@ jobs:
           import json, sys
           scan = json.load(open("scan.json", encoding="utf-8"))
           report = json.load(open("merge.json", encoding="utf-8"))
-          assert scan["pairs"] == 1, scan
+          assert len(scan["pairs"]) == 1, scan
           assert report["code"] == "merged", report
           assert report["anchors"] == 2, report
           print("CLI contract OK")
