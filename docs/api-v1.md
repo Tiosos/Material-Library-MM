@@ -264,7 +264,7 @@ datasets:
 
 A case may assert any of `expect_level` (always), `expect_total`, `expect_min_hits`, `expect_any`, `expect_top1`, and may carry filters: `q`, `category`, `brand`, `supplier`, `attrs`, `measures`. `expect_level` is the tier that must answer (`exact`, `prefix`, `and`, `relaxed`, `fuzzy`, `browse`, `none`); a case answered by a weaker tier than intended fails even when the right row is found, because a fallback to `fuzzy` is a worse result that MRR alone does not reveal. `expect_any` lists every uid that counts as relevant (MRR uses the first one in the page); `expect_top1` is only used where the ordering is a contract.
 
-- `fixture` runs against `eval/fixture.sql` (39 deterministic rows: all five levels, thickness in mm and in cm, angle in deg, two count units, one family with live, archived and superseded variants, 22 filler rows), so cases do not break when the demo data changes. 18 cases, 9 of them holdout.
+- `fixture` runs against `eval/fixture.sql` (45 deterministic rows: all five levels, thickness in mm and in cm, angle in deg, two count units, one family with live, archived and superseded variants, three duplicate-merge pairs, 22 filler rows), so cases do not break when the demo data changes. 18 cases, 9 of them holdout.
 - `blum` runs against the two sample imports already in CI (105 Blum hinges, 4 Laminex boards, 109 rows) with real part numbers: 14 cases, 9 of them holdout. Both datasets are evaluated against separate databases, never the same one, so the fixture's names cannot satisfy a Blum case.
 - Negative cases (`expect_total: 0`) are kept in the same list as positive ones; the runner excludes them from the zero-result ratio, so "nothing found" is only a failure where something was expected.
 

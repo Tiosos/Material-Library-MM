@@ -153,10 +153,10 @@ All three scripts are re-runnable (DDL uses `IF NOT EXISTS` / `CREATE OR REPLACE
 | # | Item | Status | Notes |
 |---|---|---|---|
 | B9 | Import pipeline (Excel/CSV first, PDF second, portal scraping last) | Done for CSV/XLSX | `scripts/import_file.py` + `mappings/<vendor>.yaml`; measured 122 Blum rows → 105 materials, idempotent. PDF extraction covers the Blum hinge section only |
-| B7 | Duplicate merge workflow (candidates already persist, merge action missing) | Partial | The candidate table exists; merging needs "which record to keep + field survival rules". This is the next task (T2) |
+| B7 | Duplicate merge workflow | Done | `schema/merge.sql`: scan, keeper suggestion, preview, merge, ignore; the survivor becomes a superseded tombstone, children are repointed under documented survival rules (`docs/t2-merge.md`) |
 | B8 | MCP server | Not started | Suggested as a one-day wrap-up once REST is finalized. The read API (T1) is now that REST layer |
 | — | Read API v1 (FastAPI over the SQL functions) | Done | `api/` serves 10 read-only endpoints; `schema/api.sql` holds the payload functions; contract tests and a search evaluation gate run in CI (`docs/api-v1.md`, `docs/t1-progress.md`) |
 | — | ETIM/eCl@ss real-code mapping | Not started | Tables and fields are reserved, waiting for the first supplier catalogue |
 | — | EPD collection | Not started | Table and contract are reserved |
 
-**Suggested next step**: connect the first real data (Excel → UMR), run `material_search` and `v_material_completeness` against a real catalogue, then decide the B7 merge rules and the API shape. The model layer no longer carries debt that would force rework once data volume grows.
+**Suggested next step**: connect the first real data (Excel → UMR) and run `material_search`, `v_material_completeness` and the duplicate scan against a real catalogue. The model layer no longer carries debt that would force rework once data volume grows.

@@ -148,6 +148,7 @@ jobs:
       ML_API_DSN: postgresql://postgres:postgres@127.0.0.1:5432/ml_api
       ML_FIXTURE_DSN: postgresql://postgres:postgres@127.0.0.1:5432/ml_fixture
       ML_BLUM_DSN: postgresql://postgres:postgres@127.0.0.1:5432/ml_blum
+      ML_MERGE_DSN: postgresql://postgres:postgres@127.0.0.1:5432/ml_merge
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -161,19 +162,46 @@ jobs:
       # catalogue, and the HTTP tests exercise both at once (docs/api-v1.md 9).
       - name: Prepare databases
         run: |
-          for db in ml_api ml_fixture ml_blum; do
+          for db in ml_api ml_fixture ml_blum ml_merge; do
             createdb "$db"
-            psql -q -v ON_ERROR_STOP=1 -d "$db"               -f schema/material.sql -f schema/search.sql -f schema/api.sql -f schema/seed.sql
+            psql -q -v ON_ERROR_STOP=1 -d "$db"               -f schema/material.sql -f schema/search.sql -f schema/api.sql -f schema/merge.sql               -f schema/seed.sql
           done
           psql -q -v ON_ERROR_STOP=1 -d ml_fixture -f eval/fixture.sql
           psql -q -v ON_ERROR_STOP=1 -d ml_api -f eval/fixture.sql
+          psql -q -v ON_ERROR_STOP=1 -d ml_merge -f eval/fixture.sql
           for db in ml_api ml_blum; do
             python scripts/import_file.py --file ingest/samples/blum_hinges.csv               --mapping mappings/blum.yaml --dsn "postgresql://postgres:postgres@127.0.0.1:5432/$db" --apply
             python scripts/import_file.py --file ingest/samples/laminex_boards.csv               --mapping mappings/laminex.yaml --dsn "postgresql://postgres:postgres@127.0.0.1:5432/$db" --apply
           done
 
+      # The read contract runs first: the merge contract mutates pairs, and the HTTP tests
+      # create their own probe records (docs/t2-merge.md 10.2).
       - name: SQL contract (payloads, totals, cursor, export)
         run: psql -q -v ON_ERROR_STOP=1 -d ml_api -f scripts/api_contract.sql
+
+      - name: SQL contract (duplicate scan, preview, merge, ignore)
+        run: |
+          psql -q -v ON_ERROR_STOP=1 -d ml_fixture -f scripts/merge_contract.sql
+          psql -q -v ON_ERROR_STOP=1 -d ml_api -f scripts/merge_contract.sql
+
+      # The CLIs are the documented path for environments without HTTP (docs/t2-merge.md 8),
+      # so a fixture database drives a real scan, a dry run, a merge and an idempotent retry.
+      - name: Duplicate CLI (scan, dry run, merge, retry)
+        run: |
+          python scripts/duplicate_scan.py --dsn "$ML_MERGE_DSN" --quiet
+          python scripts/duplicate_scan.py --dsn "$ML_MERGE_DSN" --json scan.json --quiet
+          python scripts/merge_materials.py --dsn "$ML_MERGE_DSN"             --keep mat_FX000000000000000000DXPK01 --merge mat_FX000000000000000000DXPK02             --reason "same board, two imports" --dry-run
+          python scripts/merge_materials.py --dsn "$ML_MERGE_DSN"             --keep mat_FX000000000000000000DXPK01 --merge mat_FX000000000000000000DXPK02             --reason "same board, two imports" --json merge.json
+          python scripts/merge_materials.py --dsn "$ML_MERGE_DSN"             --keep mat_FX000000000000000000DXPK01 --merge mat_FX000000000000000000DXPK02
+          python - <<'PY'
+          import json, sys
+          scan = json.load(open("scan.json", encoding="utf-8"))
+          report = json.load(open("merge.json", encoding="utf-8"))
+          assert len(scan["pairs"]) == 1, scan
+          assert report["code"] == "merged", report
+          assert report["anchors"] == 2, report
+          print("CLI contract OK")
+          PY
 
       - name: HTTP smoke tests
         run: python -m pytest -q tests

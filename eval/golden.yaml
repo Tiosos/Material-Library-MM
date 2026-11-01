@@ -4,7 +4,7 @@
 # Consumed by scripts/eval_search.py. One file holds both datasets so the thresholds and the
 # case format cannot drift apart:
 #
-#   fixture  eval/fixture.sql loaded into an otherwise empty catalogue (39 rows, deterministic)
+#   fixture  eval/fixture.sql loaded into an otherwise empty catalogue (45 rows, deterministic)
 #   blum     the two sample imports loaded (109 rows: 105 Blum hinges, 4 Laminex boards)
 #
 # A case asserts one or more of:
@@ -38,7 +38,7 @@ datasets:
 
   fixture:
     description: >
-      eval/fixture.sql: 39 rows, five search levels, thickness stored in mm and in cm, opening
+      eval/fixture.sql: 45 rows, five search levels, thickness stored in mm and in cm, opening
       angle in deg, two count units, one family with live, archived and superseded variants.
     cases:
 
@@ -127,7 +127,7 @@ datasets:
         split: tuning
         expect_level: browse
         expect_min_hits: 37
-        note: An empty request lists every live row (37 active of 39 stored).
+        note: An empty request lists every live row (42 active of 45 stored).
 
       # ---- measures: unit-aware windows ----------------------------------------------------
       - id: fx-measure-mm-window
