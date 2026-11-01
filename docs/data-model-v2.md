@@ -152,10 +152,10 @@ All three scripts are re-runnable (DDL uses `IF NOT EXISTS` / `CREATE OR REPLACE
 
 | # | Item | Status | Notes |
 |---|---|---|---|
-| B9 | Import pipeline (Excel/CSV first, PDF second, portal scraping last) | Not started | You picked three sources; start with one Excel/CSV path that gets "column mapping → validation → family assignment → dedupe" working end to end |
-| B7 | Duplicate merge workflow (candidates already persist, merge action missing) | Partial | The candidate table exists; merging needs "which record to keep + field survival rules" |
-| B8 | MCP server | Not started | Suggested as a one-day wrap-up after REST is finalized |
-| — | API service skeleton (FastAPI + the functions above) | Not started | `material_search_page` / `material_facets` already have the shape of an SQL-layer API |
+| B9 | Import pipeline (Excel/CSV first, PDF second, portal scraping last) | Done for CSV/XLSX | `scripts/import_file.py` + `mappings/<vendor>.yaml`; measured 122 Blum rows → 105 materials, idempotent. PDF extraction covers the Blum hinge section only |
+| B7 | Duplicate merge workflow (candidates already persist, merge action missing) | Partial | The candidate table exists; merging needs "which record to keep + field survival rules". This is the next task (T2) |
+| B8 | MCP server | Not started | Suggested as a one-day wrap-up once REST is finalized. The read API (T1) is now that REST layer |
+| — | Read API v1 (FastAPI over the SQL functions) | Done | `api/` serves 10 read-only endpoints; `schema/api.sql` holds the payload functions; contract tests and a search evaluation gate run in CI (`docs/api-v1.md`, `docs/t1-progress.md`) |
 | — | ETIM/eCl@ss real-code mapping | Not started | Tables and fields are reserved, waiting for the first supplier catalogue |
 | — | EPD collection | Not started | Table and contract are reserved |
 

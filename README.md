@@ -18,7 +18,13 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 ├── docs/design-v1.md            ★ the design document (read this)
 ├── schema/
 │   ├── material.sql            canonical DDL (PostgreSQL, with weighted tsvector + pg_trgm)
+│   ├── search.sql              search / facets / suggest / paged payload functions
+│   ├── api.sql                 read-only payload functions (detail, family, changes, export, measures)
 │   └── material.schema.json    UMR exchange-format JSON Schema (contract)
+├── api/                        read-only HTTP API (FastAPI, T1)
+├── eval/                       golden search cases + deterministic evaluation fixture
+├── scripts/eval_search.py      search evaluation runner (MRR@10, hit@1, zero-result, level accuracy)
+├── tests/                      HTTP smoke tests (pytest + TestClient)
 ├── mapping/
 │   └── joineryflow.yaml        9 catalog tables → UMR field mapping, write-back, sync spec
 └── proto/                       ★ runnable prototype (zero dependencies, to validate the search feel)
@@ -111,6 +117,43 @@ The three scripts can be run repeatedly; `sample_demo.sql` includes acceptance q
 
 ---
 
+## Read API v1 (T1)
+
+A read-only HTTP surface over the same SQL functions — the prototype's `serve.py` is not it: this one serves the v2 PostgreSQL model, tells the truth about `total`, filters by physical measures with unit conversion, logs searches, and ships a search-quality gate.
+
+```bash
+pip install -r api/requirements.txt
+set ML_DSN=postgresql://postgres:postgres@127.0.0.1:55432/ml
+uvicorn api.main:app --host 127.0.0.1 --port 8848
+```
+
+| Endpoint | Description |
+|---|---|
+| `GET /healthz` | liveness (checks the database) |
+| `GET /v1/meta` | `schema_version`, material count, `max_sync_seq` |
+| `GET /v1/materials` | search + browse: `q`, `category`, `brand`, `supplier`, `attrs`, `measures`, `limit`, `cursor`; returns `level`, truthful `total`, `suggestion`, `next_cursor` |
+| `GET /v1/materials/{uid}` | full UMR v2 document (`?measures=preferred\|all`) |
+| `GET /v1/materials/{uid}/family` | the family (axis values, member count) and its members |
+| `GET /v1/facets` | facet counts for the same filters, computed on the filtered hit set |
+| `GET /v1/suggest` | prefix suggestion for a search box |
+| `GET /v1/changes?since=` | incremental feed on `sync_seq` with `next_since` (no skips) |
+| `GET /v1/export?format=jsonl\|csv` | streamed full export; JSONL is one UMR document per line |
+| `POST /v1/searches/{log_id}/clicks` | record which hit a user clicked (`{material_uid, rank}`) |
+
+Runtime settings (environment): `ML_DSN` (required), `ML_API_HOST` (127.0.0.1), `ML_API_PORT` (8848), `ML_API_TOKEN` (empty = open), `ML_ACTOR_DEFAULT` (anonymous), `ML_LOG_SEARCH` (1). `X-Actor` names the caller in the search log, `X-No-Log: 1` skips logging for one request.
+
+Search quality is a gate, not an opinion:
+
+```bash
+python scripts/eval_search.py --dsn "$ML_DSN" --dataset fixture   # deterministic corpus, five levels
+python scripts/eval_search.py --dsn "$ML_DSN" --dataset blum      # real part numbers from the sample import
+python -m pytest -q tests                                        # 21 HTTP contract tests
+```
+
+Design and decisions: [`docs/api-v1.md`](docs/api-v1.md) (endpoints, SQL additions, instrumentation, evaluation thresholds). Implementation log with verification for every step: [`docs/t1-progress.md`](docs/t1-progress.md).
+
+---
+
 ## Importing supplier catalogues (B9)
 
 Without changing the supplier's table, give each vendor a `mappings/<vendor>.yaml` (free-form header → UMR fields):
@@ -151,12 +194,13 @@ Edit the material pool at the top of `proto/build_db.py` (`BOARDS` / `HARDWARE` 
 - [x] **Data model v2**: category tree / supplier entity / units and measures / product family / version events / approval write-back / dedupe candidates / EPD slots (verified on PostgreSQL 16)
 - [x] **Search v2**: five-level graceful degradation (exact / prefix / and / relaxed / fuzzy) + filter push-down + facet narrowing (accepted at the SQL layer)
 - [x] **Import pipeline v1**: CSV/XLSX free-form header mapping + PDF catalogue extraction (run on 122 rows of real Blum data, idempotent)
-- [ ] Duplicate merge workflow (candidates are stored, the merge action is not done)
-- [ ] API service (FastAPI) + MCP server
+- [x] **Read API v1 (T1)**: 10 read-only endpoints over PostgreSQL, unit-aware measure filters, truthful `total` with cursor paging, search logging + click tracking, JSONL/CSV export, pytest contract tests, CI job `api` and a search evaluation gate (fixture + Blum catalogue, MRR@10 1.000 on the holdout split)
+- [ ] Duplicate merge workflow (candidates are stored, the merge action is not done; it is the next task, T2)
+- [ ] MCP server on top of the read API (T1b; the API is the stable layer it would wrap)
 - [ ] Real-data ETL (joineryflow database connection or exported snapshot)
 - [ ] write-back executor (the request table is ready, the PATCH executor is not done)
 
-**The next step depends on your answers to the 6 questions in chapter 10 of the design.**
+**Next step: T2 (duplicate merge), then MCP on the read API.** `docs/api-v1.md` §12 lists what v1 deliberately leaves out (`expand=variants` family collapsing, export envelope).
 
 ---
 

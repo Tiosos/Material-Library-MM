@@ -18,6 +18,102 @@
 -- ---------------------------------------------------------------------------
 -- Main search function: returns material_uid + score + the level that matched
 -- ---------------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
+-- Measure filter fragment: turns a JSON spec into one EXISTS predicate per measure
+-- ---------------------------------------------------------------------------
+-- A measure filter is a range in whatever unit the caller used, e.g.
+--   {"thickness_mm": {"gte": 17.5, "lte": 18.5, "unit": "mm"}}
+-- Every stored measure carries a value and its own UCUM code; unit.si_factor converts
+-- both sides to the same base, so "18 mm" matches a row stored as "1.8 cm" and a caller
+-- can ask in inches without the import having to normalize anything. The dimension must
+-- agree (a thickness filter never matches a weight), which is what makes the unit
+-- parameter meaningful rather than decorative.
+--
+-- Raised errors use SQLSTATE 22023 (invalid_parameter_value) so the HTTP edge can answer
+-- 400 instead of 500: a malformed spec is the caller's mistake, not a server fault.
+CREATE OR REPLACE FUNCTION ml_measure_predicate(p_measures jsonb)
+RETURNS text
+LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE
+    v_key    text;
+    v_spec   jsonb;
+    v_unit   text;
+    v_dim    text;
+    v_factor numeric;
+    v_gte    numeric;
+    v_lte    numeric;
+    v_lo     numeric;
+    v_hi     numeric;
+    v_cond   text;
+    v_out    text := '';
+BEGIN
+    IF p_measures IS NULL OR p_measures = '{}'::jsonb THEN
+        RETURN '';
+    END IF;
+    IF jsonb_typeof(p_measures) <> 'object' THEN
+        RAISE EXCEPTION 'measures must be a JSON object keyed by measure name'
+            USING ERRCODE = '22023';
+    END IF;
+
+    FOR v_key, v_spec IN SELECT e.key, e.value FROM jsonb_each(p_measures) e LOOP
+        IF jsonb_typeof(v_spec) <> 'object' THEN
+            RAISE EXCEPTION 'measure "%": expected an object like {"gte": 17.5, "unit": "mm"}', v_key
+                USING ERRCODE = '22023';
+        END IF;
+        v_unit := v_spec ->> 'unit';
+        IF v_unit IS NULL OR btrim(v_unit) = '' THEN
+            RAISE EXCEPTION 'measure "%": "unit" is required', v_key USING ERRCODE = '22023';
+        END IF;
+        SELECT u.dimension, u.si_factor INTO v_dim, v_factor FROM unit u WHERE u.code = v_unit;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'measure "%": unknown unit "%"', v_key, v_unit USING ERRCODE = '22023';
+        END IF;
+        IF v_dim IS NULL OR v_factor IS NULL THEN
+            RAISE EXCEPTION 'measure "%": unit "%" is not convertible', v_key, v_unit
+                USING ERRCODE = '22023';
+        END IF;
+
+        BEGIN
+            v_gte := (v_spec ->> 'gte')::numeric;
+            v_lte := (v_spec ->> 'lte')::numeric;
+        EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+            RAISE EXCEPTION 'measure "%": "gte" and "lte" must be numbers', v_key
+                USING ERRCODE = '22023';
+        END;
+        IF v_gte IS NULL AND v_lte IS NULL THEN
+            RAISE EXCEPTION 'measure "%": needs "gte" and/or "lte"', v_key USING ERRCODE = '22023';
+        END IF;
+        IF v_gte IS NOT NULL AND v_lte IS NOT NULL AND v_gte > v_lte THEN
+            RAISE EXCEPTION 'measure "%": "gte" is greater than "lte"', v_key USING ERRCODE = '22023';
+        END IF;
+
+        -- Convert the caller's bounds into base units once, instead of per candidate row.
+        v_lo := v_gte * v_factor;
+        v_hi := v_lte * v_factor;
+        v_cond := CASE
+            WHEN v_lo IS NOT NULL AND v_hi IS NOT NULL THEN format('BETWEEN %L AND %L', v_lo, v_hi)
+            WHEN v_lo IS NOT NULL THEN format('>= %L', v_lo)
+            ELSE format('<= %L', v_hi)
+        END;
+        v_out := v_out || format(
+            ' AND EXISTS (SELECT 1 FROM material_measure mk JOIN unit mu ON mu.code = mk.ucum'
+            || ' WHERE mk.material_uid = m.material_uid AND mk.key = %L AND mu.dimension = %L'
+            || ' AND mk.value_num * mu.si_factor %s)', v_key, v_dim, v_cond);
+    END LOOP;
+
+    RETURN v_out;
+END;
+$$;
+
+COMMENT ON FUNCTION ml_measure_predicate(jsonb) IS
+    'Builds the unit-aware AND EXISTS predicate for a measures spec; raises SQLSTATE 22023 on a malformed spec.';
+
+-- ---------------------------------------------------------------------------
+-- The 9-argument shape replaces the 8-argument one. Dropping first keeps a defaulted
+-- overload from making existing positional calls ambiguous.
+-- ---------------------------------------------------------------------------
+DROP FUNCTION IF EXISTS material_search(text, text, text, text, jsonb, boolean, integer, integer);
+
 CREATE OR REPLACE FUNCTION material_search(
     p_q                text    DEFAULT NULL,
     p_category         text    DEFAULT NULL,
@@ -25,12 +121,15 @@ CREATE OR REPLACE FUNCTION material_search(
     p_supplier         text    DEFAULT NULL,
     p_attrs            jsonb   DEFAULT '{}'::jsonb,
     p_include_archived boolean DEFAULT false,
-    p_limit            integer DEFAULT 40
-) RETURNS TABLE (material_uid text, score real, level text)
+    p_limit            integer DEFAULT 40,
+    p_offset           integer DEFAULT 0,
+    p_measures         jsonb   DEFAULT '{}'::jsonb
+) RETURNS TABLE (material_uid text, score real, level text, total bigint)
 LANGUAGE plpgsql STABLE AS $$
 DECLARE
     v_q      text := btrim(coalesce(p_q, ''));
-    v_limit  integer := least(greatest(coalesce(p_limit, 40), 1), 200);
+    v_limit  integer := least(greatest(coalesce(p_limit, 40), 1), 5000);
+    v_offset integer := greatest(coalesce(p_offset, 0), 0);
     v_from   text;
     v_base   text := 'true';
     v_level  text;
@@ -49,9 +148,11 @@ BEGIN
            || ' LEFT JOIN material_family f ON f.family_id = m.family_id'
            || ' LEFT JOIN material_usage u ON u.material_uid = m.material_uid';
 
-    -- Filter predicates: all go into WHERE and are reused by every branch below
+    -- Filter predicates: all go into WHERE and are reused by every branch below.
+    -- Superseded rows stay resolvable by uid (material_detail), but must never rank in a
+    -- search result: after a merge the dead record would otherwise keep answering queries.
     IF NOT p_include_archived THEN
-        v_base := v_base || ' AND m.status <> ''archived''';
+        v_base := v_base || ' AND m.status NOT IN (''archived'', ''superseded'')';
     END IF;
     IF p_category IS NOT NULL THEN
         v_base := v_base || format(' AND m.category_code = %L', p_category);
@@ -65,13 +166,19 @@ BEGIN
     IF p_attrs IS NOT NULL AND p_attrs <> '{}'::jsonb THEN
         v_base := v_base || format(' AND m.attributes @> %L::jsonb', p_attrs::text);
     END IF;
+    -- Unit-aware measure ranges. Kept behind the same v_base string as the other filters,
+    -- so every tier (exact .. fuzzy) and the browse branch apply it too.
+    IF p_measures IS NOT NULL AND p_measures <> '{}'::jsonb THEN
+        v_base := v_base || ml_measure_predicate(p_measures);
+    END IF;
 
     -- Empty query: browse (by usage count + name), never return a blank page
     IF v_q = '' THEN
         v_sql := format(
-            'SELECT m.material_uid, 0::real AS score, %L::text AS level FROM %s WHERE %s'
-            ' ORDER BY coalesce(u.ref_count, 0) DESC, m.name LIMIT %s',
-            'browse', v_from, v_base, v_limit);
+            'SELECT m.material_uid, 0::real AS score, %L::text AS level,'
+            ' count(*) OVER () AS total FROM %s WHERE %s'
+            ' ORDER BY coalesce(u.ref_count, 0) DESC, m.name LIMIT %s OFFSET %s',
+            'browse', v_from, v_base, v_limit, v_offset);
         RETURN QUERY EXECUTE v_sql;
         RETURN;
     END IF;
@@ -178,14 +285,15 @@ BEGIN
     END IF;
 
     v_sql := format(
-        'SELECT m.material_uid, (%s)::real AS score, %L::text AS level'
-        ' FROM %s WHERE %s AND (%s) ORDER BY %s LIMIT %s',
-        v_score, v_level, v_from, v_base, v_pred, v_order, v_limit);
+        'SELECT m.material_uid, (%s)::real AS score, %L::text AS level,'
+        ' count(*) OVER () AS total'
+        ' FROM %s WHERE %s AND (%s) ORDER BY %s LIMIT %s OFFSET %s',
+        v_score, v_level, v_from, v_base, v_pred, v_order, v_limit, v_offset);
     RETURN QUERY EXECUTE v_sql;
 END $$;
 
-COMMENT ON FUNCTION material_search(text, text, text, text, jsonb, boolean, integer) IS
-    'Forgiving search: five-tier graceful degradation exact → prefix → and → relaxed → fuzzy; all filters pushed down; returns the level actually used this time.';
+COMMENT ON FUNCTION material_search(text, text, text, text, jsonb, boolean, integer, integer, jsonb) IS
+    'Forgiving search: five-tier graceful degradation exact → prefix → and → relaxed → fuzzy; all filters pushed down; returns the level actually used this time, the true match total, and a page starting at p_offset.';
 
 -- ---------------------------------------------------------------------------
 -- Facet: must use the same hit set as the current query/filters, never GROUP BY the whole table
@@ -196,11 +304,12 @@ CREATE OR REPLACE FUNCTION material_facets(
     p_brand   text    DEFAULT NULL,
     p_supplier text   DEFAULT NULL,
     p_attrs   jsonb   DEFAULT '{}'::jsonb,
-    p_per_facet integer DEFAULT 12
+    p_per_facet integer DEFAULT 12,
+    p_measures jsonb  DEFAULT '{}'::jsonb
 ) RETURNS TABLE (facet text, value text, cnt bigint)
 LANGUAGE sql STABLE AS $$
     WITH hits AS (
-        SELECT h.material_uid FROM material_search(p_q, p_category, p_brand, p_supplier, p_attrs, false, 5000) h
+        SELECT h.material_uid FROM material_search(p_q, p_category, p_brand, p_supplier, p_attrs, false, 5000, 0, p_measures) h
     ),
     raw AS (
         SELECT 'category'::text AS facet, m.category_code::text AS value, count(*)::bigint AS cnt
@@ -244,29 +353,41 @@ $$;
 -- ---------------------------------------------------------------------------
 -- One-shot API payload: level + total + results (including family/measures)
 -- ---------------------------------------------------------------------------
+-- p_offset moves the page window; total always counts the whole match set, so a client on page
+-- 9 still learns how many matches exist. `offset` and `limit` are echoed so the HTTP edge can
+-- build an opaque cursor without re-deriving the clamp.
+DROP FUNCTION IF EXISTS material_search_page(text, text, text, text, jsonb, integer, integer);
+
 CREATE OR REPLACE FUNCTION material_search_page(
     p_q        text    DEFAULT NULL,
     p_category text    DEFAULT NULL,
     p_brand    text    DEFAULT NULL,
     p_supplier text    DEFAULT NULL,
     p_attrs    jsonb   DEFAULT '{}'::jsonb,
-    p_limit    integer DEFAULT 20
+    p_limit    integer DEFAULT 20,
+    p_offset   integer DEFAULT 0,
+    p_measures jsonb   DEFAULT '{}'::jsonb
 ) RETURNS jsonb
 LANGUAGE sql STABLE AS $$
     WITH hits AS (
-        SELECT * FROM material_search(p_q, p_category, p_brand, p_supplier, p_attrs, false, 5000)
+        SELECT * FROM material_search(p_q, p_category, p_brand, p_supplier, p_attrs, false, 5000, 0, p_measures)
     ),
     page AS (
         SELECT h.material_uid, h.score, h.level
           FROM hits h
-         ORDER BY h.score DESC
+         ORDER BY h.score DESC, h.material_uid
          LIMIT greatest(p_limit, 1)
+        OFFSET greatest(p_offset, 0)
     )
     SELECT jsonb_build_object(
         'q', p_q,
-        'level', coalesce((SELECT level FROM hits LIMIT 1), 'none'),
-        'total', (SELECT count(*) FROM hits),
-        'suggestion', CASE WHEN (SELECT count(*) FROM hits) = 0
+        'level', coalesce((SELECT level FROM page LIMIT 1),
+                          (SELECT level FROM hits LIMIT 1),
+                          'none'),
+        'total', coalesce((SELECT max(total) FROM hits), 0),
+        'offset', greatest(p_offset, 0),
+        'limit', greatest(p_limit, 1),
+        'suggestion', CASE WHEN coalesce((SELECT max(total) FROM hits), 0) = 0
                            THEN (SELECT suggestion FROM material_suggest(p_q, 1))
                            ELSE NULL END,
         'results', coalesce((

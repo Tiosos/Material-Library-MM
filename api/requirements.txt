@@ -1,0 +1,19 @@
+# Pinned on purpose: CI and a local install must resolve the same wheels, and every pin here
+# has a reason.
+#
+# fastapi 0.115.6 + starlette 0.41.3: newer fastapi releases pull opentelemetry into the base
+# install, which this project has no use for (docs/t1-progress.md, step 0). 0.115.6 is the last
+# release pinned against starlette 0.41.x.
+# psycopg 3.3.6 is the first release of the 3.3 line with the binary wheels this project needs;
+# psycopg-pool 3.3.3 is the version that ships with it.
+# pytest and httpx are test-only: FastAPI's TestClient speaks HTTP through httpx.
+fastapi==0.115.6
+starlette==0.41.3
+uvicorn==0.54.0
+pydantic==2.14.2
+psycopg[binary]==3.3.6
+psycopg-pool==3.3.3
+pyyaml==6.0.3
+pytest==9.2.0
+httpx==0.28.1
+jsonschema==4.26.0

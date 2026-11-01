@@ -20,3 +20,11 @@ Thumbs.db
 # Local environment variables
 .env
 *.local
+
+# Local development scratch space (not part of the repository)
+.tmp/
+.pylibs/
+.pg/
+.pgdata/
+.pytest_cache/
+pytest-cache-files-*/

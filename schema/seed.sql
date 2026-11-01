@@ -58,6 +58,7 @@ INSERT INTO unit (code, ucum, name, dimension, si_factor) VALUES
     ('W',    'W',   'watt',         'power',       1),
     ('V',    'V',   'volt',         'voltage',     1),
     ('A',    'A',   'ampere',       'current',     1),
+    ('deg',  'deg', 'degree',         'angle',       1),
     ('degC', 'Cel', 'degree Celsius', 'temperature', 1)
 ON CONFLICT (code) DO UPDATE
     SET ucum = EXCLUDED.ucum, name = EXCLUDED.name,
