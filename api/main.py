@@ -626,3 +626,145 @@ def export(
     return StreamingResponse(
         stream_jsonl() if format == "jsonl" else stream_csv(), media_type=media_type, headers=headers
     )
+
+
+class MergeRequest(BaseModel):
+    """The keeper is always explicit: the tool may suggest one, but the client decides."""
+
+    keep: str = Field(min_length=4, max_length=64)
+    reason: str | None = Field(default=None, max_length=500)
+    dry_run: bool = False
+
+
+class IgnoreRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
+
+
+# Business outcomes come back from SQL as {ok, code, ...} instead of exceptions, so this table is
+# the whole mapping between "what the merge function decided" and "what the client is told".
+_DUPLICATE_FAILURES = {
+    "not_found": (404, "not_found", "duplicate pair not found"),
+    "conflict": (409, "conflict", "pair cannot be decided in its current state"),
+}
+
+
+def _duplicate_result(report: dict[str, Any]) -> dict[str, Any]:
+    """Return a report, or raise the ApiError that matches its code (doc 7)."""
+    code = report.get("code")
+    if code in _DUPLICATE_FAILURES:
+        status, error_code, message = _DUPLICATE_FAILURES[code]
+        detail = {k: v for k, v in report.items() if k not in {"ok", "code"}}
+        raise ApiError(status, error_code, message, detail)
+    return {**report, "schema_version": SCHEMA_VERSION}
+
+
+@app.get("/v1/duplicates", tags=["duplicates"], dependencies=[Depends(require_token)])
+def duplicates(
+    status: str | None = Query(default=None, pattern="^(actionable|open|ignored|merged|all)$"),
+    limit: int = Query(default=20, ge=1, le=100),
+    cursor: str | None = Query(default=None),
+    conn: psycopg.Connection = Depends(db.connection),
+) -> dict[str, Any]:
+    """The review queue: open pairs by default, still-decided ones on request (doc 3, 7)."""
+    offset = decode_cursor(cursor)
+    payload = db.query_one(
+        conn,
+        "SELECT material_duplicate_queue(%(status)s, %(limit)s, %(offset)s) AS payload",
+        {"status": status, "limit": limit, "offset": offset},
+    )["payload"]
+    total = int(payload["total"])
+    rows = payload["rows"]
+    next_offset = offset + len(rows)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": payload["status"],
+        "total": total,
+        "offset": offset,
+        "limit": int(payload["limit"]),
+        "rows": rows,
+        "next_cursor": encode_cursor(next_offset) if next_offset < total else None,
+    }
+
+
+@app.get(
+    "/v1/duplicates/{uid_a}/{uid_b}",
+    tags=["duplicates"],
+    dependencies=[Depends(require_token)],
+)
+def duplicate_preview(
+    uid_a: str,
+    uid_b: str,
+    conn: psycopg.Connection = Depends(db.connection),
+) -> dict[str, Any]:
+    """Preview a merge: the plan, a keeper suggestion and the blockers, and no writes (doc 7)."""
+    preview = db.query_value(
+        conn,
+        "SELECT material_merge_preview(%(a)s::text, %(b)s::text)",
+        {"a": uid_a, "b": uid_b},
+    )
+    if preview is None:
+        raise ApiError(404, "not_found", "duplicate pair not found", {"uid_a": uid_a, "uid_b": uid_b})
+    return {**preview, "schema_version": SCHEMA_VERSION}
+
+
+@app.post(
+    "/v1/duplicates/{uid_a}/{uid_b}/merge",
+    tags=["duplicates"],
+    dependencies=[Depends(require_token)],
+)
+def duplicate_merge(
+    uid_a: str,
+    uid_b: str,
+    body: MergeRequest,
+    x_actor: str | None = Header(default=None, alias="X-Actor"),
+    conn: psycopg.Connection = Depends(db.connection),
+) -> dict[str, Any]:
+    """Merge a pair behind an explicit keeper; `dry_run` returns the report without writing."""
+    report = db.query_value(
+        conn,
+        """
+        SELECT material_merge(
+            %(a)s::text, %(b)s::text, %(keep)s::text, %(reason)s::text,
+            %(dry_run)s::boolean, %(actor)s::text
+        )
+        """,
+        {
+            "a": uid_a,
+            "b": uid_b,
+            "keep": body.keep,
+            "reason": body.reason,
+            "dry_run": body.dry_run,
+            "actor": actor_from(x_actor),
+        },
+    )
+    return _duplicate_result(report)
+
+
+@app.post(
+    "/v1/duplicates/{uid_a}/{uid_b}/ignore",
+    tags=["duplicates"],
+    dependencies=[Depends(require_token)],
+)
+def duplicate_ignore(
+    uid_a: str,
+    uid_b: str,
+    body: IgnoreRequest | None = None,
+    x_actor: str | None = Header(default=None, alias="X-Actor"),
+    conn: psycopg.Connection = Depends(db.connection),
+) -> dict[str, Any]:
+    """Record "not a duplicate" so the pair stops appearing in the review queue."""
+    report = db.query_value(
+        conn,
+        """
+        SELECT material_duplicate_ignore(
+            %(a)s::text, %(b)s::text, %(reason)s::text, %(actor)s::text
+        )
+        """,
+        {
+            "a": uid_a,
+            "b": uid_b,
+            "reason": body.reason if body else None,
+            "actor": actor_from(x_actor),
+        },
+    )
+    return _duplicate_result(report)

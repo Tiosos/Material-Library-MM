@@ -270,3 +270,86 @@ Verification:
 
 The contract now covers the whole decision path: scan (1-2), preview and queue (3), merge (4) and
 ignore (5), including "preview writes nothing" and "a merge is exactly one search result fewer".
+
+## Step 4 - HTTP routes and pytest
+
+Routes added to `api/main.py`, all behind `require_token` and none of them logging a search:
+
+| Route | Behaviour |
+| --- | --- |
+| `GET /v1/duplicates` | `material_duplicate_queue`, `status` defaults to the queue default (`actionable` = open + ignored), `limit` 1..100, cursor paging, response `{schema_version, status, total, offset, limit, rows, next_cursor}` |
+| `GET /v1/duplicates/{uid_a}/{uid_b}` | `material_merge_preview`; 404 `not_found` for an unknown pair, no writes |
+| `POST /v1/duplicates/{uid_a}/{uid_b}/merge` | body `{keep, reason?, dry_run?}`; 200 report with `code` `merged`/`dry_run`/`already_merged`, 404 `not_found`, 409 `conflict` (blockers in `detail`), 400 `bad_request` (keeper outside the pair, reason over 500 characters) |
+| `POST /v1/duplicates/{uid_a}/{uid_b}/ignore` | body `{reason?}` or no body; 200 `ignored`, 404, 409 when the pair is already merged |
+
+The mapping from a SQL decision to an HTTP answer is one table (`_DUPLICATE_FAILURES`), so a new
+business code cannot silently become a 500.
+
+`tests/test_merge.py` (13 tests) is HTTP-level like `tests/test_api.py`. Deviation from section
+10.3 of the design, recorded here: the tests cannot share the read-only session connection,
+because the app owns its pooled connections and would not see a transaction opened by the test.
+They insert their own pair with random Crockford-base32 uids, scan it with
+`material_duplicate_scan()` (the routes never scan), and assert against the database rather than
+against constants, so the suite is re-runnable on a dirty database. The leftover probe records are
+harmless: every assertion compares with the database, and CI recreates it per run.
+
+Verification:
+
+| Command | Expected | Actual |
+| --- | --- | --- |
+| `GET /v1/duplicates?status=all&limit=1` then follow `next_cursor` | every pair exactly once | 719 pairs walked, no repeat (the assertion collects `(uid_a, uid_b)`, not `uid_a` - one record can pair with several) |
+| `GET /v1/duplicates?status=nonsense` | 400 | 400 `bad_request` |
+| `GET /v1/duplicates/{a}/{b}` | 200 with plan | 200, `keep`/`suggestion` in the pair, `can_merge true`, `material_event` unchanged |
+| `GET /v1/duplicates/mat_nope1/mat_nope2` | 404 | 404 `not_found` |
+| `POST .../merge {"dry_run": true}` | 200 `dry_run`, no write | `dry_run`, `superseded` count unchanged |
+| `POST .../merge {"keep": ...}` | 200 `merged`, anchors 2 | `merged`, search `total` -1, survivor `superseded`/`superseded_by`, absent from results, still resolvable through `/v1/materials/{uid}` |
+| same body again | 200 `already_merged`, no new event | `already_merged`, event count unchanged |
+| `keep` outside the pair | 400 | 400 `keep must be one of the two pair members` |
+| merge of the archived pair | 409 | 409 `conflict` |
+| `POST .../ignore {"reason": ...}` | 200 `ignored`, row updated | `ignored`, `decided_by pytest-merge`, note stored |
+| ignore unknown pair | 404 | 404 |
+| `GET /v1/duplicates` with `ML_API_TOKEN` set | 401 / 200 with bearer | 401 without header, 200 with |
+| `python -m pytest -q tests -p no:cacheprovider` on `ml_t31` (`both`) | 34 passed | `34 passed, 51 warnings in 3.02s` |
+
+A real bug found here: `material_duplicate_queue` is correct, but my first paging assertion used
+`uid_a` as the identity. One material can be the `uid_a` of several pairs, so the set looked
+smaller than the list; the assertion now compares pairs.
+
+## Step 5 - CLI, CI and docs
+
+- `scripts/merge_materials.py` (`--dsn`, `--keep`, `--merge`, `--reason`, `--actor`, `--dry-run`,
+  `--json`): calls `material_merge`, prints a one-screen summary (adopted fields, dropped survivor
+  values, children moved, warnings), exits 0 for merged/planned/already-merged, 1 when the
+  database refuses, 2 without a DSN. `--dry-run` prints the plan and writes nothing.
+- `.github/workflows/ci.yml` job `api`: `schema/merge.sql` is applied to every prepared database,
+  a fourth database `ml_merge` gets `eval/fixture.sql`, the merge contract runs against
+  `ml_fixture` and `ml_api`, and a "Duplicate CLI (scan, dry run, merge, retry)" step drives both
+  CLIs and asserts `scan.pairs == 1`, `report.code == "merged"`, `report.anchors == 2`.
+  The contracts run before the HTTP tests on purpose: the merge contract mutates the pair it
+  merges and the HTTP tests add their own probe records.
+- `README.md` status: T2 checked off, next step now the MCP server. `docs/data-model-v2.md` §6:
+  B7 is "Done" with a pointer to `schema/merge.sql` and this design.
+
+Verification:
+
+| Command | Expected | Actual |
+| --- | --- | --- |
+| `python scripts/duplicate_scan.py --dsn .../ml_t36 --quiet` | exit 0 | exit 0 |
+| `... --json .tmp/scan.json` | `pairs 1` | `pairs 1` |
+| `python scripts/merge_materials.py ... --dry-run` | plan, no write | `dry_run:` with adopted fields, dropped values, children counts |
+| `python scripts/merge_materials.py ... --json .tmp/merge_report.json` | `merged`, anchors 2 | `merged`, `anchors 2`, prices moved 2, measures moved 1 / demoted 1 |
+| same command again | exit 0, `already_merged` | `already_merged`, exit 0 |
+| merge of the archived pair via CLI | exit 1 | `conflict: survivor_status`, exit 1 |
+| `python .tmp/run_sql.py scripts/merge_contract.sql --db ml_t33` (fixture) | OK | `OK` |
+| same on `ml_t34` (`both`) | OK | `OK` |
+| `python .tmp/run_sql.py scripts/api_contract.sql --db ml_t34` | OK | `OK` |
+| `python scripts/eval_search.py --dsn .../ml_t33 --dataset fixture` | PASS | `RESULT PASS` |
+| `yaml.safe_load(.github/workflows/ci.yml)` | parses, `api` job has 10 steps | parses, 10 steps |
+| `python scripts/check_english.py` | OK | `OK: no CJK text found` |
+
+## Result
+
+T2 is implemented end to end: detection (scan with four exclusion rules), review
+(`GET /v1/duplicates`), preview, merge behind an explicit keeper, ignore, and both CLIs. All seven
+acceptance criteria of `docs/t2-merge.md` §10.4 hold on fresh databases, and the read API, its
+contract and the search evaluation gate are unchanged.

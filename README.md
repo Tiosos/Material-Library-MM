@@ -195,12 +195,12 @@ Edit the material pool at the top of `proto/build_db.py` (`BOARDS` / `HARDWARE` 
 - [x] **Search v2**: five-level graceful degradation (exact / prefix / and / relaxed / fuzzy) + filter push-down + facet narrowing (accepted at the SQL layer)
 - [x] **Import pipeline v1**: CSV/XLSX free-form header mapping + PDF catalogue extraction (run on 122 rows of real Blum data, idempotent)
 - [x] **Read API v1 (T1)**: 10 read-only endpoints over PostgreSQL, unit-aware measure filters, truthful `total` with cursor paging, search logging + click tracking, JSONL/CSV export, pytest contract tests, CI job `api` and a search evaluation gate (fixture + Blum catalogue, MRR@10 1.000 on the holdout split)
-- [ ] Duplicate merge workflow (candidates are stored, the merge action is not done; it is the next task, T2)
+- [x] **Duplicate merge (T2)**: scan for candidate pairs, review queue, preview, merge with an explicit keeper (survivor becomes a superseded tombstone), ignore; HTTP routes and CLIs, contract assertions and pytest coverage in the `api` job
 - [ ] MCP server on top of the read API (T1b; the API is the stable layer it would wrap)
 - [ ] Real-data ETL (joineryflow database connection or exported snapshot)
 - [ ] write-back executor (the request table is ready, the PATCH executor is not done)
 
-**Next step: T2 (duplicate merge), then MCP on the read API.** `docs/api-v1.md` §12 lists what v1 deliberately leaves out (`expand=variants` family collapsing, export envelope).
+**Next step: MCP server on the read API (T1b), then the real-data ETL.** `docs/api-v1.md` §12 lists what the read API deliberately leaves out (`expand=variants` family collapsing, export envelope); `docs/t2-merge.md` §9 explains recovery without an `unmerge()`.
 
 ---
 
