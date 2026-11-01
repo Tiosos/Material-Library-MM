@@ -353,11 +353,17 @@ $$;
 -- ---------------------------------------------------------------------------
 -- One-shot API payload: level + total + results (including family/measures)
 -- ---------------------------------------------------------------------------
+-- One-shot API payload: level + total + results (including family/measures)
+-- ---------------------------------------------------------------------------
 -- p_offset moves the page window; total always counts the whole match set, so a client on page
 -- 9 still learns how many matches exist. `offset` and `limit` are echoed so the HTTP edge can
 -- build an opaque cursor without re-deriving the clamp.
+--
+-- p_collapse (default true) answers a shopping question once per product family: the hit is the
+-- highest scoring member, ties broken by uid, and it carries `variants` (the other member uids) and
+-- `variant_count` (family size). `total` counts groups in that mode, so paging is never short.
+-- Pass false for one row per material record (what `expand=variants` does at the edge).
 DROP FUNCTION IF EXISTS material_search_page(text, text, text, text, jsonb, integer, integer);
-
 CREATE OR REPLACE FUNCTION material_search_page(
     p_q        text    DEFAULT NULL,
     p_category text    DEFAULT NULL,
@@ -366,28 +372,64 @@ CREATE OR REPLACE FUNCTION material_search_page(
     p_attrs    jsonb   DEFAULT '{}'::jsonb,
     p_limit    integer DEFAULT 20,
     p_offset   integer DEFAULT 0,
-    p_measures jsonb   DEFAULT '{}'::jsonb
+    p_measures jsonb   DEFAULT '{}'::jsonb,
+    p_collapse boolean DEFAULT true
 ) RETURNS jsonb
 LANGUAGE sql STABLE AS $$
     WITH hits AS (
         SELECT * FROM material_search(p_q, p_category, p_brand, p_supplier, p_attrs, false, 5000, 0, p_measures)
     ),
-    page AS (
-        SELECT h.material_uid, h.score, h.level
+    sized AS (
+        SELECT coalesce(m.family_id, h.material_uid) AS group_key,
+               h.material_uid, h.score, h.level, h.total
           FROM hits h
-         ORDER BY h.score DESC, h.material_uid
+          JOIN material m ON m.material_uid = h.material_uid
+    ),
+    sizes AS (
+        SELECT s.group_key,
+               count(*) AS member_count,
+               array_agg(s.material_uid ORDER BY s.score DESC, s.material_uid) AS members
+          FROM sized s
+         GROUP BY s.group_key
+    ),
+    collapsed AS (
+        SELECT DISTINCT ON (s.group_key)
+               s.material_uid, s.score, s.level, z.member_count, z.members
+          FROM sized s
+          JOIN sizes z USING (group_key)
+         ORDER BY s.group_key, s.score DESC, s.material_uid
+    ),
+    flat AS (
+        SELECT h.material_uid, h.score, h.level, 1 AS member_count, ARRAY[h.material_uid] AS members
+          FROM hits h
+    ),
+    visible AS (
+        SELECT * FROM collapsed WHERE coalesce(p_collapse, true)
+        UNION ALL
+        SELECT * FROM flat WHERE NOT coalesce(p_collapse, true)
+    ),
+    page AS (
+        SELECT * FROM visible
+         ORDER BY score DESC, material_uid
          LIMIT greatest(p_limit, 1)
         OFFSET greatest(p_offset, 0)
+    ),
+    totals AS (
+        SELECT CASE WHEN coalesce(p_collapse, true)
+                    THEN (SELECT count(*) FROM collapsed)
+                    ELSE coalesce((SELECT max(total) FROM hits), 0)
+               END AS n
     )
     SELECT jsonb_build_object(
         'q', p_q,
         'level', coalesce((SELECT level FROM page LIMIT 1),
-                          (SELECT level FROM hits LIMIT 1),
+                          (SELECT level FROM visible LIMIT 1),
                           'none'),
-        'total', coalesce((SELECT max(total) FROM hits), 0),
+        'total', (SELECT n FROM totals),
         'offset', greatest(p_offset, 0),
         'limit', greatest(p_limit, 1),
-        'suggestion', CASE WHEN coalesce((SELECT max(total) FROM hits), 0) = 0
+        'collapsed', coalesce(p_collapse, true),
+        'suggestion', CASE WHEN (SELECT n FROM totals) = 0
                            THEN (SELECT suggestion FROM material_suggest(p_q, 1))
                            ELSE NULL END,
         'results', coalesce((
@@ -402,6 +444,10 @@ LANGUAGE sql STABLE AS $$
                        'variant_values', v.variant_values,
                        'unit', v.unit,
                        'unit_cost', v.unit_cost,
+                       'variant_count', p.member_count,
+                       'variants', CASE WHEN coalesce(p_collapse, true)
+                                        THEN to_jsonb(array_remove(p.members, p.material_uid))
+                                        ELSE '[]'::jsonb END,
                        'score', round(p.score::numeric, 4)))
               FROM page p JOIN v_material v USING (material_uid)), '[]'::jsonb));
 $$;

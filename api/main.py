@@ -274,6 +274,7 @@ def _search_payload(
     measures: dict[str, Any],
     limit: int,
     offset: int,
+    collapse: bool = True,
 ) -> dict[str, Any]:
     """One call to material_search_page(): the payload shape lives in SQL, not here."""
     row = db.query_one(
@@ -287,7 +288,8 @@ def _search_payload(
                    p_attrs => %(attrs)s::jsonb,
                    p_limit => %(limit)s,
                    p_offset => %(offset)s,
-                   p_measures => %(measures)s::jsonb) AS payload
+                   p_measures => %(measures)s::jsonb,
+                   p_collapse => %(collapse)s) AS payload
         """,
         {
             "q": q,
@@ -298,6 +300,7 @@ def _search_payload(
             "measures": json.dumps(measures, sort_keys=True),
             "limit": limit,
             "offset": offset,
+            "collapse": collapse,
         },
     )
     return row["payload"]
@@ -355,7 +358,11 @@ def search_materials(
     ),
     limit: int = Query(default=20, ge=1, le=100),
     cursor: str | None = Query(default=None, description="opaque offset cursor from next_cursor"),
-    expand: str = Query(default="variants", pattern="^variants$"),
+    expand: str | None = Query(
+        default=None,
+        pattern="^variants$",
+        description="omit to collapse a family to its best hit; `variants` returns one row per material",
+    ),
     x_actor: str | None = Header(default=None, description="system name, never a person"),
     x_no_log: str | None = Header(default=None, description="1 disables search logging"),
     conn: psycopg.Connection = Depends(db.connection),
@@ -376,6 +383,7 @@ def search_materials(
         measures=measures_obj,
         limit=limit,
         offset=offset,
+        collapse=expand != "variants",
     )
     took_ms = int((time.perf_counter() - started) * 1000)
 
@@ -567,15 +575,16 @@ def _export_csv_value(value: Any) -> Any:
 
 @app.get("/v1/export", tags=["sync"], dependencies=[Depends(require_token)])
 def export(
-    format: str = Query(default="jsonl", pattern="^(jsonl|csv)$"),
+    format: str = Query(default="jsonl", pattern="^(jsonl|csv|json)$"),
     include_archived: bool = Query(default=False),
     conn: psycopg.Connection = Depends(db.connection),
 ) -> StreamingResponse:
-    """Stream the whole catalogue as JSONL (one UMR v2 document per line) or a fixed CSV.
+    """Stream the whole catalogue: JSONL lines, a fixed CSV, or one JSON envelope.
 
-    The response is not wrapped in an envelope: every JSONL line validates against
-    schema/material.schema.json on its own, and the count travels in a header so the body can
-    be streamed without a second pass.
+    `jsonl` is one UMR v2 document per line and `csv` has the fixed EXPORT_COLUMNS header, so each
+    line stands alone. `json` wraps the same documents in
+    `{schema_version, exported_at, count, records}` (schema/export.schema.json) for recipients who
+    want version and moment inside the file. Headers carry the same metadata in every format.
     """
     count = int(
         db.query_value(
@@ -592,7 +601,11 @@ def export(
         "X-Record-Count": str(count),
         "Content-Disposition": f'attachment; filename="materials-{exported_at[:10]}.{format}"',
     }
-    media_type = "application/x-ndjson" if format == "jsonl" else "text/csv; charset=utf-8"
+    media_type = {
+        "jsonl": "application/x-ndjson",
+        "csv": "text/csv; charset=utf-8",
+        "json": "application/json",
+    }[format]
 
     def stream_jsonl() -> Iterator[str]:
         with db.get_pool().connection() as stream_conn:
@@ -623,9 +636,25 @@ def export(
             writer.writerow(EXPORT_COLUMNS)
             yield buffer.getvalue()
 
-    return StreamingResponse(
-        stream_jsonl() if format == "jsonl" else stream_csv(), media_type=media_type, headers=headers
-    )
+    def stream_json() -> Iterator[str]:
+        yield (
+            '{"schema_version": %s, "exported_at": %s, "count": %d, "records": ['
+            % (json.dumps(SCHEMA_VERSION), json.dumps(exported_at), count)
+        )
+        first = True
+        with db.get_pool().connection() as stream_conn:
+            for row in stream_conn.execute(
+                "SELECT doc FROM material_export(p_include_archived => %(all)s)",
+                {"all": include_archived},
+            ):
+                if not first:
+                    yield ","
+                first = False
+                yield json.dumps(row["doc"], ensure_ascii=False, sort_keys=True)
+        yield "]}" + "\n"
+
+    streams = {"jsonl": stream_jsonl, "csv": stream_csv, "json": stream_json}
+    return StreamingResponse(streams[format](), media_type=media_type, headers=headers)
 
 
 class MergeRequest(BaseModel):

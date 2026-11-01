@@ -51,3 +51,8 @@ def export_columns() -> list[str]:
     from api.main import EXPORT_COLUMNS
 
     return EXPORT_COLUMNS
+
+@pytest.fixture(scope="session")
+def export_schema(material_schema: dict[str, Any]) -> dict[str, Any]:
+    """The envelope schema, plus a registry so its relative $ref to the UMR schema resolves."""
+    return json.loads((ROOT / "schema" / "export.schema.json").read_text(encoding="utf-8"))

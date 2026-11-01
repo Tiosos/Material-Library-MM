@@ -8,6 +8,7 @@ database, e.g. `ML_DSN=postgresql://postgres@127.0.0.1:55432/ml_test pytest -q t
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import jsonschema
@@ -17,6 +18,14 @@ from fastapi.testclient import TestClient
 
 def active_count(conn) -> int:
     return conn.execute("SELECT count(*) FROM material WHERE status NOT IN ('archived','superseded')").fetchone()[0]
+
+
+def group_count(conn) -> int:
+    """Families collapse to one hit, so the default total counts live groups, not rows."""
+    return conn.execute(
+        "SELECT count(DISTINCT coalesce(family_id, material_uid)) FROM material "
+        "WHERE status NOT IN ('archived','superseded')"
+    ).fetchone()[0]
 
 
 def assert_error(response, status: int, code: str) -> dict[str, Any]:
@@ -42,15 +51,65 @@ def test_meta(client: TestClient, conn) -> None:
 
 
 def test_browse_total_is_truthful(client: TestClient, conn) -> None:
-    total = active_count(conn)
     body = client.get("/v1/materials", params={"limit": 1}).json()
     assert body["level"] == "browse"
-    assert body["total"] == total
+    assert body["total"] == group_count(conn)
+    assert body["collapsed"] is True
     assert len(body["results"]) == 1
     assert body["next_cursor"] is not None
 
+    expanded = client.get("/v1/materials", params={"limit": 1, "expand": "variants"}).json()
+    assert expanded["collapsed"] is False
+    assert expanded["total"] == active_count(conn)
+
+
+def test_collapsed_family_hit_lists_its_variants(client: TestClient, conn) -> None:
+    family_uid = conn.execute(
+        "SELECT material_uid FROM material WHERE family_id IS NOT NULL "
+        "AND status NOT IN ('archived','superseded') ORDER BY material_uid LIMIT 1"
+    ).fetchone()
+    if family_uid is None:
+        pytest.skip("no live family in this database")
+    family_id = conn.execute(
+        "SELECT family_id FROM material WHERE material_uid = %s", (family_uid[0],)
+    ).fetchone()[0]
+    # The family is found through its own name so the assertion does not depend on ranking.
+    name = conn.execute("SELECT name FROM material WHERE material_uid = %s", (family_uid[0],)).fetchone()[0]
+    hits = client.get("/v1/materials", params={"q": name, "limit": 50}).json()
+    hit = next((item for item in hits["results"] if item["family_id"] == family_id), None)
+    assert hit is not None, hits
+    expanded = client.get(
+        "/v1/materials", params={"q": name, "limit": 50, "expand": "variants"}
+    ).json()
+    matched = {item["material_uid"] for item in expanded["results"] if item["family_id"] == family_id}
+    # variants lists the other members that matched this query, not the whole family (docs/api-v1.md 3.4).
+    assert hit["variant_count"] == len(matched)
+    assert set(hit["variants"]) == matched - {hit["material_uid"]}
+    assert hit["material_uid"] not in hit["variants"]
+
 
 def test_paging_visits_every_row_once(client: TestClient) -> None:
+    """Expanded paging still walks every material record exactly once."""
+    seen: list[str] = []
+    cursor = None
+    pages = 0
+    while True:
+        params: dict[str, Any] = {"limit": 7, "expand": "variants"}
+        if cursor:
+            params["cursor"] = cursor
+        body = client.get("/v1/materials", params=params).json()
+        assert len(body["results"]) <= 7
+        seen.extend(item["material_uid"] for item in body["results"])
+        pages += 1
+        cursor = body["next_cursor"]
+        if not cursor:
+            break
+        assert pages < 100, "paging did not terminate"
+    assert len(seen) == len(set(seen)) == body["total"], (len(seen), len(set(seen)), body["total"])
+
+
+def test_paging_visits_every_group_once(client: TestClient, conn) -> None:
+    """The default (collapsed) walk is one representative per family and no short page."""
     seen: list[str] = []
     cursor = None
     pages = 0
@@ -66,7 +125,7 @@ def test_paging_visits_every_row_once(client: TestClient) -> None:
         if not cursor:
             break
         assert pages < 100, "paging did not terminate"
-    assert len(seen) == len(set(seen)) == body["total"], (len(seen), len(set(seen)), body["total"])
+    assert len(seen) == len(set(seen)) == group_count(conn), (len(seen), len(set(seen)), body["total"])
 
 
 def test_bad_cursor_is_400(client: TestClient) -> None:
@@ -158,7 +217,8 @@ def test_family_absent_is_404(client: TestClient, conn) -> None:
 
 
 def test_facets_match_total(client: TestClient) -> None:
-    search = client.get("/v1/materials", params={"q": "laminex", "limit": 1}).json()
+    # Facets count material records, while the default page total counts collapsed groups.
+    search = client.get("/v1/materials", params={"q": "laminex", "limit": 1, "expand": "variants"}).json()
     facets = client.get("/v1/facets", params={"q": "laminex"}).json()
     groups: dict[str, int] = {}
     for facet in facets["facets"]:
@@ -207,6 +267,28 @@ def test_export_jsonl(client: TestClient, conn, material_schema: dict[str, Any])
     assert {item["material_uid"] for item in map(json.loads, lines)} == {
         row[0] for row in conn.execute("SELECT material_uid FROM material WHERE status <> 'archived'")
     }
+
+
+def test_export_json(client: TestClient, conn, export_schema: dict[str, Any]) -> None:
+    from referencing import Registry, Resource
+    from referencing.jsonschema import DRAFT202012
+
+    material_schema = json.loads((Path(__file__).resolve().parents[1] / "schema" / "material.schema.json").read_text(encoding="utf-8"))
+    registry = Registry().with_resources(
+        [
+            (material_schema["$id"], Resource.from_contents(material_schema, default_specification=DRAFT202012)),
+            (export_schema["$id"], Resource.from_contents(export_schema, default_specification=DRAFT202012)),
+        ]
+    )
+    response = client.get("/v1/export", params={"format": "json"})
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    document = json.loads(response.text)
+    jsonschema.Draft202012Validator(export_schema, registry=registry).validate(document)
+    expected = conn.execute("SELECT count(*) FROM material WHERE status <> 'archived'").fetchone()[0]
+    assert document["count"] == len(document["records"]) == expected
+    assert document["schema_version"] == "2"
+    assert document["exported_at"]
 
 
 def test_export_csv(client: TestClient, export_columns: list[str]) -> None:

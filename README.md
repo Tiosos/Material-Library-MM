@@ -196,11 +196,12 @@ Edit the material pool at the top of `proto/build_db.py` (`BOARDS` / `HARDWARE` 
 - [x] **Import pipeline v1**: CSV/XLSX free-form header mapping + PDF catalogue extraction (run on 122 rows of real Blum data, idempotent)
 - [x] **Read API v1 (T1)**: 10 read-only endpoints over PostgreSQL, unit-aware measure filters, truthful `total` with cursor paging, search logging + click tracking, JSONL/CSV export, pytest contract tests, CI job `api` and a search evaluation gate (fixture + Blum catalogue, MRR@10 1.000 on the holdout split)
 - [x] **Duplicate merge (T2)**: scan for candidate pairs, review queue, preview, merge with an explicit keeper (survivor becomes a superseded tombstone), ignore; HTTP routes and CLIs, contract assertions and pytest coverage in the `api` job
-- [ ] MCP server on top of the read API (T1b; the API is the stable layer it would wrap)
+- [x] **Read API v1b (T1b)**: families collapse to their best hit with `variant_count`/`variants` (`expand=variants` returns the records), and `format=json` exports the versioned envelope (`{schema_version, exported_at, count, records}`) validated by `schema/export.schema.json`
+- [ ] MCP server on top of the read API (the API is the stable layer it would wrap)
 - [ ] Real-data ETL (joineryflow database connection or exported snapshot)
 - [ ] write-back executor (the request table is ready, the PATCH executor is not done)
 
-**Next step: MCP server on the read API (T1b), then the real-data ETL.** `docs/api-v1.md` §12 lists what the read API deliberately leaves out (`expand=variants` family collapsing, export envelope); `docs/t2-merge.md` §9 explains recovery without an `unmerge()`.
+**Next step: MCP server on the read API (a design document first, per `docs/t1b-progress.md`), then the real-data ETL.** T1b closed the two gaps the read API used to advertise: families collapse by default (`expand=variants` returns the records) and `format=json` exports the versioned envelope validated by `schema/export.schema.json`. `docs/t2-merge.md` §9 explains recovery without an `unmerge()`.
 
 ---
 

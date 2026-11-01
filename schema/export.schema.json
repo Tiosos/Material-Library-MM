@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://materiallib.local/schema/export.v2.json",
+  "title": "Material Library catalogue export",
+  "description": "One document with the whole catalogue (GET /v1/export?format=json). Every entry of records is a UMR v2 document and validates against material.v2.json on its own; this envelope only adds the version, the moment and the count so a file is self-describing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "exported_at", "count", "records"],
+  "properties": {
+    "schema_version": {
+      "const": "2",
+      "description": "Contract version of the records, not of the envelope."
+    },
+    "exported_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp of the export, the same value as the X-Exported-At header."
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of records in the file; the same value as the X-Record-Count header."
+    },
+    "records": {
+      "type": "array",
+      "items": {
+        "$ref": "material.v2.json"
+      }
+    }
+  }
+}
