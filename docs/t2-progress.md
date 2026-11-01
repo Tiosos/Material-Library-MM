@@ -17,7 +17,7 @@ and warnings but not a survivor snapshot).
 | 0 | Preflight: `schema/merge.sql`, fixture duplicate pairs, fresh database, this log | [x] |
 | 1 | Candidate columns are already in step 0; `material_duplicate_scan()` + `scripts/duplicate_scan.py` | [x] |
 | 2 | `material_duplicate_queue()` + `material_merge_preview()` | [x] |
-| 3 | `material_merge()` + `material_duplicate_ignore()` | [ ] |
+| 3 | `material_merge()` + `material_duplicate_ignore()` | [x] |
 | 4 | HTTP routes in `api/main.py` + `tests/test_merge.py` | [ ] |
 | 5 | `scripts/merge_materials.py`, `scripts/merge_contract.sql`, CI job step, docs | [ ] |
 
@@ -203,3 +203,70 @@ Verification:
 Cross-database note: the contract and the queue assertions must find the designed pair wherever
 it ranks, so the check scans the whole page (`material_duplicate_queue('all', 500)`) instead of
 looking at row zero; on the fixture database it happens to be the only row.
+
+## Step 3 - merge and ignore
+
+Shipped in `schema/merge.sql`:
+
+- `material_merge(p_uid_a, p_uid_b, p_keep, p_reason DEFAULT NULL, p_dry_run boolean DEFAULT
+  false, p_actor text DEFAULT NULL) RETURNS jsonb` - the ordered algorithm from section 6: lock
+  both rows in uid order, validate, build the plan, stop at `p_dry_run`, set `ml.actor` and
+  `ml.source`, one UPDATE on the keeper, move the children, supersede the survivor, mark the
+  candidate rows, write two merge events, return the report.
+- `material_duplicate_ignore(p_uid_a, p_uid_b, p_reason DEFAULT NULL, p_actor text DEFAULT
+  NULL) RETURNS jsonb` - records `ignored` with the decision columns, or `conflict` when the pair
+  is already merged, or `not_found` when a uid is unknown.
+
+Deviations worth recording:
+
+1. **Business outcomes are data, not exceptions.** `material_merge` raises SQLSTATE 22023 only
+   for caller mistakes (a `keep` outside the pair, a reason over 500 characters). "not found",
+   "already merged" and "conflict" come back as `{ok, code, ...}` so the HTTP layer in step 4 can
+   map them to 404/409 without parsing message text, and so a retry is not an error path.
+2. **Idempotency first.** A second call for the same pair returns `code: already_merged` with the
+   same `keep`/`merged` and creates no events. The algorithm checks this before it locks deeply,
+   so a client can retry safely after a dropped connection.
+3. **One UPDATE on the keeper.** The keeper's field changes are assembled into a single
+   `UPDATE material SET ...`, so one merge is one `material_revision` row and one event, not
+   twenty.
+4. **Measure demotion is the interesting rule.** When the survivor carries a preferred row for a
+   key the keeper also has, the survivor row is kept as `is_preferred = false` with its original
+   `source_system`/`source_ref` instead of being deleted. The keeper's value wins, the merged
+   value stays auditable, and the partial unique index still allows exactly one preferred row.
+5. **Price collisions follow the index, not the numbers.** A survivor price is dropped only when
+   `(supplier_id, valid_from, qty_break, cost_basis)` already exists on the keeper - the columns
+   of the unique index. Dropping on `unit_cost` equality would have let a row through that still
+   violated the index.
+6. **Relations between the pair are deleted, not repointed into a self-loop.** `material_relation`
+   has `CHECK (from_uid <> to_uid)`, so the two links between the pair are removed before the
+   remaining ones are repointed.
+
+Verification:
+
+| Command | Expected | Actual |
+| --- | --- | --- |
+| `material_merge(..., p_dry_run => true)` | `code dry_run`, nothing written | `dry_run`, materials 45 -> 45, superseded 1 -> 1 |
+| `material_merge('DXPK01','DXPK02','DXPK01', reason, false, 'tester')` | `code merged` | `merged`, `anchors 2`, warnings `commercial_mismatch`, `measure_conflict` |
+| keeper after that merge | active, richer record | `active`, name `Fixture Dup Smoked Veneer Panel`, `unit_cost 55.0000`, identifiers `FX-DUP-VEN-22` + `FX-DUP-VEN-22A`, measures `22 mm` preferred + `2.2 cm` not preferred, 2 prices, relation to `BRD018` |
+| survivor after that merge | tombstone with no children | `superseded`, `superseded_by DXPK01`, 0 identifiers/measures/prices |
+| `material_search` for the survivor | hidden | 0 rows |
+| `material_detail(survivor)` | still resolvable | `status superseded` |
+| candidate row | `merged` with decision | `merged`, `keep_uid DXPK01`, `decided_by tester`, note kept |
+| `material_event` for the pair | 2 merge anchors | 2 rows, `entity material_merge` |
+| same call again | `code already_merged` | `already_merged` |
+| `material_merge` with a third uid | SQLSTATE 22023 | `invalid_parameter_value` |
+| `material_merge` unknown pair | `code not_found` | `not_found` |
+| reverse direction `keep=DXPK02` | keeper keeps its own preferred value | keeper `22 mm` preferred, merged `2.2 cm` demoted, prices and identifiers moved |
+| `material_duplicate_ignore('DXPK05','DXPK06')` | `ignored` with decision | `ignored`, `decided_by anonymous`, score 1.0000 |
+| `material_duplicate_scan()` after that ignore | does not requeue | `pairs 0`, row still `ignored` |
+| `material_duplicate_ignore` on a merged pair | `conflict` | `conflict`, blocker `already_merged` |
+| ignore with a 501 character reason | SQLSTATE 22023 | `reason must be at most 500 characters` |
+| `python .tmp/run_sql.py scripts/merge_contract.sql --db ml_t25` (fixture) | OK (5 assertions) | `OK scripts/merge_contract.sql` |
+| same on `ml_t26` (fixture + samples) | OK | `OK scripts/merge_contract.sql` |
+| `python -m pytest -q tests -p no:cacheprovider` on `ml_t27` (`both`) | 21 passed | `21 passed, 37 warnings in 2.02s` |
+| `python scripts/eval_search.py --dsn .../ml_t28 --dataset fixture` | PASS | PASS, holdout MRR 1.000 / hit@1 1.000 / zero 0.0% / level 100% |
+| `python .tmp/run_sql.py scripts/api_contract.sql --db ml_t27` | OK | `OK scripts/api_contract.sql` |
+| `python scripts/check_english.py` | OK | `OK: no CJK text found` |
+
+The contract now covers the whole decision path: scan (1-2), preview and queue (3), merge (4) and
+ignore (5), including "preview writes nothing" and "a merge is exactly one search result fewer".

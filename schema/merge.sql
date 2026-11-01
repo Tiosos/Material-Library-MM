@@ -575,3 +575,281 @@ END $$;
 
 COMMENT ON FUNCTION material_duplicate_queue(text, integer, integer) IS
     'Review list for duplicate candidates with a keeper suggestion per row.';
+
+-- ---------------------------------------------------------------------------
+-- material_merge - collapse one candidate pair into one record
+-- ---------------------------------------------------------------------------
+-- One call, one transaction. The survivor (p_merge) is never deleted: it becomes
+-- status='superseded' with superseded_by=<keeper>, so old links and old exports keep resolving.
+-- Business outcomes are returned as {ok, code} rather than raised, so the HTTP edge can map them
+-- to 404/409 without parsing messages. Caller mistakes raise SQLSTATE 22023.
+CREATE OR REPLACE FUNCTION material_merge(
+    p_uid_a   text,
+    p_uid_b   text,
+    p_keep    text,
+    p_reason  text DEFAULT NULL,
+    p_dry_run boolean DEFAULT false,
+    p_actor   text DEFAULT NULL
+) RETURNS jsonb
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_a      text := least(p_uid_a, p_uid_b);
+    v_b      text := greatest(p_uid_a, p_uid_b);
+    v_merge  text;
+    v_actor  text;
+    v_plan   jsonb;
+    v_fields jsonb;
+    v_sets   text[] := '{}';
+    v_events bigint := 0;
+    k        material;
+    s        material;
+BEGIN
+    IF p_keep IS NULL OR p_keep NOT IN (v_a, v_b) THEN
+        RAISE EXCEPTION 'keep must be one of the two pair members' USING ERRCODE = '22023';
+    END IF;
+    IF length(coalesce(p_reason, '')) > 500 THEN
+        RAISE EXCEPTION 'reason must be at most 500 characters' USING ERRCODE = '22023';
+    END IF;
+
+    v_merge := CASE WHEN p_keep = v_a THEN v_b ELSE v_a END;
+    v_actor := coalesce(nullif(btrim(p_actor), ''),
+                        nullif(current_setting('ml.actor', true), ''),
+                        'anonymous');
+
+    PERFORM 1 FROM material WHERE material_uid IN (v_a, v_b) ORDER BY material_uid FOR UPDATE;
+
+    SELECT * INTO k FROM material WHERE material_uid = p_keep;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'not_found');
+    END IF;
+    SELECT * INTO s FROM material WHERE material_uid = v_merge;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'not_found');
+    END IF;
+
+    -- already done: a retried request must not merge twice, and must not fail
+    IF s.superseded_by = p_keep THEN
+        RETURN jsonb_build_object('ok', true, 'code', 'already_merged',
+                                  'keep', p_keep, 'merged', v_merge);
+    END IF;
+
+    v_plan := material_merge_preview(v_a, v_b, p_keep);
+    IF jsonb_array_length(v_plan -> 'blockers') > 0 THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'conflict',
+                                  'keep', p_keep, 'merged', v_merge,
+                                  'blockers', v_plan -> 'blockers',
+                                  'plan', v_plan);
+    END IF;
+    IF p_dry_run THEN
+        RETURN jsonb_build_object('ok', true, 'code', 'dry_run',
+                                  'keep', p_keep, 'merged', v_merge, 'plan', v_plan);
+    END IF;
+
+    PERFORM set_config('ml.actor', v_actor, true);
+    PERFORM set_config('ml.source', 'merge', true);
+
+    -- 6. the survivor takes the resolved fields; one UPDATE means one revision
+    v_fields := v_plan -> 'fields';
+    IF v_fields ? 'name'                THEN v_sets := v_sets || format('name = %L', v_fields ->> 'name'); END IF;
+    IF v_fields ? 'description'         THEN v_sets := v_sets || format('description = %L', v_fields ->> 'description'); END IF;
+    IF v_fields ? 'model_no'            THEN v_sets := v_sets || format('model_no = %L', v_fields ->> 'model_no'); END IF;
+    IF v_fields ? 'product_type'        THEN v_sets := v_sets || format('product_type = %L', v_fields ->> 'product_type'); END IF;
+    IF v_fields ? 'brand_id'            THEN v_sets := v_sets || format('brand_id = %s::bigint', v_fields ->> 'brand_id'); END IF;
+    IF v_fields ? 'default_supplier_id' THEN v_sets := v_sets || format('default_supplier_id = %s::bigint', v_fields ->> 'default_supplier_id'); END IF;
+    IF v_fields ? 'default_supplier_ref' THEN v_sets := v_sets || format('default_supplier_ref = %L', v_fields ->> 'default_supplier_ref'); END IF;
+    IF v_fields ? 'family_id'           THEN v_sets := v_sets || format('family_id = %L', v_fields ->> 'family_id'); END IF;
+    IF v_fields ? 'unit'                THEN v_sets := v_sets || format('unit = %L', v_fields ->> 'unit'); END IF;
+    IF v_fields ? 'currency'            THEN v_sets := v_sets || format('currency = %L', v_fields ->> 'currency'); END IF;
+    IF v_fields ? 'cost_basis'          THEN v_sets := v_sets || format('cost_basis = %L', v_fields ->> 'cost_basis'); END IF;
+    IF v_fields ? 'lead_time_days'      THEN v_sets := v_sets || format('lead_time_days = %s::integer', v_fields ->> 'lead_time_days'); END IF;
+    IF v_fields ? 'unit_cost'           THEN v_sets := v_sets || format('unit_cost = %s::numeric', v_fields ->> 'unit_cost'); END IF;
+    IF v_fields ? 'image_url'           THEN v_sets := v_sets || format('image_url = %L', v_fields ->> 'image_url'); END IF;
+    IF v_fields ? 'product_url'         THEN v_sets := v_sets || format('product_url = %L', v_fields ->> 'product_url'); END IF;
+    IF v_fields ? 'variant_values'      THEN v_sets := v_sets || format('variant_values = %L::jsonb', v_fields -> 'variant_values'); END IF;
+    IF v_fields ? 'attributes'          THEN v_sets := v_sets || format('attributes = %L::jsonb', v_fields -> 'attributes'); END IF;
+    IF v_fields ? 'attachments'         THEN v_sets := v_sets || format('attachments = %L::jsonb', v_fields -> 'attachments'); END IF;
+    IF v_fields ? 'tags'                THEN v_sets := v_sets || format('tags = ARRAY(SELECT jsonb_array_elements_text(%L::jsonb))', v_fields -> 'tags'); END IF;
+    IF v_fields ? 'synonyms'            THEN v_sets := v_sets || format('synonyms = ARRAY(SELECT jsonb_array_elements_text(%L::jsonb))', v_fields -> 'synonyms'); END IF;
+
+    IF cardinality(v_sets) > 0 THEN
+        EXECUTE 'UPDATE material SET ' || array_to_string(v_sets, ', ')
+             || ' WHERE material_uid = $1' USING p_keep;
+    END IF;
+
+    -- 7. move the children, dropping the rows that would collide
+    DELETE FROM material_identifier si
+     WHERE si.material_uid = v_merge
+       AND EXISTS (SELECT 1 FROM material_identifier ki
+                    WHERE ki.material_uid = p_keep
+                      AND ki.kind = si.kind AND ki.value = si.value
+                      AND ki.source_system = si.source_system);
+    UPDATE material_identifier SET material_uid = p_keep WHERE material_uid = v_merge;
+
+    UPDATE material_measure sm
+       SET is_preferred = false
+     WHERE sm.material_uid = v_merge AND sm.is_preferred
+       AND EXISTS (SELECT 1 FROM material_measure km
+                    WHERE km.material_uid = p_keep AND km.key = sm.key AND km.is_preferred);
+    DELETE FROM material_measure sm
+     WHERE sm.material_uid = v_merge
+       AND EXISTS (SELECT 1 FROM material_measure km
+                    WHERE km.material_uid = p_keep
+                      AND km.key = sm.key
+                      AND km.source_system = sm.source_system
+                      AND km.valid_from = sm.valid_from);
+    UPDATE material_measure SET material_uid = p_keep WHERE material_uid = v_merge;
+
+    DELETE FROM material_price sp
+     WHERE sp.material_uid = v_merge
+       AND EXISTS (SELECT 1 FROM material_price kp
+                    WHERE kp.material_uid = p_keep
+                      AND kp.supplier_id IS NOT DISTINCT FROM sp.supplier_id
+                      AND kp.valid_from = sp.valid_from
+                      AND kp.qty_break = sp.qty_break
+                      AND kp.cost_basis = sp.cost_basis);
+    UPDATE material_price SET material_uid = p_keep WHERE material_uid = v_merge;
+
+    -- relations pointing at the survivor would become self-links or duplicates
+    DELETE FROM material_relation r
+     WHERE (r.from_uid = v_merge AND r.to_uid = p_keep)
+        OR (r.to_uid = v_merge AND r.from_uid = p_keep);
+    DELETE FROM material_relation sr
+     WHERE sr.from_uid = v_merge
+       AND EXISTS (SELECT 1 FROM material_relation kr
+                    WHERE kr.from_uid = p_keep AND kr.to_uid = sr.to_uid AND kr.kind = sr.kind);
+    DELETE FROM material_relation sr
+     WHERE sr.to_uid = v_merge
+       AND EXISTS (SELECT 1 FROM material_relation kr
+                    WHERE kr.to_uid = p_keep AND kr.from_uid = sr.from_uid AND kr.kind = sr.kind);
+    UPDATE material_relation SET from_uid = p_keep WHERE from_uid = v_merge;
+    UPDATE material_relation SET to_uid = p_keep WHERE to_uid = v_merge;
+
+    DELETE FROM material_classification sc
+     WHERE sc.material_uid = v_merge
+       AND EXISTS (SELECT 1 FROM material_classification kc
+                    WHERE kc.material_uid = p_keep
+                      AND kc.system = sc.system AND kc.code = sc.code);
+    UPDATE material_classification SET material_uid = p_keep WHERE material_uid = v_merge;
+
+    DELETE FROM material_epd se
+     WHERE se.material_uid = v_merge
+       AND EXISTS (SELECT 1 FROM material_epd ke WHERE ke.material_uid = p_keep);
+    UPDATE material_epd SET material_uid = p_keep WHERE material_uid = v_merge;
+
+    UPDATE material_usage ku
+       SET ref_count = ku.ref_count + coalesce((SELECT su.ref_count FROM material_usage su
+                                                 WHERE su.material_uid = v_merge), 0),
+           search_hits = ku.search_hits + coalesce((SELECT su.search_hits FROM material_usage su
+                                                     WHERE su.material_uid = v_merge), 0)
+     WHERE ku.material_uid = p_keep;
+    DELETE FROM material_usage WHERE material_uid = v_merge;
+    UPDATE material_usage SET material_uid = p_keep WHERE material_uid = v_merge;
+
+    -- 8. the survivor becomes a tombstone that points home
+    UPDATE material
+       SET status = 'superseded',
+           superseded_by = p_keep,
+           updated_by = v_actor
+     WHERE material_uid = v_merge;
+
+    -- 9. the pair is decided; every other pair that mentioned the survivor is decided too
+    INSERT INTO material_duplicate_candidate AS c
+           (uid_a, uid_b, score, status, keep_uid, decided_by, decided_at, note)
+    VALUES (v_a, v_b,
+            coalesce((SELECT score FROM material_duplicate_candidate
+                       WHERE uid_a = v_a AND uid_b = v_b), 0),
+            'merged', p_keep, v_actor, now(), p_reason)
+    ON CONFLICT (uid_a, uid_b) DO UPDATE
+       SET status = 'merged', keep_uid = EXCLUDED.keep_uid,
+           decided_by = EXCLUDED.decided_by, decided_at = EXCLUDED.decided_at,
+           note = EXCLUDED.note;
+
+    UPDATE material_duplicate_candidate c
+       SET status = 'merged', keep_uid = p_keep, decided_by = v_actor,
+           decided_at = now(), note = coalesce(c.note, p_reason)
+     WHERE (c.uid_a = v_merge OR c.uid_b = v_merge)
+       AND c.status <> 'merged';
+
+    -- 10. why it happened, on both sides
+    INSERT INTO material_event (material_uid, entity, op, payload, actor)
+    VALUES (p_keep, 'material_merge', 'update',
+            jsonb_build_object('keep', p_keep, 'merged', v_merge, 'reason', p_reason,
+                               'fields', v_fields, 'dropped', v_plan -> 'dropped',
+                               'warnings', v_plan -> 'warnings',
+                               'children', v_plan -> 'children'), v_actor);
+    v_events := v_events + 1;
+    INSERT INTO material_event (material_uid, entity, op, payload, actor)
+    VALUES (v_merge, 'material_merge', 'update',
+            jsonb_build_object('keep', p_keep, 'merged', v_merge,
+                               'status', 'superseded', 'reason', p_reason), v_actor);
+    v_events := v_events + 1;
+
+    -- 11.
+    RETURN jsonb_build_object('ok', true, 'code', 'merged',
+                              'keep', p_keep, 'merged', v_merge,
+                              'plan', v_plan,
+                              'warnings', v_plan -> 'warnings',
+                              'children', v_plan -> 'children',
+                              'anchors', v_events);
+END $$;
+
+COMMENT ON FUNCTION material_merge(text, text, text, text, boolean, text) IS
+    'Merge one candidate pair: keeper wins, survivor becomes a superseded tombstone. Idempotent.';
+
+-- ---------------------------------------------------------------------------
+-- material_duplicate_ignore - decide a pair is not a duplicate
+-- ---------------------------------------------------------------------------
+-- Records the decision so a later scan does not raise it again. A merged pair stays merged:
+-- ignoring one would rewrite history.
+CREATE OR REPLACE FUNCTION material_duplicate_ignore(
+    p_uid_a  text,
+    p_uid_b  text,
+    p_reason text DEFAULT NULL,
+    p_actor  text DEFAULT NULL
+) RETURNS jsonb
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_a     text := least(p_uid_a, p_uid_b);
+    v_b     text := greatest(p_uid_a, p_uid_b);
+    v_actor text;
+    v_row   material_duplicate_candidate;
+BEGIN
+    IF length(coalesce(p_reason, '')) > 500 THEN
+        RAISE EXCEPTION 'reason must be at most 500 characters' USING ERRCODE = '22023';
+    END IF;
+    v_actor := coalesce(nullif(btrim(p_actor), ''),
+                        nullif(current_setting('ml.actor', true), ''),
+                        'anonymous');
+
+    IF NOT EXISTS (SELECT 1 FROM material WHERE material_uid = v_a)
+       OR NOT EXISTS (SELECT 1 FROM material WHERE material_uid = v_b) THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'not_found');
+    END IF;
+
+    SELECT * INTO v_row FROM material_duplicate_candidate WHERE uid_a = v_a AND uid_b = v_b;
+    IF FOUND AND v_row.status = 'merged' THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'conflict',
+                                  'uid_a', v_a, 'uid_b', v_b,
+                                  'blockers', jsonb_build_array('already_merged'));
+    END IF;
+
+    INSERT INTO material_duplicate_candidate AS c
+           (uid_a, uid_b, score, status, decided_by, decided_at, note)
+    VALUES (v_a, v_b,
+            coalesce(v_row.score,
+                     round((SELECT similarity(lower(ma.name), lower(mb.name))
+                              FROM material ma, material mb
+                             WHERE ma.material_uid = v_a AND mb.material_uid = v_b)::numeric, 4),
+                    0),
+            'ignored', v_actor, now(), p_reason)
+    ON CONFLICT (uid_a, uid_b) DO UPDATE
+       SET status = 'ignored', decided_by = EXCLUDED.decided_by,
+           decided_at = EXCLUDED.decided_at, note = EXCLUDED.note;
+
+    RETURN jsonb_build_object('ok', true, 'code', 'ignored',
+                              'uid_a', v_a, 'uid_b', v_b,
+                              'decided_by', v_actor);
+END $$;
+
+COMMENT ON FUNCTION material_duplicate_ignore(text, text, text, text) IS
+    'Record that a candidate pair is not a duplicate, so later scans leave it alone.';

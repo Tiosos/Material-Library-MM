@@ -32,6 +32,9 @@ DECLARE
     v_raised   boolean := false;
     v_row      jsonb;
     v_pair_ok  boolean := false;
+    v_before   bigint;
+    v_after    bigint;
+    v_state    text;
 BEGIN
     -- 1. the scan finds the designed pair, and nothing the design says it must skip:
     --    the archived pair (B) and the cross-category decoy (C) stay out of the queue.
@@ -155,5 +158,103 @@ BEGIN
         RAISE EXCEPTION 'queue accepted an unknown status filter';
     END IF;
 
-    RAISE NOTICE 'merge contract OK: % assertions, queue rows %', 3, v_rows2;
+    -- 4. the merge itself: dry run writes nothing, the real call moves children, hides the
+    --    survivor from search but keeps it resolvable, records the decision and is idempotent.
+    SELECT count(*) INTO v_before FROM material_event WHERE entity = 'material_merge';
+    v_report := material_merge(v_a, v_a2, v_a, 'contract dry run', true, 'contract');
+    IF v_report ->> 'code' <> 'dry_run' THEN
+        RAISE EXCEPTION 'dry run returned %', v_report -> 'code';
+    END IF;
+    SELECT count(*) INTO v_after FROM material_event WHERE entity = 'material_merge';
+    IF v_before <> v_after THEN
+        RAISE EXCEPTION 'dry run wrote % event(s)', v_after - v_before;
+    END IF;
+    IF (SELECT status FROM material WHERE material_uid = v_a2) <> 'active' THEN
+        RAISE EXCEPTION 'dry run superseded the survivor';
+    END IF;
+
+    SELECT (material_search_page(p_limit => 1) ->> 'total')::bigint INTO v_before;
+
+    v_report := material_merge(v_a, v_a2, v_a, 'contract merge', false, 'contract');
+    IF v_report ->> 'code' <> 'merged' THEN
+        RAISE EXCEPTION 'merge returned % : %', v_report -> 'code', v_report;
+    END IF;
+    SELECT (material_search_page(p_limit => 1) ->> 'total')::bigint INTO v_after;
+    IF v_before - v_after <> 1 THEN
+        RAISE EXCEPTION 'search total changed by % instead of -1', v_after - v_before;
+    END IF;
+
+    SELECT status INTO v_state FROM material WHERE material_uid = v_a;
+    IF v_state <> 'active' THEN
+        RAISE EXCEPTION 'keeper status is %', v_state;
+    END IF;
+    SELECT status || '|' || coalesce(superseded_by, '') INTO v_state
+      FROM material WHERE material_uid = v_a2;
+    IF v_state <> 'superseded|' || v_a THEN
+        RAISE EXCEPTION 'survivor is %, expected superseded by %', v_state, v_a;
+    END IF;
+    IF (SELECT count(*) FROM material_search(p_q => 'fixture dup smoked', p_limit => 50)
+         WHERE material_uid = v_a2) <> 0 THEN
+        RAISE EXCEPTION 'merged survivor is still in search results';
+    END IF;
+    IF (SELECT material_detail(v_a2) ->> 'status') <> 'superseded' THEN
+        RAISE EXCEPTION 'merged survivor no longer resolves through material_detail';
+    END IF;
+
+    -- the survivor's children must now answer for the keeper
+    IF (SELECT count(*) FROM material_identifier WHERE material_uid = v_a) < 2 THEN
+        RAISE EXCEPTION 'identifiers were not moved to the keeper';
+    END IF;
+    IF (SELECT count(*) FROM material_price WHERE material_uid = v_a) < 2 THEN
+        RAISE EXCEPTION 'prices were not moved to the keeper';
+    END IF;
+    IF (SELECT count(*) FROM material_price WHERE material_uid = v_a2) <> 0 THEN
+        RAISE EXCEPTION 'prices were left on the survivor';
+    END IF;
+    IF (SELECT count(*) FROM material_measure WHERE material_uid = v_a2) <> 0 THEN
+        RAISE EXCEPTION 'measures were left on the survivor';
+    END IF;
+    IF (SELECT count(*) FROM material_measure WHERE material_uid = v_a AND is_preferred) <> 1 THEN
+        RAISE EXCEPTION 'keeper must keep exactly one preferred measure per key';
+    END IF;
+
+    SELECT status || '|' || keep_uid || '|' || decided_by INTO v_state
+      FROM material_duplicate_candidate WHERE uid_a = v_a AND uid_b = v_a2;
+    IF v_state <> 'merged|' || v_a || '|contract' THEN
+        RAISE EXCEPTION 'candidate row is %, expected merged by the keeper', v_state;
+    END IF;
+    SELECT count(*) INTO v_after FROM material_event
+     WHERE entity = 'material_merge' AND material_uid IN (v_a, v_a2); 
+    IF v_after < 2 THEN
+        RAISE EXCEPTION 'merge wrote % merge event(s), expected at least 2', v_after;
+    END IF;
+
+    v_report := material_merge(v_a, v_a2, v_a, 'retry', false, 'contract');
+    IF v_report ->> 'code' <> 'already_merged' THEN
+        RAISE EXCEPTION 'retry returned %', v_report -> 'code';
+    END IF;
+
+    -- 5. ignoring: records the decision, survives a re-scan, and cannot rewrite a merge
+    v_report := material_duplicate_ignore(v_c, v_c2, 'contract ignore', 'contract');
+    IF v_report ->> 'code' <> 'ignored' THEN
+        RAISE EXCEPTION 'ignore returned %', v_report -> 'code';
+    END IF;
+    SELECT status || '|' || decided_by INTO v_state
+      FROM material_duplicate_candidate
+     WHERE uid_a = least(v_c, v_c2) AND uid_b = greatest(v_c, v_c2);
+    IF v_state <> 'ignored|contract' THEN
+        RAISE EXCEPTION 'ignored row is %', v_state;
+    END IF;
+    PERFORM material_duplicate_scan();
+    SELECT status INTO v_state FROM material_duplicate_candidate
+     WHERE uid_a = least(v_c, v_c2) AND uid_b = greatest(v_c, v_c2);
+    IF v_state <> 'ignored' THEN
+        RAISE EXCEPTION 're-scan changed an ignored row to %', v_state;
+    END IF;
+    v_report := material_duplicate_ignore(v_a, v_a2, 'too late', 'contract');
+    IF v_report ->> 'code' <> 'conflict' THEN
+        RAISE EXCEPTION 'ignore on a merged pair returned %', v_report -> 'code';
+    END IF;
+
+    RAISE NOTICE 'merge contract OK: % assertions, queue rows %', 5, v_rows2;
 END $$;
