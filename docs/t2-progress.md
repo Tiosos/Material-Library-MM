@@ -16,7 +16,7 @@ and warnings but not a survivor snapshot).
 | --- | --- | --- |
 | 0 | Preflight: `schema/merge.sql`, fixture duplicate pairs, fresh database, this log | [x] |
 | 1 | Candidate columns are already in step 0; `material_duplicate_scan()` + `scripts/duplicate_scan.py` | [x] |
-| 2 | `material_duplicate_queue()` + `material_merge_preview()` | [ ] |
+| 2 | `material_duplicate_queue()` + `material_merge_preview()` | [x] |
 | 3 | `material_merge()` + `material_duplicate_ignore()` | [ ] |
 | 4 | HTTP routes in `api/main.py` + `tests/test_merge.py` | [ ] |
 | 5 | `scripts/merge_materials.py`, `scripts/merge_contract.sql`, CI job step, docs | [ ] |
@@ -137,3 +137,69 @@ Verification:
 Note for step 2: `expect_total` in `eval/golden.yaml` was re-checked after the scan runs because
 candidate rows are not materials; `eval_search.py --dataset fixture` on a scanned database still
 passes (the queue is metadata, not catalogue).
+
+## Step 2 - keeper, plan, preview and queue
+
+Shipped, all in `schema/merge.sql`:
+
+1. `ml_duplicate_keeper(p_uid_a text, p_uid_b text) RETURNS text` - the suggestion, never the
+   decision. Ranks by completeness ratio (`v_material_completeness`), then price count, then
+   usage, then oldest row, then uid, and returns one uid.
+2. `material_merge_plan(p_keep text, p_merge text) RETURNS jsonb` - the field-by-field plan
+   described in section 4 of the design: `{keep, merge, fields, dropped, warnings, children}`,
+   with `fields` holding only the keys that actually change, `dropped` recording what the
+   survivor's value replaces, and `children` counting what will move or vanish for identifiers,
+   measures, prices, relations, classifications, EPD and usage.
+3. `material_merge_preview(p_uid_a text, p_uid_b text, p_keep text DEFAULT NULL) RETURNS jsonb` -
+   read-only. Defaults `keep` to the suggestion, rejects a third uid with SQLSTATE 22023, and adds
+   `{suggestion, pair, blockers, can_merge}` to the plan. Blockers: `keeper_status`,
+   `survivor_status`, `category_mismatch`, `already_superseded`.
+4. `material_duplicate_queue(p_status text DEFAULT 'actionable', p_limit integer DEFAULT 50, p_offset integer DEFAULT 0)`
+   `RETURNS jsonb` - the review list: `actionable` (open + ignored), `open`, `ignored`, `merged`
+   or `all`; anything else raises 22023. Rows carry both names, category, units and costs plus
+   `keep_suggestion`; the window's `total` is lifted to the payload and stripped from the rows.
+5. `scripts/merge_contract.sql` assertions 3 - preview returns a plan for the designed pair,
+   refuses the archived pair with a `*_status` blocker, writes no `material_event`, and the queue
+   defaults to `actionable` with a `total` equal to the candidate count and a suggestion drawn
+   from the pair itself.
+
+Deviations and findings:
+
+- The keeper suggestion prefers the *richer* record, so on the designed pair it returns
+  `DXPK02` (two price rows) rather than `DXPK01`. That is the heuristic working, not a bug; the
+  contract and tests therefore always pass `keep` explicitly.
+- Price collisions in the plan are detected on the unique index key
+  `(supplier_id, valid_from, qty_break, cost_basis)`, not on `unit_cost`: two rows could differ in
+  price and still collide on the index, which would make a "moved" row a constraint violation.
+- Verification on the combined fixture + samples corpus exposed a third scan rule, now in
+  section 5.3 of the design: two rows that carry different part numbers of the same kind are
+  different parts, even with identical names. The imported Blum file repeats one name
+  (`CLIP top BLUMOTION INSERTA hinge NI`) across dozens of hinges that only differ by supplier
+  code, so the name-only scan produced 1,011 pairs over 109 rows and filled the 500-row page with
+  noise, pushing the designed pair out. With the identifier rule the same corpus yields 3 pairs
+  and the designed pair is on page one.
+
+Verification:
+
+| Command | Expected | Actual |
+| --- | --- | --- |
+| `material_merge_plan('DXPK01','DXPK02')` | adopt/merge/drop per section 4 | fields `{synonyms, attributes}`, dropped `[name, unit_cost]`, warnings `commercial_mismatch`, `measure_conflict`, children `prices moved 2`, `measures moved 1 / demoted 1 / conflicts 1`, `relations from_moved 1`, `identifiers moved 1` |
+| `material_merge_plan('DXPK01','mat_nope')` | NULL | NULL |
+| `material_merge_preview('DXPK01','DXPK02')` | plan + suggestion + `can_merge true` | keep/suggestion `DXPK02`, `blockers []`, `can_merge true`, `pair.status open` |
+| `material_merge_preview` explicit `keep` | keeps the requested side | `keep DXPK02`, `merge DXPK01` |
+| `material_merge_preview` on the archived pair | refuses | `can_merge false`, blocker `survivor_status` |
+| `material_merge_preview('mat_nope1','mat_nope2')` | NULL | NULL |
+| preview twice, compare `material_event` count | unchanged | unchanged |
+| `material_duplicate_queue()` | `actionable`, one row | `total 1`, `status actionable`, `keep_suggestion DXPK02`, rows without `total` |
+| `material_duplicate_queue('merged')` / `('all')` | 0 / 1 | 0 / 1 |
+| `material_duplicate_queue('nonsense')`, bad `keep` | SQLSTATE 22023 | `invalid_parameter_value` both |
+| `python .tmp/run_sql.py scripts/merge_contract.sql --db ml_t20` (fixture) | OK (3 assertions) | `OK scripts/merge_contract.sql` |
+| same on `ml_t19` (fixture + samples, 4 candidates) | OK | `OK scripts/merge_contract.sql` |
+| `python -m pytest -q tests -p no:cacheprovider` on `ml_t21` (`both`) | 21 passed | `21 passed, 37 warnings in 1.93s` |
+| `python scripts/eval_search.py --dsn .../ml_t20 --dataset fixture` | PASS | PASS, holdout MRR 1.000 / hit@1 1.000 / zero 0.0% / level 100% |
+| `python .tmp/run_sql.py scripts/api_contract.sql --db ml_t19` | OK | `OK scripts/api_contract.sql` |
+| `python scripts/check_english.py` | OK | `OK: no CJK text found` |
+
+Cross-database note: the contract and the queue assertions must find the designed pair wherever
+it ranks, so the check scans the whole page (`material_duplicate_queue('all', 500)`) instead of
+looking at row zero; on the fixture database it happens to be the only row.

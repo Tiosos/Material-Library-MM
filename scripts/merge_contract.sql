@@ -25,6 +25,13 @@ DECLARE
     v_rows     bigint;
     v_rows2    bigint;
     v_found    boolean;
+    v_plan     jsonb;
+    v_events   bigint;
+    v_events2  bigint;
+    v_queue    jsonb;
+    v_raised   boolean := false;
+    v_row      jsonb;
+    v_pair_ok  boolean := false;
 BEGIN
     -- 1. the scan finds the designed pair, and nothing the design says it must skip:
     --    the archived pair (B) and the cross-category decoy (C) stay out of the queue.
@@ -72,5 +79,81 @@ BEGIN
         RAISE EXCEPTION 're-scan did not report the refreshed pair (updated %)', v_report ->> 'updated';
     END IF;
 
-    RAISE NOTICE 'merge contract OK: % assertions, queue rows %', 2, v_rows2;
+    -- 3. the preview is the contract: it describes the plan, refuses nothing it can plan, and
+    --    writes absolutely nothing while doing so.
+    v_plan := material_merge_preview(v_a, v_a2);
+    IF v_plan IS NULL THEN
+        RAISE EXCEPTION 'preview returned null for a pair that exists';
+    END IF;
+    IF (v_plan ->> 'keep') NOT IN (v_a, v_a2) THEN
+        RAISE EXCEPTION 'preview keep % is not one of the pair', v_plan ->> 'keep';
+    END IF;
+    IF (v_plan ->> 'suggestion') NOT IN (v_a, v_a2) THEN
+        RAISE EXCEPTION 'preview suggestion % is not one of the pair', v_plan ->> 'suggestion';
+    END IF;
+    IF NOT (v_plan ->> 'can_merge')::boolean THEN
+        RAISE EXCEPTION 'designed pair should be mergeable, blockers: %', v_plan -> 'blockers';
+    END IF;
+    IF (v_plan -> 'fields') = '{}'::jsonb AND (v_plan -> 'children') = '{}'::jsonb
+       AND jsonb_array_length(v_plan -> 'dropped') = 0 THEN
+        RAISE EXCEPTION 'preview returned an empty plan: %', v_plan;
+    END IF;
+
+    -- the archived half of the B pair must not be mergeable, whichever side becomes keeper
+    v_plan := material_merge_preview(v_b, v_b2);
+    IF v_plan IS NULL THEN
+        RAISE EXCEPTION 'preview returned null for the archived pair';
+    END IF;
+    IF (v_plan ->> 'can_merge')::boolean THEN
+        RAISE EXCEPTION 'preview allowed a merge with an archived record';
+    END IF;
+    IF NOT ((v_plan -> 'blockers') ?| ARRAY['keeper_status', 'survivor_status']) THEN
+        RAISE EXCEPTION 'preview did not blame the archived status, blockers: %', v_plan -> 'blockers';
+    END IF;
+
+    SELECT count(*) INTO v_events FROM material_event;
+    PERFORM material_merge_preview(v_a, v_a2);
+    PERFORM material_merge_preview(v_a2, v_a);
+    SELECT count(*) INTO v_events2 FROM material_event;
+    IF v_events <> v_events2 THEN
+        RAISE EXCEPTION 'preview wrote % event(s)', v_events2 - v_events;
+    END IF;
+
+    -- the queue defaults to what an operator can still act on, and rejects a nonsense filter
+    v_queue := material_duplicate_queue();
+    IF (v_queue ->> 'status') <> 'actionable' THEN
+        RAISE EXCEPTION 'queue default status is %', v_queue ->> 'status';
+    END IF;
+    SELECT count(*) INTO v_rows FROM material_duplicate_candidate WHERE status IN ('open', 'ignored');
+    IF (v_queue ->> 'total')::bigint <> v_rows THEN
+        RAISE EXCEPTION 'queue total % <> actionable candidates %', v_queue ->> 'total', v_rows;
+    END IF;
+    IF jsonb_array_length(v_queue -> 'rows') <> least(v_rows, 50) THEN
+        RAISE EXCEPTION 'queue returned % rows for % candidates', jsonb_array_length(v_queue -> 'rows'), v_rows;
+    END IF;
+    -- the designed pair must be listed wherever it falls in score order, and its suggestion must
+    -- be one of its own two members
+    v_queue := material_duplicate_queue('all', 500);
+    FOR v_row IN SELECT value FROM jsonb_array_elements(v_queue -> 'rows') LOOP
+        IF (v_row ->> 'uid_a') IN (v_a, v_a2) AND (v_row ->> 'uid_b') IN (v_a, v_a2) THEN
+            v_pair_ok := true;
+            IF (v_row ->> 'keep_suggestion') NOT IN (v_a, v_a2) THEN
+                RAISE EXCEPTION 'queue keeper suggestion % is not one of the designed pair', v_row ->> 'keep_suggestion';
+            END IF;
+        END IF;
+    END LOOP;
+    IF NOT v_pair_ok THEN
+        RAISE EXCEPTION 'queue did not list the designed pair';
+    END IF;
+
+    BEGIN
+        PERFORM material_duplicate_queue('nonsense');
+    EXCEPTION WHEN invalid_parameter_value THEN
+        v_raised := true;
+    END;
+    IF NOT v_raised THEN
+        RAISE EXCEPTION 'queue accepted an unknown status filter';
+    END IF;
+
+    RAISE NOTICE 'merge contract OK: % assertions, queue rows %', 3, v_rows2;
 END $$;

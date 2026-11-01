@@ -160,8 +160,8 @@ The scan compares only within a block: same `category_code` and same `brand_id`
 fits in one block anyway, but the predicate is there so a 100k-row catalogue does not melt.
 Pairs are canonicalised with `least(uid)/greatest(uid)` to satisfy `uid_a < uid_b`.
 
-Three rules keep the queue about products rather than variants, all learned by running the
-scan against the fixture:
+Four rules keep the queue about products rather than variants, all learned by running the
+scan against real data:
 
 1. **Declared axes win.** If the two rows disagree on any key of `variant_values`
    (`{"thickness_mm": 16}` vs `{"thickness_mm": 18}`), they are variants of one product,
@@ -170,9 +170,20 @@ scan against the fixture:
    (`shelf pin #mm`) but the digit strings differ (`1` vs `2`), it is a size, angle or
    part-number variant and the pair is skipped. This is what stops the 22 filler rows from
    producing 109 pairs; without it a fixture scan reported 110 pairs instead of 1.
-3. **Decided pairs stay decided.** A pair already `merged` is never re-queued, and an
+3. **Different part numbers are different parts.** If both rows carry an identifier of the
+   same kind and neither value is a prefix of the other, the pair is skipped. Name similarity
+   is a weak signal in real catalogues: the imported Blum file repeats one name
+   (`CLIP top BLUMOTION INSERTA hinge NI`) for dozens of hinges that differ only by supplier
+   code, so a name-only scan produced **1,011** pairs over 109 rows. With this rule the same
+   data yields 3 pairs. A shared code, or one code being the other plus a suffix
+   (`FX-DUP-VEN-22` vs `FX-DUP-VEN-22A`), still counts as compatible evidence.
+4. **Decided pairs stay decided.** A pair already `merged` is never re-queued, and an
    `ignored` or `merged` row keeps its status and its score (`ON CONFLICT ... WHERE status = 'open'`),
    so re-running the scan does not nag about decisions a human already made.
+
+The scan accepts `p_threshold` (default 0.80, clamped to 0..1) and `p_limit` (default 500,
+clamped to 1..5000), and returns `{threshold, pairs, inserted, updated, candidates}` where
+`candidates` is the page it just scored, so a CLI needs no second query.
 
 ---
 
