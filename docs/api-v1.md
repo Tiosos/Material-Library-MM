@@ -79,7 +79,7 @@ Base path `/v1`. JSON in, JSON out, UTF-8, no envelope wrapping beyond the field
 | `measures` | JSON object | new | Unit-aware numeric ranges, see §4.4 |
 | `limit` | int 1..100, default 20 | `p_limit` | |
 | `cursor` | opaque string | `p_offset` | `base64("o:<n>")` |
-| `expand` | `variants` | — | Accepted but not implemented in v1: family collapsing changes ranking and paging, so it is deferred to T1b (decision D6). Today one hit per material record is returned, `expand=variants` and no `expand` give the same result. |
+| `expand` | `variants` | `p_collapse` | Omitted, a family collapses to its best hit (T1b, decision B1). `expand=variants` returns one hit per material record. `total`, `next_cursor` and paging count **groups** when collapsed, rows otherwise. |
 
 `attrs` is parsed as JSON at the edge and must be an object; invalid JSON or an array is `400`, never a `500` from `::jsonb` casting inside the function.
 
@@ -91,6 +91,7 @@ Base path `/v1`. JSON in, JSON out, UTF-8, no envelope wrapping beyond the field
   "q": "blum hinge 450",
   "level": "relaxed",
   "total": 3,
+  "collapsed": true,
   "suggestion": null,
   "took_ms": 7,
   "next_cursor": "bzoyMA==",
@@ -106,14 +107,18 @@ Base path `/v1`. JSON in, JSON out, UTF-8, no envelope wrapping beyond the field
       "variant_values": {"boss": "INSERTA"},
       "unit": "ea",
       "unit_cost": 6.42,
-      "score": 7.4121
+      "score": 7.4121,
+      "variant_count": 3,
+      "variants": ["mat_01K9XFT7GJSXCA6JANCTXV3XH1", "mat_01K9XFT7GJSXCA6JANCTXV3XH2"]
     }
   ]
 }
 ```
 
 - `level` is the tier that actually matched: `exact | prefix | and | relaxed | fuzzy | browse | none`. It is part of the contract, not a debug aid: a client may show "showing approximate matches".
-- `total` is the number of matches **before** paging (see §4.2 — today it silently caps at 200).
+- `total` is the number of matches **before** paging, counted the same way the page is built: collapsed groups when `collapsed` is `true` (the default), material records when `expand=variants`. The 200-row cap of v0 is gone (see §4.2).
+- `collapsed` echoes the mode the server used, so a client never has to remember its own request.
+- `variant_count` is the number of **matching** members of the hit's family (never less than 1), and `variants` lists the other matching uids (empty when `expand=variants`). A family member that does not match the query is absent: the list describes this result set, not the whole family; `/v1/materials/{uid}/family` returns the full membership. The representative is the highest-scoring member, ties broken by `material_uid`.
 - `suggestion` is non-null only when `total = 0`, and only when a name, brand or family name is at least 0.3 similar (`material_suggest`, trigram `%`). In practice the fuzzy tier already catches near-misses, so a zero-result query usually has no candidate either: on the sample corpus `q=laminx` is `fuzzy` (suggestion `null`), `q=caesarstone bench` is `none` (suggestion `null`). The spelling surface that always works is `GET /v1/suggest`, which uses the same candidates without the "no hits" precondition (`?q=laminx` -> `Laminex`, similarity 0.5). §11 criterion 1 was corrected to test both endpoints instead of inventing a query.
 - `score` is monotonic **within one query** and is not normalised per batch: exact hits score `1.0`, prefix `0.9`, and the text levels use `ts_rank_cd` / trigram similarity ordered by `score DESC, coalesce(u.ref_count,0) DESC` (`schema/search.sql:89-169`). It is a ranking signal, not a probability — do not threshold on it across levels or across queries.
 - Hit objects are `MaterialHit` (the fields above), **not** full UMR records: a `score` field would violate the UMR contract's `additionalProperties: false` (`schema/material.schema.json:8`). Full records come from `/v1/materials/{uid}` or `/v1/export`.
@@ -130,7 +135,7 @@ Problem-shaped, one shape only:
 
 ### 3.4 Semantics worth fixing in v1, not later
 
-- Collapsing a family to one hit is the right default for a shopping surface (`docs/data-model-v2.md:12`: `laminex black` matches three rows that differ only in thickness), but it is a ranking and paging change inside SQL, not an edge feature: hits are per material record, and collapsing after paging would produce short pages with wrong cursors. **Decision D6: v1 accepts `expand=variants` for forward compatibility and returns one hit per material record; family collapsing lands in T1b together with a family-aware search function.** `/v1/materials/{uid}/family` already returns the members of one family, so a UI can group today.
+- Collapsing a family to one hit is the right default for a shopping surface (`docs/data-model-v2.md:12`: `laminex black` matches three rows that differ only in thickness), but it is a ranking and paging change inside SQL, not an edge feature: hits are per material record, and collapsing after paging would produce short pages with wrong cursors. **Decision D6 (T1), B1/B3 (T1b): collapse happens in `material_search_page(p_collapse boolean)`, before `LIMIT`/`OFFSET`, so `total`, cursors and page sizes all count groups; `material_search()` still ranks per record, which keeps `scripts/eval_search.py` measuring the retrieval that `expand=variants` exposes.** Facets keep counting material records (B4), so a facet sum can exceed the collapsed total by design; compare it with an `expand=variants` total.
 - `/v1/changes` is what makes the library usable *upstream* of joineryflow: `sync_seq` is monotonic and bumped by child-table triggers (`schema/material.sql:162`), unlike `updated_at`.
 - `superseded_by` (`schema/material.sql:116`) must be honoured. **This is a fix, not an existing behaviour:** `material_search` today excludes only `archived` (`schema/search.sql:53-55`), so after the first merge the dead record keeps appearing in results. v1 excludes `superseded` from search while keeping it resolvable by UID (200 with `status: superseded`), so a stale client UID degrades into a redirect instead of a 404.
 
@@ -158,6 +163,7 @@ Current state: `v_limit := least(greatest(...), 200)` (`schema/search.sql:33`) a
 - Add an OUT column `total bigint`, computed as `count(*) OVER ()` in each level's SELECT list. Window functions run before `LIMIT`, so this is the true match count; adding an OUT column does not break existing callers that select named columns (`material_facets`, `material_search_page`, CI assertions).
 - `material_search_page` returns `total` from the first hit row (0 when empty) and applies `p_offset`.
 - `material_facets` keeps asking for 5000, which now actually works.
+- T1b: `material_search_page(..., p_collapse boolean DEFAULT true)` builds a `sized`/`sizes`/`collapsed` chain (group key `coalesce(family_id, material_uid)`) and pages over groups, so `total` counts groups; `p_collapse => false` restores one row per record. Collapse cannot be done after `LIMIT` without short pages and wrong cursors, which is why it belongs here and not in the edge.
 - Same pass, one WHERE change: exclude `status = 'superseded'` from all search levels (today only `archived`, `schema/search.sql:53-55`). `material_detail` still resolves superseded UIDs, so links do not break.
 
 **Cursor is offset-based in v1.** Keyset pagination over `(score, material_uid)` is the better end state, but the score is produced per query by five different branches; it is a real refactor. Offsets are correct at this scale (< 50k rows) and the cursor is opaque, so switching the encoding later is not a breaking change. Threshold to revisit: 10k rows, or the first duplicate-across-pages report.
@@ -265,7 +271,7 @@ datasets:
 A case may assert any of `expect_level` (always), `expect_total`, `expect_min_hits`, `expect_any`, `expect_top1`, and may carry filters: `q`, `category`, `brand`, `supplier`, `attrs`, `measures`. `expect_level` is the tier that must answer (`exact`, `prefix`, `and`, `relaxed`, `fuzzy`, `browse`, `none`); a case answered by a weaker tier than intended fails even when the right row is found, because a fallback to `fuzzy` is a worse result that MRR alone does not reveal. `expect_any` lists every uid that counts as relevant (MRR uses the first one in the page); `expect_top1` is only used where the ordering is a contract.
 
 - `fixture` runs against `eval/fixture.sql` (45 deterministic rows: all five levels, thickness in mm and in cm, angle in deg, two count units, one family with live, archived and superseded variants, three duplicate-merge pairs, 22 filler rows), so cases do not break when the demo data changes. 18 cases, 9 of them holdout.
-- `blum` runs against the two sample imports already in CI (105 Blum hinges, 4 Laminex boards, 109 rows) with real part numbers: 14 cases, 9 of them holdout. Both datasets are evaluated against separate databases, never the same one, so the fixture's names cannot satisfy a Blum case.
+- `blum` runs against the two sample imports already in CI (105 Blum hinges, 4 Laminex boards, 109 rows) with real part numbers: 14 cases, 9 of them holdout. Both datasets are evaluated against separate databases, never the same one, so the fixture's names cannot satisfy a Blum case. Running `--dataset blum` on a combined database is out of spec and shows why: `bl-none-brand-not-imported` (`q=hettich`) turns into `and`/4, because the fixture ships two Hettich hinges.
 - Negative cases (`expect_total: 0`) are kept in the same list as positive ones; the runner excludes them from the zero-result ratio, so "nothing found" is only a failure where something was expected.
 
 ### 6.2 Metrics and thresholds
@@ -286,7 +292,7 @@ Add a case id, a split, the query or filters, and the expected level; add `expec
 ## 7. Contract and versioning
 
 - Every response carries `schema_version: "2"` at the envelope level; export records validate individually against `schema/material.schema.json` (`const "2"`, `required: [schema_version, material_uid, category_code, name]`).
-- **Decision D7: the export is a stream of whole UMR documents, not an envelope.** JSONL is one UMR v2 document per line; CSV has the fixed `api.main.EXPORT_COLUMNS` header and JSON-encodes nested values. Version and freshness travel in response headers (`X-Schema-Version: 2`, `X-Exported-At`, `X-Record-Count`), which answers the review finding that recipients cannot tell which version they hold (`docs/review-v1-and-plan-v2.md:213`) while keeping every line independently validatable. No `schema/export.schema.json` is needed, and a line-by-line consumer (the usual tool for JSONL) works without parsing a wrapper.
+- **Decision D7 (T1) and B5 (T1b): JSONL stays a stream of whole documents, and `format=json` is the envelope.** JSONL is one UMR v2 document per line; CSV has the fixed `api.main.EXPORT_COLUMNS` header and JSON-encodes nested values; `format=json` returns `{schema_version, exported_at, count, records: [UMR...]}` as one document validated by `schema/export.schema.json` (its `records` items `$ref` `material.v2.json`). Version and freshness also travel in response headers (`X-Schema-Version: 2`, `X-Exported-At`, `X-Record-Count`) for all three formats, which answers the review finding that recipients cannot tell which version they hold (`docs/review-v1-and-plan-v2.md:213`) while keeping every JSONL line independently validatable.
 - **`proto/data/materials.jsonl` is v1-shaped** (it has `category`, `default_supplier`, and no `schema_version`) and therefore does not validate against the v2 contract. T1 must either regenerate it from `/v1/export` or drop it from the README as a "sample"; a contract nobody validates is not a contract.
 - Policy: additive fields only within v2; removal/rename requires `/v2` and a deprecation window of one minor release.
 - CSV export: fixed header, RFC 4180 quoting, ISO-8601 dates, UTF-8 without BOM.
@@ -358,11 +364,12 @@ Add one job (`api`) to `.github/workflows/ci.yml`, reusing the existing `postgre
 | §4.2 touches functions CI already asserts | Medium | Additive OUT column; the clamp change is the only behavioural edit; assertions use < 200 rows |
 | Python 3.14 vs `psycopg[binary]` wheels | Low | Fallback to pure-Python `psycopg` + system libpq; CI pins 3.12 |
 | Evaluation overfits the fixture | High (false confidence) | `holdout` split in YAML + the `blum` dataset on real catalogue rows |
-| API drifts from `proto/` | Medium | README declares `/v1` authoritative; prototype banner; T1b converts or retires `proto/serve.py` |
+| API drifts from `proto/` | Medium | README declares `/v1` authoritative; prototype banner; a later task converts or retires `proto/serve.py` (T1b kept its scope: collapse and the export envelope) |
 | Offset cursor duplicates rows under concurrent writes | Low at this scale | Opaque cursor, keyset documented as the 10k-row follow-up |
 | Logging volume | Low | 90-day cleanup statement, one index on `at` only |
-| `material_suggest` almost never fires inside the search payload | Low | Fuzzy tier covers the same ground; `GET /v1/suggest` is the UI path. Revisit the 0.3 threshold in T1b if real queries show missed corrections |
-| Family collapsing (`expand=variants`) deferred | Medium | Clients group via `/v1/materials/{uid}/family`; a family-aware search function is a ranking change and belongs in T1b (D6) |
+| `material_suggest` almost never fires inside the search payload | Low | Fuzzy tier covers the same ground; `GET /v1/suggest` is the UI path. Revisit the 0.3 threshold when real queries show missed corrections |
+| A collapsed hit hides the records it stands for | Low | Every hit carries `variant_count`/`variants`; `expand=variants` returns the records (B1) |
+| Facet sums count records while `total` counts groups | Low | Documented in 3.4 (B4); clients that need comparable numbers call with `expand=variants` |
 
 ---
 

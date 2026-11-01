@@ -19,16 +19,25 @@ DECLARE
     v_since    bigint;
     v_next     bigint;
     v_export   bigint;
+    v_groups   bigint;
     v_raised   boolean;
 BEGIN
     SELECT count(*) INTO v_active
       FROM material
      WHERE status NOT IN ('archived', 'superseded');
 
-    -- 1. browse total is the count of visible rows, not the page size
+    -- 1. browse total counts collapsed groups by default and rows with p_collapse false
+    SELECT count(DISTINCT coalesce(family_id, material_uid)) INTO v_groups
+      FROM material
+     WHERE status NOT IN ('archived', 'superseded');
+
     SELECT coalesce((material_search_page(p_limit => 1) ->> 'total')::bigint, 0) INTO v_total;
+    IF v_total <> v_groups THEN
+        RAISE EXCEPTION 'collapsed browse total % <> groups %', v_total, v_groups;
+    END IF;
+    SELECT coalesce((material_search_page(p_limit => 1, p_collapse => false) ->> 'total')::bigint, 0) INTO v_total;
     IF v_total <> v_active THEN
-        RAISE EXCEPTION 'browse total % <> active materials %', v_total, v_active;
+        RAISE EXCEPTION 'expanded browse total % <> active materials %', v_total, v_active;
     END IF;
 
     -- 2. every level name the API documents is reachable from data that exists
