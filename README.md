@@ -147,10 +147,41 @@ Search quality is a gate, not an opinion:
 ```bash
 python scripts/eval_search.py --dsn "$ML_DSN" --dataset fixture   # deterministic corpus, five levels
 python scripts/eval_search.py --dsn "$ML_DSN" --dataset blum      # real part numbers from the sample import
-python -m pytest -q tests                                        # 21 HTTP contract tests
+python -m pytest -q tests                                        # 60 tests: HTTP contract + MCP
 ```
 
 Design and decisions: [`docs/api-v1.md`](docs/api-v1.md) (endpoints, SQL additions, instrumentation, evaluation thresholds). Implementation log with verification for every step: [`docs/t1-progress.md`](docs/t1-progress.md).
+
+---
+
+## MCP server (B8)
+
+Seven read-only tools over the same API, for a model that should search the catalogue instead of guessing: `search_materials`, `get_material`, `get_family`, `list_facets`, `suggest_materials`, `list_changes`, `catalogue_info`, plus a `materials://{uid}` resource for attaching one document to a conversation. No SQL and no business rules — if the API does not answer it, the tool does not either.
+
+```bash
+pip install -r mcp_server/requirements.txt
+set ML_API_BASE_URL=http://127.0.0.1:8848
+python -m mcp_server                 # stdio, the default a desktop host starts
+python -m mcp_server --transport http --base-url http://127.0.0.1:8848
+```
+
+Host configuration (Claude Desktop, Cursor and others read the same shape):
+
+```json
+{
+  "mcpServers": {
+    "material-library": {
+      "command": "python",
+      "args": ["-m", "mcp_server"],
+      "env": {"ML_API_BASE_URL": "http://127.0.0.1:8848"}
+    }
+  }
+}
+```
+
+Settings: `ML_API_BASE_URL` (127.0.0.1:8848), `ML_API_TOKEN` (empty), `MCP_ACTOR` (`mcp`, sent as `X-Actor` so the search log shows which client asked), `MCP_TIMEOUT` (10 s), `MCP_TRANSPORT` (`stdio`), `MCP_HTTP_HOST` (127.0.0.1), `MCP_HTTP_PORT` (8849). A failed call comes back as a tool error carrying the API's own `code` and sentence, so the model can fix its arguments instead of retrying.
+
+Design and decisions: [`docs/mcp-server.md`](docs/mcp-server.md). Implementation log with the SDK entry points and the verification of every step: [`docs/mcp-progress.md`](docs/mcp-progress.md).
 
 ---
 
@@ -197,11 +228,11 @@ Edit the material pool at the top of `proto/build_db.py` (`BOARDS` / `HARDWARE` 
 - [x] **Read API v1 (T1)**: 10 read-only endpoints over PostgreSQL, unit-aware measure filters, truthful `total` with cursor paging, search logging + click tracking, JSONL/CSV export, pytest contract tests, CI job `api` and a search evaluation gate (fixture + Blum catalogue, MRR@10 1.000 on the holdout split)
 - [x] **Duplicate merge (T2)**: scan for candidate pairs, review queue, preview, merge with an explicit keeper (survivor becomes a superseded tombstone), ignore; HTTP routes and CLIs, contract assertions and pytest coverage in the `api` job
 - [x] **Read API v1b (T1b)**: families collapse to their best hit with `variant_count`/`variants` (`expand=variants` returns the records), and `format=json` exports the versioned envelope (`{schema_version, exported_at, count, records}`) validated by `schema/export.schema.json`
-- [ ] MCP server on top of the read API (the API is the stable layer it would wrap)
+- [x] **MCP server (B8)**: seven read-only tools plus a `materials://{uid}` resource over the read API, stdio by default and streamable HTTP on request, with the API's errors passed through verbatim
 - [ ] Real-data ETL (joineryflow database connection or exported snapshot)
 - [ ] write-back executor (the request table is ready, the PATCH executor is not done)
 
-**Next step: MCP server on the read API (a design document first, per `docs/t1b-progress.md`), then the real-data ETL.** T1b closed the two gaps the read API used to advertise: families collapse by default (`expand=variants` returns the records) and `format=json` exports the versioned envelope validated by `schema/export.schema.json`. `docs/t2-merge.md` §9 explains recovery without an `unmerge()`.
+**Next step: the real-data ETL (joineryflow database connection or an exported snapshot), then the write-back executor.** T1b closed the two gaps the read API used to advertise: families collapse by default (`expand=variants` returns the records) and `format=json` exports the versioned envelope validated by `schema/export.schema.json`. `docs/t2-merge.md` §9 explains recovery without an `unmerge()`.
 
 ---
 

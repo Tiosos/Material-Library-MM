@@ -1,0 +1,17 @@
+# Pinned on purpose. The MCP server is installed next to the API in the same environment
+# (docs/mcp-server.md 10), so this file only adds what the protocol layer needs on top of
+# api/requirements.txt. Install both:
+#
+#     pip install -r api/requirements.txt -r mcp_server/requirements.txt
+#
+# mcp 2.3.0 is the version whose entry points are recorded in docs/t2-progress.md (MCP step 0):
+# MCPServer, MCPServer.run(), the in-memory Client and ToolError.
+# httpx2 is the HTTP client the SDK itself uses; ApiClient uses it too, so one transport
+# implementation covers both directions.
+# sse-starlette 3.6.0 is pulled in by mcp; pinned because its starlette floor is what forced the
+# API upgrade, and a silent bump should be a review event, not a surprise.
+mcp==2.3.0
+mcp-types==2.3.0
+httpx2==2.16.0
+sse-starlette==3.6.0
+pywin32==312; sys_platform == "win32"
