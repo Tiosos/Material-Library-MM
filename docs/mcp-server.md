@@ -1,7 +1,8 @@
 # MCP server on the read API
 
-Status: design, not implemented. This document is the plan for T3 (the MCP layer); the numbered
-delivery steps at the end are the implementation checklist.
+Status: implemented in steps 0-4 (`mcp_server/`), read-only. This document is both the design of
+the MCP layer (T3) and the contract the code is checked against; the step-by-step log with the
+verification output lives in `docs/mcp-progress.md`.
 
 What it is: a small Model Context Protocol server that exposes the read API to LLM hosts
 (Claude Desktop, Cursor, the Anthropic API with remote MCP, any MCP client). It adds no database
@@ -140,6 +141,10 @@ and lets the API answer `400 bad_request` for anything malformed, which keeps on
 | Write-back / change requests (T3) | Not designed yet |
 | A `sql_query` tool | Defeats the point of the API: validation, logging and the schema contract all vanish |
 
+Keeping these routes out is only worth something if a tool cannot be pointed at them by accident:
+every `uid` is encoded with `client.quote_segment()` (section 7), so `uid="../meta"` is a material
+that does not exist rather than a call to `/v1/meta`.
+
 ## 5. Resources
 
 One templated resource, no listing:
@@ -211,7 +216,11 @@ Rules that keep it reviewable:
 - No `import psycopg`, no `import api`, no SQL literal anywhere in `mcp_server/`. A grep in CI
   (`grep -r "psycopg" mcp_server/` must be empty) proves the separation.
 - `ApiClient` is the only place that knows the API's URL and token. Tools receive a client, so a
-  test can hand them one backed by `httpx2.ASGITransport` (no socket, no port).
+  test can hand them one backed by an in-process transport (no socket, no port). The transport
+  re-issues each request through FastAPI's `TestClient`, because the SDK runs sync tool bodies in a
+  worker thread while `httpx2.ASGITransport` is async-only (`docs/mcp-progress.md`, decision D11).
+- A path segment that comes from a model (`uid`) is encoded by `client.quote_segment()` before it
+  is interpolated, so a value can never change which route is called (section 4.4).
 - Tool functions return plain dicts; serialisation is the SDK's job, so the shapes are testable
   without an MCP client.
 
@@ -227,6 +236,8 @@ present:
 | `401 unauthorized` | isError, `code: unauthorized`, "check ML_API_TOKEN" |
 | `503 unavailable` (database down, statement timeout) | isError, `code: unavailable`, "the API is not reachable; retry later" |
 | connection refused / timeout | isError, `code: unavailable`, the exception's class and the base URL, no stack trace |
+| a `uid` with a control character | isError, `code: bad_request`, refused before the request is built (a NUL would reach PostgreSQL and come back as `internal`) |
+| a `uid` that is not a material uid | isError, `code: not_found`: the segment is percent-encoded, so `../meta` cannot address another route |
 
 Two rules: a tool never converts an error into an empty result, and it never returns a traceback.
 The model sees the same vocabulary as a human reading `docs/api-v1.md` 3.3, which is the whole point
@@ -251,7 +262,7 @@ stdout carries the protocol and must stay clean.
 | Assertion | How |
 | --- | --- |
 | The server registers exactly the seven tools, names and descriptions within limits | list tools through an in-memory client session (exact SDK entry point confirmed in step 0) |
-| Every tool answers against a prepared database | `httpx2.ASGITransport(app=api.main.app)` as the client transport |
+| Every tool answers against a prepared database | an `httpx2.BaseTransport` that re-issues each request through `TestClient(app)` (D11) |
 | `search_materials` returns the trimmed hit shape and the envelope fields | `q=laminex` -> `total >= 1`, hits have `name`/`unit`, no `score` |
 | `measures` is accepted as an object and a malformed spec is a tool error, not an empty page | `{"thickness_mm": {"gte": 17.5, "lte": 18.5, "unit": "mm"}}` returns rows; `unit: "furlong"` (unknown unit) and a missing `unit` -> isError `bad_request` |
 | `get_material` validates against `schema/material.schema.json` | `jsonschema` on the returned document |

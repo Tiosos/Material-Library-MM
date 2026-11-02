@@ -147,7 +147,7 @@ Search quality is a gate, not an opinion:
 ```bash
 python scripts/eval_search.py --dsn "$ML_DSN" --dataset fixture   # deterministic corpus, five levels
 python scripts/eval_search.py --dsn "$ML_DSN" --dataset blum      # real part numbers from the sample import
-python -m pytest -q tests                                        # 60 tests: HTTP contract + MCP
+python -m pytest -q tests                                        # 64 tests: HTTP contract + MCP
 ```
 
 Design and decisions: [`docs/api-v1.md`](docs/api-v1.md) (endpoints, SQL additions, instrumentation, evaluation thresholds). Implementation log with verification for every step: [`docs/t1-progress.md`](docs/t1-progress.md).

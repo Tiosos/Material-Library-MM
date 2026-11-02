@@ -18,7 +18,7 @@ from mcp.server.mcpserver.exceptions import ResourceError
 from pydantic import Field
 
 from . import __version__, tools
-from .client import ApiClient, ApiError
+from .client import ApiClient, ApiError, quote_segment
 from .config import Settings
 
 SERVER_NAME = "material-library"
@@ -161,7 +161,7 @@ def build_server(settings: Settings, *, api: ApiClient | None = None) -> MCPServ
     )
     def material_resource(uid: str) -> dict[str, Any]:
         try:
-            return client.get(f"/v1/materials/{uid}")
+            return client.get(f"/v1/materials/{quote_segment(uid)}")
         except ApiError as exc:
             raise ResourceError(f"{exc.code}: {exc.message}") from None
 

@@ -186,7 +186,8 @@ Shipped:
 
 Shipped:
 
-- `tests/test_mcp.py` - 23 tests. The server runs through a real MCP client session (in-memory
+- `tests/test_mcp.py` - 27 tests (23 here plus the four traversal and control-character cases
+  added in the review pass below). The server runs through a real MCP client session (in-memory
   transport, the same SDK path a host uses) over the in-process API. Coverage: registration and
   order, description lengths, caps in the schema and enforced on a call, the search envelope and
   trim, `log_id`, the empty answer, object `attrs`/`measures`, malformed measures, schema-valid
@@ -235,3 +236,54 @@ Two real defects were found by writing these tests:
   the two defects recorded.
 
 `python scripts/check_english.py` -> `OK: no CJK text found`.
+
+## Review fixes (PR #5)
+
+A code review of PR #5 reported three findings. All three are fixed here; the first was a real
+defect, not a style note.
+
+### 1. A `uid` could address another route (P2)
+
+`get_material` and `get_family` interpolated the model-supplied `uid` straight into the path, and
+`httpx` normalises dot segments, so `uid="../meta"` became `GET /v1/meta` and returned the meta
+document with `is_error=False`. The same trick reached `/v1/changes` (a 46 KB feed) and
+`/v1/duplicates`, which section 4.4 of the design deliberately keeps out of the tool surface. A
+`uid` containing a NUL byte was worse: `httpx` raised `InvalidURL`, which is not an `HTTPError`, so
+it escaped as `UnexpectedToolError` with no `code`.
+
+Fix: `client.quote_segment()` percent-encodes a path segment with an empty safe set, so a value can
+never introduce structure; a control character is refused as `bad_request` instead of being encoded
+(`%00` reaches PostgreSQL as a NUL in a text parameter and comes back as `internal`); `ApiClient.get()`
+maps `httpx2.InvalidURL` to `bad_request`. `get_material`, `get_family` and the `materials://{uid}`
+resource all go through it.
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Before the fix | `httpx2` `GET /v1/materials/../meta` against the live API | HTTP 200, the meta body |
+| After the fix | same request through `get_material` over a live stdio session | isError `not_found: Not Found` for `../meta`, `../changes`, `../duplicates`, `/v1/meta` |
+| Control character | `get_material` with `mat_...\x00` | isError `bad_request: ... contains a control character` |
+| A real uid still works | `get_material` with a real uid | 2090-byte document, `is_error=False` |
+| Resource cannot be steered | `read_resource("materials://../meta")` and two encoded variants | refused before any request (`Unknown resource`) |
+| Tests | `ML_DSN=.../ml_mcp2 python -m pytest -q tests/test_mcp.py -p no:cacheprovider` | `27 passed` (23 before, 4 new traversal and control-character cases) |
+
+### 2. The design document contradicted the code (P3)
+
+`docs/mcp-server.md` still said "design, not implemented" although `README.md` and
+`docs/data-model-v2.md` 6 mark B8 done, and section 10 still described the tests as using
+`httpx2.ASGITransport(app=api.main.app)` while the implementation bridges through `TestClient`
+(D11). The header now says implemented with this log as the record, section 7 and section 10 name
+the bridge, and sections 4.4 and 8 gained the encoding rule and the two new error rows.
+
+### 3. Dependency comments pointed at the wrong file (P3)
+
+`mcp_server/requirements.txt` and `api/requirements.txt` cited `docs/t2-progress.md (MCP step 0)`
+for the SDK entry-point table, which lives in this file (step 0). Both comments now cite
+`docs/mcp-progress.md`.
+
+### Verification after all three fixes
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Whole suite | `python .tmp/newdb.py ml_mcp5 both` then `ML_DSN=.../ml_mcp5 python -m pytest -q tests -p no:cacheprovider` | `64 passed in 6.67s` (37 API + 27 MCP) |
+| English only | `python scripts/check_english.py` | `OK: no CJK text found` |
+| Compiles | `python -m compileall -q api mcp_server tests scripts` | no output |

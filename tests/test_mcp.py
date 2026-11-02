@@ -243,6 +243,39 @@ def test_unknown_uid_is_a_not_found_tool_error(session: Session) -> None:
     assert "not_found" in message
 
 
+def test_a_uid_cannot_steer_the_request_to_another_route(session: Session) -> None:
+    """`../meta` must be a not-found material, not the meta endpoint (docs/mcp-server.md 4.4)."""
+
+    for uid in ("../meta", "../changes", "..%2Fmeta", "/v1/meta"):
+        message = call_error(session, "get_material", {"uid": uid})
+        assert "not_found" in message, (uid, message)
+        assert "schema_version" not in message
+
+
+def test_a_uid_cannot_steer_the_family_route_either(session: Session) -> None:
+    message = call_error(session, "get_family", {"uid": "../meta"})
+    assert "not_found" in message
+
+
+def test_the_resource_cannot_be_steered_by_its_uid(session: Session) -> None:
+    """The template matches one segment, so a slash in a URI is refused before any request."""
+
+    for uri in ("materials://../meta", "materials://..%2Fmeta", "materials://mat_x/../meta"):
+        with pytest.raises(Exception) as caught:
+            session.run(session.client.read_resource(uri))
+        message = str(caught.value)
+        assert "not_found" in message or "Unknown resource" in message, (uri, message)
+        assert "schema_version" not in message
+
+
+def test_a_control_character_in_a_uid_is_a_bad_request(session: Session) -> None:
+    """`%00` would reach PostgreSQL as a NUL byte and come back as `internal`; refuse it first."""
+
+    message = call_error(session, "get_material", {"uid": "mat_0Q5NR10E34B7GVYZSMBWJFTNE5\x00"})
+    assert "bad_request" in message
+    assert "control character" in message
+
+
 def test_get_family_lists_the_members(session: Session, conn: Any) -> None:
     row = conn.execute(
         """

@@ -8,6 +8,7 @@ the API's own `code` and `message` (docs/mcp-server.md 8). No retries, no cachin
 from __future__ import annotations
 
 import json
+import urllib.parse
 from typing import Any, Mapping
 
 import httpx2
@@ -46,6 +47,23 @@ class ApiError(Exception):
         if self.detail:
             text = f"{text} ({json.dumps(self.detail, sort_keys=True, ensure_ascii=False)})"
         return ToolError(text)
+
+
+def quote_segment(value: str) -> str:
+    """Encode one path segment so a value can never change the route it is put into.
+
+    Tool inputs come from a model, so `uid` is untrusted: `../meta` in an unencoded path makes
+    httpx normalise the dot segments and call a different endpoint, which is how a read-only tool
+    would reach routes it deliberately does not expose (docs/mcp-server.md 4.4). Quoting with an
+    empty safe set leaves no `/`, `.` or `%` that could be read as structure.
+
+    A control character is refused instead of encoded: `%00` reaches PostgreSQL as a NUL byte in a
+    text parameter, which the API cannot answer with anything better than `internal`.
+    """
+
+    if any(character < " " or character == "" for character in value):
+        raise ApiError("bad_request", f"{value!r} contains a control character")
+    return urllib.parse.quote(value, safe="")
 
 
 def _encode(value: Any) -> str:
@@ -114,6 +132,11 @@ class ApiClient:
 
         try:
             response = self._client.get(path, params=clean_params(params))
+        except httpx2.InvalidURL as exc:
+            # A NUL byte or an unencodable character: the caller built a bad path, not the API.
+            raise ApiError(
+                "bad_request", f"{path!r} is not a valid URL path ({type(exc).__name__})"
+            ) from None
         except httpx2.TimeoutException as exc:
             raise ApiError(
                 "unavailable",

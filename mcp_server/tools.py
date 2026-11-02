@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from .client import ApiClient
+from .client import ApiClient, quote_segment
 
 # A hit carries thirteen fields; a model needs six to decide what to open next (doc 4.1).
 HIT_FIELDS = ("material_uid", "name", "unit", "unit_cost", "variant_count", "variants")
@@ -83,13 +83,13 @@ def search_materials(
 def get_material(api: ApiClient, *, uid: str, measures: str = "preferred") -> dict[str, Any]:
     """One full UMR v2 document by material_uid; `measures` is `preferred` or `all`."""
 
-    return api.get(f"/v1/materials/{uid}", {"measures": measures})
+    return api.get(f"/v1/materials/{quote_segment(uid)}", {"measures": measures})
 
 
 def get_family(api: ApiClient, *, uid: str) -> dict[str, Any]:
     """The family a material belongs to and every member variant, by material_uid."""
 
-    return api.get(f"/v1/materials/{uid}/family")
+    return api.get(f"/v1/materials/{quote_segment(uid)}/family")
 
 
 def list_facets(
