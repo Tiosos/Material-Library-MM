@@ -11,10 +11,10 @@ database or process it ran against.
 | Step | Work | State |
 | --- | --- | --- |
 | 0 | Skeleton: config, `ApiClient`, `__main__`, `requirements.txt`; confirm the SDK entry points | [x] |
-| 1 | Seven tools in `tools.py`, registered in `server.py` | [ ] |
-| 2 | `materials://{uid}` resource, `--transport http` | [ ] |
-| 3 | `tests/test_mcp.py` plus a CI step in the `api` job | [ ] |
-| 4 | README host snippet, data-model row, this log, `check_english.py` | [ ] |
+| 1 | Seven tools in `tools.py`, registered in `server.py` | [x] |
+| 2 | `materials://{uid}` resource, `--transport http` | [x] |
+| 3 | `tests/test_mcp.py` plus a CI step in the `api` job | [x] |
+| 4 | README host snippet, data-model row, this log, `check_english.py` | [x] |
 
 ## Verification environment
 
@@ -107,3 +107,131 @@ directly, so that is pinned too rather than worked around.
 
 The 1 warning is `starlette/testclient.py:45: DeprecationWarning: The anyio.abc.BlockingPortal alias
 is deprecated` - it comes from starlette 0.52.1 itself, not from this repository.
+
+## Step 1 - the seven tools
+
+Shipped:
+
+- `mcp_server/tools.py` - one plain function per tool, each taking the `ApiClient` first, so a
+  function can be unit tested without a session. `HIT_FIELDS` and `SEARCH_FIELDS` are the trim
+  lists of `docs/mcp-server.md` 4.1; `SPECS` is the single list of `(name, function, title)` that
+  both the server and the tests read, so a tool cannot exist in one place and not the other.
+- `mcp_server/server.py` - `build_server(settings, api=None)`. Each tool is declared with the
+  function signature that becomes its input schema, so the SDK derives validation from the same
+  declaration a reader sees. Bounds are declared once: `Limit` is `1..50`, `ChangesLimit` is
+  `1..200`, `PerFacet` is `1..100`, `MeasureMode` is `preferred|all`, `Expand` is `variants`.
+- `call(fn, **kwargs)` turns an `ApiError` into `ToolError`, so the model sees
+  `bad_request: measure "thickness_mm": unknown unit "furlong"` rather than a traceback.
+
+Deviations:
+
+- **D11 - a sync `ApiClient` needs a sync transport.** `docs/mcp-server.md` 10 says the tests use
+  `httpx2.ASGITransport`; that transport is async-only, while the tool bodies are sync (the SDK runs
+  them with `anyio.to_thread.run_sync`). The tests therefore bridge through `TestClient`, which owns
+  the app lifespan and the connection pool, in a 12-line `httpx2.BaseTransport` subclass.
+- **D12 - the description limit is 400 characters, not 240.** The longest description is 240
+  characters, and the test asserts `60 <= len <= 400` so a future edit cannot quietly turn a tool
+  description into a paragraph or into a bare label.
+
+### Verification
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Tool names and order | in-memory `list_tools` vs `tools.TOOL_NAMES` | identical, seven tools |
+| Descriptions are usable | `len(tool.description)` for each tool | 142-240 characters |
+| Caps are visible in the schema | `search_materials.input_schema` | `limit.maximum` 50, `expand` `const "variants"`, `list_changes.limit.maximum` 200 |
+| A cap rejects before the API | `call_tool("search_materials", {"limit": 51})` | isError, `less than or equal to 50` |
+| Search envelope and trim | `search_materials {"q": "laminex", "limit": 2}` | `total 3`, `level and`, `collapsed true`, hits carry exactly the six fields |
+| A search is logged | same call | `log_id 100` (a real `search_log` row) |
+| Nothing found is an answer | `search_materials {"q": "zzzzzzzz"}` | `total 0`, `level none`, `results []`, no error |
+| Measures arrive as objects | `{"thickness_mm": {"gte": 17.5, "lte": 18.5, "unit": "mm"}}` | rows returned; `unit "furlong"` -> isError `bad_request` with the API sentence and no `CONTEXT` |
+| A wrong-but-convertible unit is empty, not an error | same window with `unit "kg"` | `total 0`, no error (see the deviation below) |
+| `get_material` is schema-valid | `jsonschema` against `schema/material.schema.json` | valid; `measures: "all"` returns more rows than `preferred` |
+| Unknown uid is a tool error | `get_material {"uid": "mat_doesnotexist"}` | isError `not_found: material_uid not found` |
+| Family, facets, suggest, changes, meta | one call each | family with members; facet rows `{facet, value, count}`; `laminx` -> `Laminex` 0.5; `next_since` 51; 182 materials and `max_sync_seq` 635 |
+| No database import in the package | `grep -rn psycopg mcp_server/` | no output (rc 1) |
+| English only | `python scripts/check_english.py` | `OK: no CJK text found` |
+
+### Deviation - a convertible unit with no matching values is an empty page
+
+`docs/mcp-server.md` 10 expected `unit: "kg"` on a thickness range to be an `isError bad_request`.
+It is not: `ml_measure_predicate` converts the window into the stored unit and the query simply
+matches nothing, so the answer is `total 0`, `level none`. That is the correct behaviour - the unit
+is valid and the catalogue has no such board - and the doc was wrong, not the API. The malformed
+case the tests use instead is an unknown unit (`furlong`, rejected with
+`unknown unit "furlong"`) and a missing `unit`, both of which are `400 bad_request`. `docs/mcp-server.md`
+4.2 and 10 were corrected in this step.
+
+## Step 2 - the resource and the HTTP transport
+
+Shipped:
+
+- `@server.resource("materials://{uid}", mime_type="application/json")` - the handler calls
+  `GET /v1/materials/{uid}` and returns the document unchanged, so the resource and the tool cannot
+  drift. A missing uid raises `ResourceError("not_found: material_uid not found")`.
+- `python -m mcp_server --transport http` serves the same tools over streamable HTTP
+  (`server.run("streamable-http", host=..., port=...)`), which is the only difference from stdio.
+
+### Verification
+
+| Check | Command | Result |
+| --- | --- | --- |
+| Template is registered | `list_resource_templates()` | exactly `materials://{uid}` |
+| Resource equals the tool | `read_resource("materials://<uid>")` vs `get_material` | same JSON, `mime_type application/json` |
+| Missing material is a resource error | `read_resource("materials://mat_doesnotexist")` | `MCPError: not_found: material_uid not found` |
+| HTTP transport serves the tools | `python -m mcp_server --transport http` then `POST /mcp` `initialize` | HTTP 200, `event: message`, capabilities list `tools` and `resources` |
+| `--version` and `--help` | `python -m mcp_server --version` | `mcp_server 0.1.0` |
+
+## Step 3 - the test suite and the CI step
+
+Shipped:
+
+- `tests/test_mcp.py` - 23 tests. The server runs through a real MCP client session (in-memory
+  transport, the same SDK path a host uses) over the in-process API. Coverage: registration and
+  order, description lengths, caps in the schema and enforced on a call, the search envelope and
+  trim, `log_id`, the empty answer, object `attrs`/`measures`, malformed measures, schema-valid
+  documents, `measures=all`, unknown uid, family membership, facets, suggest, changes, meta, the
+  resource (template, equality, missing), the token gate, and an unreachable API reading as
+  `unavailable` with no traceback.
+- `Session` fixture - the SDK session opens an anyio cancel scope, which must be entered and exited
+  in the same task, so the session lives in one long-running task on its own event loop instead of
+  being created per call. A per-call `asyncio.run` fails with
+  `RuntimeError: Attempted to exit cancel scope in a different task than it was entered in`.
+- `.github/workflows/ci.yml`, `api` job: `pip install -r mcp_server/requirements.txt`, a
+  "MCP server stays a transport layer" step (`grep -rn psycopg mcp_server/` and
+  `grep -rn "^from api\|^import api" mcp_server/` must both be empty, then `--help` and
+  `--version`), and the pytest step renamed to "HTTP smoke tests and MCP tests".
+
+Two real defects were found by writing these tests:
+
+1. `mcp_server/client.py` caught `httpx2.Timeout`, which does not exist in `httpx2` - the class is
+   `httpx2.TimeoutException`. Because the name was looked up at exception-matching time, the failed
+   lookup surfaced as `TypeError: catching classes that do not inherit from BaseException is not
+   allowed`, so a dead API produced an `UnexpectedToolError` with a traceback instead of
+   `unavailable`. Fixed, and the unreachable-API test now guards it.
+2. The first version of the schema assertion expected `search["expand"]["enum"]`; the SDK emits
+   `anyOf: [{const: "variants"}, {type: "null"}]` for a nullable `Literal`, so the assertion now
+   matches the emitted shape.
+
+### Verification
+
+| Check | Command | Result |
+| --- | --- | --- |
+| MCP suite | `ML_DSN=.../ml_mcp1 python -m pytest -q tests/test_mcp.py -p no:cacheprovider` | `23 passed in 3.34s` |
+| Whole suite on a fresh database | `python .tmp/newdb.py ml_mcp2 both` then `ML_DSN=.../ml_mcp2 python -m pytest -q tests -p no:cacheprovider` | `60 passed in 10.32s` (37 API + 23 MCP) |
+| CI guard: no database import | `grep -rn psycopg mcp_server/` | no output (rc 1) |
+| CI guard: no API import | `grep -rn "^from api\|^import api" mcp_server/` | no output (rc 1) |
+| Entry point still starts | `python -m mcp_server --help`, `--version` | usage printed; `mcp_server 0.1.0` |
+| Workflow parses | `yaml.safe_load(.github/workflows/ci.yml)` | jobs `static`, `database`, `api`; the `api` job now has 11 steps |
+
+## Step 4 - documentation
+
+- `README.md`: new "MCP server (B8)" section (install, run, host JSON, settings, error behaviour,
+  links to the design and the log); the status list checks B8 off; "Next step" moved to the real-data
+  ETL and the write-back executor; the pytest line now says 60 tests.
+- `docs/data-model-v2.md` 6: B8 is `Done`, pointing at `mcp_server/` and the two documents.
+- `docs/mcp-server.md`: 4.2 and 10 corrected for the measure behaviour above.
+- This file: steps 1-4 checked, with the deviations (D11 sync transport, D12 description bound) and
+  the two defects recorded.
+
+`python scripts/check_english.py` -> `OK: no CJK text found`.

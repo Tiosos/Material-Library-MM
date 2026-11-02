@@ -117,7 +117,9 @@ what a caller must know to avoid a useless call. The rules that must appear some
   `fuzzy`, `browse`, `none`); a `level` of `fuzzy` or `relaxed` means "approximate", and `none`
   means "nothing matched", which is an answer, not an error.
 - `measures` takes ranges with units: `{"thickness_mm": {"gte": 17.5, "lte": 18.5, "unit": "mm"}}`.
-  The unit is required and converted server-side (mm, cm, m, g, kg, and so on).
+  The unit is required and converted server-side (mm, cm, m, g, kg, and so on). A unit that cannot
+  be converted (or is missing) is a `400 bad_request`; a convertible unit with no matching values is
+  a normal empty result (`total` 0, `level` `none`), not an error.
 - `attrs` is exact JSONB containment, so `{"colour": "Black"}` matches only that value.
 - `collapsed` paging counts families: `total` is a group count unless `expand` is `variants`.
 
@@ -251,7 +253,7 @@ stdout carries the protocol and must stay clean.
 | The server registers exactly the seven tools, names and descriptions within limits | list tools through an in-memory client session (exact SDK entry point confirmed in step 0) |
 | Every tool answers against a prepared database | `httpx2.ASGITransport(app=api.main.app)` as the client transport |
 | `search_materials` returns the trimmed hit shape and the envelope fields | `q=laminex` -> `total >= 1`, hits have `name`/`unit`, no `score` |
-| `measures` is accepted as an object and a bad unit is a tool error, not an empty page | `{"thickness_mm": {"gte": 17.5, "lte": 18.5, "unit": "mm"}}`; `unit: "kg"` -> isError `bad_request` |
+| `measures` is accepted as an object and a malformed spec is a tool error, not an empty page | `{"thickness_mm": {"gte": 17.5, "lte": 18.5, "unit": "mm"}}` returns rows; `unit: "furlong"` (unknown unit) and a missing `unit` -> isError `bad_request` |
 | `get_material` validates against `schema/material.schema.json` | `jsonschema` on the returned document |
 | Unknown uid is an error carrying `not_found` | `get_material("mat_doesnotexist")` |
 | The resource template returns the same document as the tool | `materials://mat_...` vs `get_material` |

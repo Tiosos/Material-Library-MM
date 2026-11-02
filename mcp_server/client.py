@@ -114,7 +114,7 @@ class ApiClient:
 
         try:
             response = self._client.get(path, params=clean_params(params))
-        except httpx2.Timeout as exc:
+        except httpx2.TimeoutException as exc:
             raise ApiError(
                 "unavailable",
                 f"the API at {self.base_url} did not answer in time ({type(exc).__name__})",

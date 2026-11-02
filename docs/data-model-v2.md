@@ -154,7 +154,7 @@ All three scripts are re-runnable (DDL uses `IF NOT EXISTS` / `CREATE OR REPLACE
 |---|---|---|---|
 | B9 | Import pipeline (Excel/CSV first, PDF second, portal scraping last) | Done for CSV/XLSX | `scripts/import_file.py` + `mappings/<vendor>.yaml`; measured 122 Blum rows → 105 materials, idempotent. PDF extraction covers the Blum hinge section only |
 | B7 | Duplicate merge workflow | Done | `schema/merge.sql`: scan, keeper suggestion, preview, merge, ignore; the survivor becomes a superseded tombstone, children are repointed under documented survival rules (`docs/t2-merge.md`) |
-| B8 | MCP server | Not started | Suggested as a one-day wrap-up once REST is finalized. The read API (T1) is now that REST layer |
+| B8 | MCP server | Done | Seven read-only tools plus a `materials://{uid}` resource in `mcp_server/`, one HTTP hop to the read API and no SQL of its own; `docs/mcp-server.md` is the contract, `docs/mcp-progress.md` the log |
 | — | Read API v1 (FastAPI over the SQL functions) | Done | `api/` serves 10 read-only endpoints; `schema/api.sql` holds the payload functions; contract tests and a search evaluation gate run in CI (`docs/api-v1.md`, `docs/t1-progress.md`) |
 | — | ETIM/eCl@ss real-code mapping | Not started | Tables and fields are reserved, waiting for the first supplier catalogue |
 | — | EPD collection | Not started | Table and contract are reserved |
