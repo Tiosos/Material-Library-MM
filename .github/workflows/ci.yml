@@ -124,6 +124,44 @@ jobs:
           test "$(psql -tAc "SELECT member_count FROM v_family WHERE display_name = 'Laminex Black MDF Melamine'")" = "3"
           test "$(psql -tAc "SELECT min_thickness_mm::int || '-' || max_thickness_mm::int FROM v_family WHERE display_name = 'Laminex Black MDF Melamine'")" = "16-25"
 
+      - name: Import the redacted 25HAW ORDERS sample
+        run: |
+          python scripts/import_file.py \
+            --file ingest/samples/25haw_orders_redacted.csv \
+            --mapping mappings/25haw_orders.yaml \
+            --dsn "$ML_DSN" --apply --json /tmp/25haw.json
+          python - <<'PY'
+          import json
+          stats = json.load(open("/tmp/25haw.json"))["stats"]
+          assert stats["new"] == 71, stats
+          assert stats["updated"] == 0, stats
+          assert stats["skipped"] == 0, stats
+          assert stats["measures"] == 96, stats
+          assert stats["identifiers"] == 71, stats
+          assert stats["families"] == 32, stats
+          print("25haw first import:", stats)
+          PY
+
+      - name: 25HAW measures, families and the absence of prices
+        run: |
+          test "$(psql -tAc "SELECT count(*) FROM material_measure mm WHERE EXISTS (SELECT 1 FROM material m WHERE m.material_uid = mm.material_uid AND m.source_system = '25haw_orders')")" = "96"
+          test "$(psql -tAc "SELECT count(*) FROM material WHERE source_system = '25haw_orders' AND family_id IS NOT NULL")" = "32"
+          test "$(psql -tAc "SELECT count(*) FROM material_price p WHERE EXISTS (SELECT 1 FROM material m WHERE m.material_uid = p.material_uid AND m.source_system = '25haw_orders')")" = "0"
+          test "$(psql -tAc "SELECT count(*) FROM material_family f WHERE EXISTS (SELECT 1 FROM material m WHERE m.family_id = f.family_id AND m.source_system = '25haw_orders')")" = "23"
+
+      - name: 25HAW re-import is idempotent
+        run: |
+          python scripts/import_file.py \
+            --file ingest/samples/25haw_orders_redacted.csv \
+            --mapping mappings/25haw_orders.yaml \
+            --dsn "$ML_DSN" --apply --json /tmp/25haw2.json
+          python - <<'PY'
+          import json
+          stats = json.load(open("/tmp/25haw2.json"))["stats"]
+          assert stats["new"] == 0, stats
+          print("25haw second import:", stats)
+          PY
+
   api:
     name: Read API, contract and search evaluation
     runs-on: ubuntu-latest

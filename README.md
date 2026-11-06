@@ -206,6 +206,8 @@ python scripts/import_file.py --file ingest/samples/blum_hinges.csv --mapping ma
 
 For mapping syntax, header matching order, and idempotency rules see [`docs/import-pipeline-b9.md`](docs/import-pipeline-b9.md). Measured: 122 rows of real Blum catalogue data → 105 materials (a re-run adds 0); three Laminex thicknesses → 1 family with 3 records.
 
+A second worked example imports a joinery procurement sheet with parsed sheet sizes and thickness-based families: see [`docs/25haw-orders-import.md`](docs/25haw-orders-import.md), [`mappings/25haw_orders.yaml`](mappings/25haw_orders.yaml) and the redacted sample [`ingest/samples/25haw_orders_redacted.csv`](ingest/samples/25haw_orders_redacted.csv). Measured: 71 real material rows → 71 materials, 96 measures and 23 families; a re-run adds 0. The committed sample contains no prices, people, project name or location, order data, dates, quantities or attachment references. CI asserts these numbers in the `database` job.
+
 ---
 
 ## Changing the prototype data
