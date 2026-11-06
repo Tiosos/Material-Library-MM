@@ -1,0 +1,96 @@
+# 25HAW ORDERS (a joinery procurement sheet) -> UMR v2, for the B9 importer.
+#
+# Input: ingest/samples/25haw_orders_redacted.csv, produced by
+#   python scripts/prepare_25haw_orders.py --source <xlsx> \
+#       --out ingest/samples/25haw_orders_redacted.csv
+# The committed sample is redacted: prices, people, project name and location,
+# attachment references, order numbers, stock figures and dates are absent.
+# Supplier and product code stay because they are the identifier and the
+# deduplication key of the material master records.
+#
+# Run:
+#   python scripts/import_file.py \
+#       --file ingest/samples/25haw_orders_redacted.csv \
+#       --mapping mappings/25haw_orders.yaml --dsn "$ML_DSN" --apply
+
+vendor: orders_25haw
+source_system: 25haw_orders
+
+defaults:
+  category_code: generic
+  unit: ea
+  currency: AUD
+  country: AU
+
+extra_headers: attributes
+
+fields:
+  - key: part_no
+    target: identifier
+    kind: supplier_code
+    required: true
+    aliases: ["PCode"]
+
+  - key: title
+    target: column
+    column: name
+    aliases: ["ItemDescription"]
+
+  - key: vendor
+    target: column
+    column: supplier
+    aliases: ["Supplier"]
+
+  - key: brand
+    target: column
+    column: brand
+    aliases: ["Brand"]
+
+  - key: category
+    target: column
+    column: category_code
+    aliases: ["CategoryCode"]
+
+  # Physical measures parsed from the leading "A x B x C" size triple.
+  # Keys match material_profile.field_schema / axis_options in schema/seed.sql.
+  - key: thickness
+    target: measure
+    measure_key: thickness_mm
+    unit: mm
+    transform: number
+    aliases: ["ThicknessMM"]
+
+  - key: sheet_len
+    target: measure
+    measure_key: sheet_len_mm
+    unit: mm
+    transform: number
+    aliases: ["SheetLenMM"]
+
+  - key: sheet_wid
+    target: measure
+    measure_key: sheet_wid_mm
+    unit: mm
+    transform: number
+    aliases: ["SheetWidMM"]
+
+  # Size-free family key: supplier plus the description with the size triple
+  # removed. The 19 / 26 / 33 mm variants of one board become one family.
+  - key: family_base
+    target: attribute
+    aliases: ["FamilyBase"]
+
+  - key: pcode_raw
+    target: attribute
+    aliases: ["PCodeRaw"]
+
+  - key: source_row
+    target: attribute
+    aliases: ["SourceRow"]
+
+name_template: "{title}"
+
+family:
+  key: [family_base]
+  axis: [thickness]
+  name_template: "{family_base}"

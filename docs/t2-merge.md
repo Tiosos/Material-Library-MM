@@ -1,6 +1,6 @@
 # T2 - Duplicate merge design
 
-Status: proposal, no code written yet.
+Status: implemented (see `README.md` -> Current status, "Duplicate merge (T2)"). This file is retained as the design record.
 Owner: Tiosos.
 Scope decision: candidate scan + review queue + merge action + HTTP edge + CLI, with rules below.
 Companion docs: `docs/data-model-v2.md` (B7 row), `docs/api-v1.md` (read API v1), `docs/t1-progress.md` (what shipped).
