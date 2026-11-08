@@ -147,7 +147,7 @@ Search quality is a gate, not an opinion:
 ```bash
 python scripts/eval_search.py --dsn "$ML_DSN" --dataset fixture   # deterministic corpus, five levels
 python scripts/eval_search.py --dsn "$ML_DSN" --dataset blum      # real part numbers from the sample import
-python -m pytest -q tests                                        # 64 tests: HTTP contract + MCP
+python -m pytest -q tests                                        # 104 tests: HTTP contract, MCP and mapping/importer unit tests
 ```
 
 Design and decisions: [`docs/api-v1.md`](docs/api-v1.md) (endpoints, SQL additions, instrumentation, evaluation thresholds). Implementation log with verification for every step: [`docs/t1-progress.md`](docs/t1-progress.md).
@@ -205,6 +205,15 @@ python scripts/import_file.py --file ingest/samples/blum_hinges.csv --mapping ma
 ```
 
 For mapping syntax, header matching order, and idempotency rules see [`docs/import-pipeline-b9.md`](docs/import-pipeline-b9.md). Measured: 122 rows of real Blum catalogue data → 105 materials (a re-run adds 0); three Laminex thicknesses → 1 family with 3 records.
+
+Every mapping is validated against [`schema/mapping.schema.json`](schema/mapping.schema.json). The CI `static` job runs `scripts/check_mappings.py` (the schema plus cross-field rules such as template placeholders and family keys naming real fields) together with the pure-Python unit tests for `ingest.mapping` and `ingest.importer`. Both run locally without a database:
+
+```bash
+python scripts/check_mappings.py
+python -m unittest discover -s tests -p "test_unit_*.py" -v
+```
+
+A second worked example imports a joinery procurement sheet with parsed sheet sizes and thickness-based families: see [`docs/25haw-orders-import.md`](docs/25haw-orders-import.md), [`mappings/25haw_orders.yaml`](mappings/25haw_orders.yaml) and the redacted sample [`ingest/samples/25haw_orders_redacted.csv`](ingest/samples/25haw_orders_redacted.csv). Measured: 71 real material rows → 71 materials, 96 measures and 23 families; a re-run adds 0. The committed sample contains no prices, people, project name or location, order data, dates, quantities or attachment references. CI asserts these numbers in the `database` job.
 
 ---
 

@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://materiallib.local/schema/mapping.v1.json",
+  "title": "Supplier import mapping (B9)",
+  "description": "Contract for mappings/<vendor>.yaml, consumed by ingest/mapping.py and ingest/importer.py. One file per supplier translates free-form spreadsheet headers into UMR v2 fields. Validated in the CI static job by scripts/check_mappings.py.",
+  "type": "object",
+  "required": ["vendor", "fields"],
+  "additionalProperties": false,
+  "properties": {
+    "vendor": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+      "description": "Short vendor id. Used in log messages and as the default source_system."
+    },
+    "source_system": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Value written to identifier / measure / price source_system. Defaults to vendor."
+    },
+    "defaults": {
+      "type": "object",
+      "description": "Fallback values for material columns that the sheet does not supply.",
+      "properties": {
+        "category_code": { "type": "string", "minLength": 1 },
+        "unit": { "type": "string", "minLength": 1 },
+        "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+        "country": { "type": "string", "pattern": "^[A-Z]{2}$" },
+        "brand": { "type": "string" },
+        "supplier": { "type": "string" },
+        "cost_basis": { "type": "string" },
+        "lead_time_days": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": { "type": ["string", "number", "boolean", "null"] }
+    },
+    "extra_headers": {
+      "type": "string",
+      "enum": ["attributes", "ignore"],
+      "default": "ignore",
+      "description": "What to do with unmatched columns. 'attributes' copies them into src.<slug> attributes; 'ignore' drops them."
+    },
+    "fields": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/field" }
+    },
+    "name_template": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Python str.format template for the material name. Every placeholder must name a field key or a defaults key."
+    },
+    "family": { "$ref": "#/$defs/family" }
+  },
+  "$defs": {
+    "field": {
+      "type": "object",
+      "required": ["key", "target"],
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "Name used in templates and family rules; also an implicit header alias."
+        },
+        "target": {
+          "type": "string",
+          "enum": ["identifier", "attribute", "measure", "column"],
+          "description": "Where the cell value goes in the UMR draft."
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["sku", "barcode", "ean", "gtin", "supplier_code", "legacy_id",
+                   "catalog_code", "internal_ref", "slab_id", "model_no", "cv_code",
+                   "contract_ref", "other"],
+          "description": "material_identifier.kind. Defaults to supplier_code when omitted."
+        },
+        "column": {
+          "type": "string",
+          "enum": ["unit_cost", "name", "supplier", "brand", "category_code", "unit", "currency"],
+          "description": "Required for target: column. Names the material column to fill."
+        },
+        "measure_key": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Required for target: measure. Key written to material_measure, aligned with material_profile.field_schema."
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "description": "UCUM unit for a measure, e.g. mm or deg."
+        },
+        "transform": {
+          "type": "string",
+          "enum": ["string", "number", "bool", "upper", "lower"],
+          "default": "string"
+        },
+        "required": {
+          "type": "boolean",
+          "default": false,
+          "description": "Fail the whole import when no header matches this field."
+        },
+        "aliases": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true,
+          "description": "Alternative supplier headers, matched after normalization."
+        },
+        "default": { "type": ["string", "number", "boolean", "null"] },
+        "source_system": { "type": "string", "minLength": 1 },
+        "source_ref": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "target": { "const": "column" } }, "required": ["target"] },
+          "then": { "required": ["column"] },
+          "description": "A column field must say which column it fills; the importer would otherwise use the field key as a column name."
+        },
+        {
+          "if": { "properties": { "target": { "const": "measure" } }, "required": ["target"] },
+          "then": { "required": ["measure_key"] },
+          "description": "A measure field must name its measure key; the field key is usually not a valid measure key."
+        }
+      ]
+    },
+    "family": {
+      "type": "object",
+      "required": ["key"],
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" },
+          "description": "Field keys (or defaults keys) whose values form the family key."
+        },
+        "axis": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Variant axes. A measure field contributes its measure_key to variant_values."
+        },
+        "name_template": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

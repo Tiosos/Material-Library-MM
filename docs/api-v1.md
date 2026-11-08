@@ -1,6 +1,6 @@
 # REST API v1 (T1) — Design
 
-> Status: **proposal, not implemented.**
+> Status: **implemented.** The ten read-only endpoints, contract tests and CI gate described below shipped in T1 and T1b; see `README.md` -> Current status for the feature checklist. This file is retained as the design record.
 > Goal: turn the already-verified PostgreSQL layer into something another system can call, and give "forgiving search" a number that CI can defend.
 > Related: [`design-v1.md`](design-v1.md) §6 (reference/import), [`data-model-v2.md`](data-model-v2.md) §6 (not done yet), [`review-v1-and-plan-v2.md`](review-v1-and-plan-v2.md) A6/A9.
 
