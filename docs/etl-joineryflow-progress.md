@@ -16,14 +16,15 @@ Status legend: `[ ]` planned, `[~]` in progress, `[x]` done and verified, `[!]` 
 | 2 | Write and merge the design document | [x] | PR #6 merged 2026-11-06T21:09:57Z as `6268ac3`; CI checks: English-only, schema/demo/import, read API all SUCCESS |
 | 3 | Audit the design against schema and live source | [x] | 2026-11-08 read-only audit; schema claims hold, source drift and three internal contradictions found; see "Audit findings" |
 | 4 | Resolve the remaining open questions | [x] | Project owner answered all three; see "Decisions" |
-| 5 | Exporter + committed JSONL snapshot | [ ] | not started (no code until implementation is authorised) |
+| 5 | Exporter + committed JSONL snapshot | [x] | 2026-11-08: `scripts/export_joineryflow.py` + `fixtures/joineryflow-hartwood.jsonl` (21 lines, 15733 bytes) in PR #9; see "Step 0" below |
 | 6 | `mapping/joineryflow.yaml` v2 | [ ] | not started |
 | 7 | `ingest/joineryflow.py` (read + build) | [ ] | not started |
 | 8 | `apply()` + import CLI | [ ] | not started |
 | 9 | Contract, unit tests, CI step, progress docs | [ ] | not started |
 
-No implementation code has been written for this task. `git diff dfb7699..origin/master --name-status`
-reports exactly one added file: `docs/etl-joineryflow.md`.
+PR #9 is the first implementation PR and contains exactly two files (the exporter and the snapshot).
+No schema, importer, mapping, CI or README change is in it. PR #8 (this log) stays documentation-only.
+The design document itself is unchanged (decision D1).
 
 ## Source measurement
 
@@ -113,6 +114,58 @@ Confirmed on 2026-11-08 in answer to the three remaining open questions:
   `identifier(kind='cv_code', value=<cv_code>, source_system='cv')` attached to the material whose
   `source_id` is `<target_material_table>:<target_material_id>`, per E11.
 
+Confirmed on 2026-11-08 in answer to the "next step" questions:
+
+* **D4 Implementation authorised; step 0 first.** The exporter and committed snapshot are written
+  as one PR, ahead of the mapping, importer and CI work.
+* **D5 Archived-path acceptance uses synthetic rows.** The ten `E2E-*` rows are gone from the
+  live database (audit finding 1). The committed fixture keeps the 18 real live rows; the
+  `--include-archived` / `status='archived'` path is verified with synthetic rows in unit and
+  contract tests, not with fabricated rows in the real fixture.
+* **D6 Merge PR #7 before step 9.** PR #7 (the 25HAW import) also edits `.github/workflows/ci.yml`
+  and `README.md`. It should be merged before the ETL CI step is added, to avoid a conflict. Step 0
+  does not touch either file, so it does not depend on that merge.
+
+## Step 0: exporter and committed snapshot (PR #9)
+
+Files: `scripts/export_joineryflow.py` (303 lines) and
+`fixtures/joineryflow-hartwood.jsonl` (21 lines, 15733 bytes).
+
+Verification run on 2026-11-08 against the live source, all passing:
+
+* Determinism (acceptance criterion 1): a second export with `--quiet --force` is byte-identical
+  to the committed fixture on every line; the header differs only in `exported_at`.
+* Format: 21 LF lines, sorted keys, valid header (schema version 1, `joineryflow`,
+  `hartwood-joinery`, `include_archived: false`, nine tables in contract order), 18 `row` lines +
+  2 `cv_mapping` lines, no `image_blob`, table order and primary-key order correct, per-table
+  counts 10/0/0/0/1/4/1/1/1, all ten board descriptions carry a leading mm token
+  (`18, 18, 19, 16, 19, 12, 32, 16, 19, 25`).
+* CLI guards: `--out` outside `fixtures/` refused without `--force` (exit 2), unknown workspace
+  exit 2, `--include-archived` flips the header flag, `--json` report matches the file bytes.
+* Pure functions: `shape_value` (Decimal to string, date to ISO, timestamptz to UTC `Z`, list,
+  unsupported type raises `ShapeError`), `build_header`, `encode_line`.
+* Read-only: `BEGIN READ ONLY` verified to reject a `CREATE TABLE` with
+  `ReadOnlySqlTransaction`; no probe table remains; source row counts unchanged.
+* `python scripts/check_english.py` clean; `python -m compileall -q scripts/export_joineryflow.py`
+  clean; the existing pytest suite is untouched.
+
+Additional preflight measurements recorded for steps 1-2:
+
+* `fixtures/` did not exist before step 0 (created by the exporter).
+* `product_type` is NULL on all 18 live rows, so section 7's "tab-only map / category display
+  name" fallback is the only effective path.
+* The supplier fallback chain in section 7 omits `custom_made.vendor`: that row has
+  `default_supplier`, `supplier` and `default_supplier_id` all NULL and only `vendor='Metalform'`.
+  **Step 1 must add `vendor` to the chain** or that supplier is lost. The other 17 rows have a
+  usable text column.
+* `vendors.name via default_supplier_id` is never needed on the live rows and is not implementable
+  by an importer that reads only the snapshot (no `vendors` section is exported). Despite the
+  real FK values being correct where present, step 1 should drop that branch from the rule.
+* 25 non-null `sku` / `code` / `internal_ref` values with **no cross-table duplicates**, so E5's
+  uniqueness check will pass cleanly.
+* `synonyms` is a populated `text[]` on board and hardware rows, so the `Draft.synonyms`
+  extension is exercised by real data.
+
 ## Constraints carried into implementation
 
 * The importer reads one committed snapshot and nothing else; no CI step may connect to
@@ -123,8 +176,10 @@ Confirmed on 2026-11-08 in answer to the three remaining open questions:
 * A second import must report `new = 0`.
 * Any implementation PR must keep `pytest`, `scripts/check_english.py`, `api_contract.sql` and
   `merge_contract.sql` green.
-* No code is written until the project owner authorises implementation.
+* PR #7 (25HAW import) should be merged before the ETL CI step (D6).
 
 ## Open
 
-Nothing blocking. The delivery steps 0-5 in design section 13 are queued behind authorisation.
+Nothing blocking. Step 0 is complete in PR #9; steps 1-5 (mapping v2, pure importer functions,
+`apply()` + CLI, contract/tests/CI, docs) are queued. The project owner has authorised
+implementation to proceed step by step (D4).
