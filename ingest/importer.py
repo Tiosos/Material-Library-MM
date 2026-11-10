@@ -113,6 +113,25 @@ class Draft:
     warnings: list[str] = field(default_factory=list)
     matched_headers: dict = field(default_factory=dict)
 
+    # Optional UMR v2 fields used by the joineryflow ETL (step 2). Every one is
+    # defaulted: supplier spreadsheet drafts leave them untouched and apply()
+    # keeps its original SQL when none of them are present.
+    description: str | None = None
+    synonyms: list[str] = field(default_factory=list)
+    lead_time_days: int | None = None
+    product_type: str | None = None
+    product_url: str | None = None
+    source_system: str | None = None
+    source_id: str | None = None
+    source_payload: dict | None = None
+    status: str | None = None
+    model_no: str | None = None
+    default_supplier_ref: str | None = None
+    cost_basis: str | None = None
+    confidence: float | None = None
+    price_valid_from: str | None = None
+    material_uid: str | None = None
+
     def as_dict(self) -> dict:
         return {
             "row": self.row_no,
@@ -240,6 +259,77 @@ def build_drafts(headers: list[str], rows: Iterable[dict], m: Mapping) -> tuple[
 
 
 # ---------------------------------------------------------------------------
+# Optional UMR v2 columns (joineryflow step 2)
+# ---------------------------------------------------------------------------
+OPTIONAL_DRAFT_COLUMNS = (
+    "description", "synonyms", "lead_time_days", "product_type", "product_url",
+    "source_system", "source_id", "source_payload", "status", "model_no",
+    "default_supplier_ref", "cost_basis", "confidence",
+)
+JSONB_COLUMNS = {"attributes", "source_payload", "variant_values", "attachments"}
+ARRAY_COLUMNS = {"synonyms", "tags"}
+BASE_INSERT_COLUMNS = (
+    "material_uid", "category_code", "name", "brand_id", "default_supplier_id",
+    "family_id", "variant_values", "unit", "unit_cost", "currency", "attributes",
+    "source_system", "source_id",
+)
+
+
+def _placeholder(column: str) -> str:
+    if column in JSONB_COLUMNS:
+        return "%s::jsonb"
+    if column in ARRAY_COLUMNS:
+        return "%s::text[]"
+    return "%s"
+
+
+def optional_column_values(d: Draft) -> dict:
+    """Whitelisted optional UMR fields this draft actually carries.
+
+    A supplier draft returns {} so the SQL below is exactly the historical one.
+    """
+    out = {}
+    for name in OPTIONAL_DRAFT_COLUMNS:
+        value = getattr(d, name, None)
+        if value is None or value == [] or value == {} or value == "":
+            continue
+        out[name] = json.dumps(value) if name == "source_payload" else value
+    return out
+
+
+def material_insert_columns(extra: dict) -> list[str]:
+    columns = list(BASE_INSERT_COLUMNS)
+    for name in extra:
+        if name not in columns:
+            columns.append(name)
+    return columns
+
+
+def material_insert_sql(columns: list[str]) -> str:
+    return (
+        "INSERT INTO material (" + ", ".join(columns) + ") VALUES ("
+        + ", ".join(_placeholder(c) for c in columns)
+        + ") ON CONFLICT (material_uid) DO NOTHING"
+    )
+
+
+def material_update_sql(extra: dict) -> str:
+    base = """UPDATE material SET
+                     name = %s, category_code = %s, brand_id = %s, default_supplier_id = %s,
+                     family_id = %s, variant_values = %s::jsonb, unit = %s, unit_cost = %s,
+                     currency = %s, attributes = material.attributes || %s::jsonb"""
+    sets = ", ".join(f"{c} = {_placeholder(c)}" for c in extra)
+    return base + (", " + sets if sets else "") + " WHERE material_uid = %s"
+
+
+def valid_from_for(d: Draft) -> date:
+    """E7: a snapshot price is dated by the source row's updated_at."""
+    if d.price_valid_from:
+        return date.fromisoformat(d.price_valid_from)
+    return date.today()
+
+
+# ---------------------------------------------------------------------------
 # Applying
 # ---------------------------------------------------------------------------
 def apply(conn, drafts: list[Draft], m: Mapping) -> dict:
@@ -302,10 +392,14 @@ def apply(conn, drafts: list[Draft], m: Mapping) -> dict:
 
             if d.unit_cost is not None:
                 cur.execute(
-                    """INSERT INTO material_price (material_uid, supplier_id, unit_cost, currency, valid_from, source_system)
-                       VALUES (%s, %s, %s, %s, %s, %s)
+                    """INSERT INTO material_price
+                           (material_uid, supplier_id, unit_cost, currency, valid_from,
+                            cost_basis, source_system)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)
                        ON CONFLICT (material_uid, supplier_id, valid_from, qty_break, cost_basis) DO NOTHING""",
-                    (uid.uid, supplier_id, d.unit_cost, d.currency or "AUD", date.today(), m.source_system),
+                    (uid.uid, supplier_id, d.unit_cost, d.currency or "AUD",
+                     valid_from_for(d), d.cost_basis or "ex_gst",
+                     d.source_system or m.source_system),
                 )
     return stats
 
@@ -348,6 +442,12 @@ def _ensure_family(cur, d: Draft, brand_id: int | None) -> str:
 
 def _find_or_insert(cur, d: Draft, brand_id, supplier_id, family_id) -> UidResult | None:
     primary = d.identifiers[0] if d.identifiers else None
+    extra = optional_column_values(d)
+    update_values = (
+        d.name, d.category_code, brand_id, supplier_id, family_id,
+        json.dumps(d.family_axis), d.unit, d.unit_cost, d.currency or "AUD",
+        json.dumps(d.attributes),
+    ) + tuple(extra.values())
     if primary:
         cur.execute(
             "SELECT material_uid FROM material_identifier WHERE kind=%s AND value=%s AND source_system=%s",
@@ -355,31 +455,30 @@ def _find_or_insert(cur, d: Draft, brand_id, supplier_id, family_id) -> UidResul
         )
         row = cur.fetchone()
         if row:
-            cur.execute(
-                """UPDATE material SET
-                     name = %s, category_code = %s, brand_id = %s, default_supplier_id = %s,
-                     family_id = %s, variant_values = %s, unit = %s, unit_cost = %s,
-                     currency = %s, attributes = material.attributes || %s::jsonb
-                   WHERE material_uid = %s""",
-                (d.name, d.category_code, brand_id, supplier_id, family_id,
-                 json.dumps(d.family_axis), d.unit, d.unit_cost, d.currency or "AUD",
-                 json.dumps(d.attributes), row[0]),
-            )
+            cur.execute(material_update_sql(extra), (*update_values, row[0]))
             return UidResult(row[0], False)
 
-    uid = gen_uid("mat", f"{d.identifiers[0]['source_system']}:{d.identifiers[0]['value']}"
-                         if d.identifiers else f"{d.name}:{d.row_no}")
-    cur.execute(
-        """INSERT INTO material
-             (material_uid, category_code, name, brand_id, default_supplier_id, family_id,
-              variant_values, unit, unit_cost, currency, attributes, source_system, source_id)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-           ON CONFLICT (material_uid) DO NOTHING""",
-        (uid, d.category_code, d.name, brand_id, supplier_id, family_id,
-         json.dumps(d.family_axis), d.unit, d.unit_cost, d.currency or "AUD",
-         json.dumps(d.attributes), primary["source_system"] if primary else None,
-         primary["value"] if primary else None),
-    )
+    uid = d.material_uid or gen_uid(
+        "mat", f"{d.identifiers[0]['source_system']}:{d.identifiers[0]['value']}"
+               if d.identifiers else f"{d.name}:{d.row_no}")
+    columns = material_insert_columns(extra)
+    values = {
+        "material_uid": uid,
+        "category_code": d.category_code,
+        "name": d.name,
+        "brand_id": brand_id,
+        "default_supplier_id": supplier_id,
+        "family_id": family_id,
+        "variant_values": json.dumps(d.family_axis),
+        "unit": d.unit,
+        "unit_cost": d.unit_cost,
+        "currency": d.currency or "AUD",
+        "attributes": json.dumps(d.attributes),
+        "source_system": primary["source_system"] if primary else None,
+        "source_id": primary["value"] if primary else None,
+    }
+    values.update(extra)
+    cur.execute(material_insert_sql(columns), tuple(values[c] for c in columns))
     return UidResult(uid, True)
 
 
