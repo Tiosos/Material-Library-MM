@@ -1,0 +1,5 @@
+# Committed JSONL snapshots are byte-level contracts: the exporter writes LF
+# bytes directly and the ETL acceptance check compares a re-export byte for byte.
+# -text disables all CRLF conversion so a global core.autocrlf=true checkout
+# cannot change the bytes of these files.
+*.jsonl -text

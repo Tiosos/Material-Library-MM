@@ -1,76 +1,266 @@
 # =============================================================================
-# joineryflow Catalog → UMR mapping spec  v1
+# joineryflow Catalog -> UMR mapping spec  v2 (executable)
 #
-# Upstream source of truth (read from GitHub Tiosos/joineryflow when writing this file):
-#   apps/api/app/catalog/queries.py  :: REGISTRY / *_FIELDS_TUPLE / ENRICHMENT_SELECT
-#   db/alembic/versions/0007,0017,0067..0079
-#   apps/api/app/catalog/routes.py   :: /catalog/{slug}, /catalog/by-type,
-#                                       /catalog/product-types, /catalog/{slug}/{id}/purchase-history
-#   seed/hartwood_joinery.py         :: real material samples
+# Design: docs/etl-joineryflow.md sections 5-13 (merged as PR #6, kept final).
+# Step log and decisions: docs/etl-joineryflow-progress.md.
 #
-# Upstream invariants (must be respected, otherwise the mapping will be wrong):
-#   * 9 physical tables, never merged → merge into 1 core table in UMR, distinguished by category
-#   * Common columns: description / notes / default_supplier(_id) / default_lead_time_days
-#     / unit_cost / product_type / synonyms / archived_at,archived_by
-#   * Unit price rule: when unit_cost is empty, fall back to each table's own cost column
-#       board → cost_per_sheet | hardware → cost | benchtop → cost_per_slab
-#       edging/glass/timber/appliance → cost_per_unit | equipment_hire → none
-#   * Soft archive only (archived_at), never hard delete
-#   * Everything is isolated by workspace_id; anything across workspaces is always 404
+# v1 was a written spec derived from the upstream ORM and was never executed.
+# v2 keeps the upstream contract sections (write_back, sync, export, tab_only)
+# and replaces the descriptive common/attributes/identifiers blocks with
+# executable rules that ingest/joineryflow.py can read directly.
+#
+# Implementation constraints recorded in the step log (the design stays final,
+# decision D1; these are not edits to the design):
+#   * Column names below are the ones actually present in the committed
+#     snapshot. Section 7 of the design lists "brand" in family keys for five
+#     tables that have no brand column; only hardware_materials has one. The
+#     others carry the maker in manufacturer, laminate_supplier, material_type
+#     or vendor, so the family keys use those real columns instead.
+#   * Decision D2: equipment_hire.rate is a hire rate, not a unit cost. rate,
+#     rate_unit and total_cost stay in attributes, no price row is written and
+#     no "day" unit is added to seed.sql. The default price count is 13, not
+#     the 14 printed in design sections 10, 11.4 and 13.
+#   * Decision D3: the two cv_material_mapping rows are imported now as
+#     identifier(kind='cv_code', source_system='cv').
+#   * Decision D5: the ten archived E2E-* rows are gone from the live source.
+#     The committed fixture keeps the 18 real live rows; the archived path is
+#     verified with synthetic rows in tests, never with fabricated fixture rows.
+#   * Preflight finding: product_type is NULL on all 18 live rows, so the
+#     tab-only map / category display name fallback is the only effective path.
+#   * Preflight finding: custom_made has only vendor='Metalform' as a supplier
+#     text column, so vendor must be in the supplier fallback chain. The
+#     "vendors.name via default_supplier_id" branch is dropped: the snapshot
+#     has no vendors section, so a snapshot-only importer cannot resolve it.
 # =============================================================================
 
-version: 1
+version: 2
+
 source:
   system: joineryflow
-  connection: postgres  # direct connection read; or a /catalog/by-type snapshot exported by joineryflow
+  snapshot: fixtures/joineryflow-hartwood.jsonl
+  workspace: hartwood-joinery
+  connection: postgres          # exporter only; the importer reads the snapshot exclusively
   workspace_scope: each workspace is exported as an independent library_namespace, never mixed
+  table_order: from the snapshot header  # nine tables, in the header's contract order
 
 # -----------------------------------------------------------------------------
-# 1. Tables → category
+# 1. Tables -> category. One entry per table in the snapshot header.
+#    Columns referenced by family/measures/attributes/identifiers must exist in
+#    the snapshot. Three tables have zero rows in the committed fixture, so
+#    their column names come from the v1 spec; known_columns records that and
+#    the validation script marks them as unverified until a real export exists.
 # -----------------------------------------------------------------------------
 tables:
+
   board_materials:
-    category: board
+    category_code: board
+    category_display_name: Board
     pk: material_id
     endpoint: /catalog/board-materials
+    unit: sheet
+    own_cost_column: cost_per_sheet
+    price_policy: unit_cost
+    family:
+      key: [colour, substrate, finish]
+      axis: [thickness_mm]
+      name: "{colour} {substrate} {finish}"
+    measures:
+      thickness_mm:  { column: thickness_mm, unit: mm, derive_from_name: true }
+      sheet_len_mm:  { column: sheet_len_mm, unit: mm }
+      sheet_wid_mm:  { column: sheet_wid_mm, unit: mm }
+    attributes: [colour, substrate, finish, sided, grain, rating, hmr, grain_locked, notes]
+    identifiers:
+      - { kind: supplier_code, column: sku,  source_system: joineryflow, unique_across_snapshot: true }
+      - { kind: internal_ref,  column: code, source_system: joineryflow, unique_across_snapshot: true }
+    snapshot_rows: 10
+
   edging_materials:
-    category: edging
+    category_code: edging
+    category_display_name: Edging
     pk: material_id
     endpoint: /catalog/edging-materials
+    unit: roll
+    own_cost_column: cost_per_unit
+    price_policy: unit_cost
+    family:
+      key: [colour, edge_type]
+      axis: [edge_width_mm]
+      name: "{colour} {edge_type}"
+    measures:
+      edge_width_mm:     { column: edge_width_mm, unit: mm }
+      edge_thickness_mm: { column: edge_thickness_mm, unit: mm }
+      roll_length_m:     { column: roll_length_m, unit: m }
+    attributes: [colour, edge_type, glued]
+    identifiers:
+      - { kind: supplier_code, column: sku, source_system: joineryflow, unique_across_snapshot: true }
+    snapshot_rows: 0
+    known_columns: [material_id, workspace_id, description, notes, product_type,
+                    product_website, synonyms, archived_at, archived_by, is_active,
+                    created_at, updated_at, default_supplier, default_supplier_id,
+                    default_lead_time_days, lead_time_days, unit_cost, um, sku,
+                    supplier, supplier_id, cost_per_unit, colour, edge_type,
+                    roll_length_m, edge_width_mm, edge_thickness_mm, glued]
+
   glass_materials:
-    category: glass
+    category_code: glass
+    category_display_name: Glass
     pk: material_id
     endpoint: /catalog/glass-materials
+    unit: ea
+    own_cost_column: cost_per_unit
+    price_policy: unit_cost
+    family:
+      key: [colour, glass_type]
+      axis: [thickness_mm]
+      name: "{colour} {glass_type}"
+    measures:
+      thickness_mm: { column: thickness_mm, unit: mm }
+      length_mm:    { column: length_mm, unit: mm }
+      width_mm:     { column: width_mm, unit: mm }
+    attributes: [colour, edge_finish, glass_type, power_point, shaped]
+    identifiers:
+      - { kind: supplier_code, column: sku, source_system: joineryflow, unique_across_snapshot: true }
+    snapshot_rows: 0
+    known_columns: [material_id, workspace_id, description, notes, product_type,
+                    product_website, synonyms, archived_at, archived_by, is_active,
+                    created_at, updated_at, default_supplier, default_supplier_id,
+                    default_lead_time_days, lead_time_days, unit_cost, um, sku,
+                    supplier, supplier_id, cost_per_unit, colour, edge_finish,
+                    glass_type, power_point, length_mm, width_mm, thickness_mm, shaped]
+
   timber_materials:
-    category: timber
+    category_code: timber
+    category_display_name: Timber
     pk: material_id
     endpoint: /catalog/timber-materials
+    unit: m
+    own_cost_column: cost_per_unit
+    price_policy: unit_cost
+    family:
+      key: [colour, finish]
+      axis: [thickness_mm]
+      name: "{colour} {finish}"
+    measures:
+      thickness_mm: { column: thickness_mm, unit: mm }
+      width_mm:     { column: width_mm, unit: mm }
+      length_mm:    { column: length_mm, unit: mm }
+    attributes: [colour, finish, grain, rating]
+    identifiers:
+      - { kind: supplier_code, column: sku, source_system: joineryflow, unique_across_snapshot: true }
+    snapshot_rows: 0
+    known_columns: [material_id, workspace_id, description, notes, product_type,
+                    product_website, synonyms, archived_at, archived_by, is_active,
+                    created_at, updated_at, default_supplier, default_supplier_id,
+                    default_lead_time_days, lead_time_days, unit_cost, um, sku,
+                    supplier, supplier_id, cost_per_unit, colour, finish, grain,
+                    rating, thickness_mm, width_mm, length_mm]
+
   benchtop_materials:
-    category: benchtop
+    category_code: benchtop
+    category_display_name: Benchtop
     pk: material_id
     endpoint: /catalog/benchtop-materials
+    unit: ea
+    own_cost_column: cost_per_slab
+    price_policy: unit_cost
+    family:
+      key: [laminate_supplier, material_type, colour, finish]
+      axis: [thickness_mm]
+      name: "{laminate_supplier} {material_type} {colour} {finish}"
+    measures:
+      thickness_mm:    { column: thickness_mm, unit: mm }
+      slab_len_mm:     { column: slab_len_mm, unit: mm }
+      slab_wid_mm:     { column: slab_wid_mm, unit: mm }
+      bench_length_mm: { column: bench_length_mm, unit: mm }
+      bench_width_mm:  { column: bench_width_mm, unit: mm }
+    attributes: [colour, underside, edge_details, laminate_supplier, laminate_code,
+                 finish, material_type, pieces, joins, cable_entry, shaped,
+                 grain_locked, slab_id]
+    identifiers:
+      - { kind: supplier_code, column: sku,     source_system: joineryflow, unique_across_snapshot: true }
+      - { kind: slab_id,       column: slab_id, source_system: joineryflow, unique_across_snapshot: true }
+    snapshot_rows: 1
+
   hardware_materials:
-    category: hardware
+    category_code: hardware
+    category_display_name: Hardware
     pk: material_id
     endpoint: /catalog/hardware-materials
+    unit: ea
+    own_cost_column: cost_per_unit        # v1 said "cost"; the real column is cost_per_unit
+    price_policy: unit_cost
+    family:
+      key: [brand, hardware_type]
+      axis: []
+      name: "{brand} {hardware_type}"
+    measures: {}
+    attributes: [brand, hardware_type]
+    identifiers:
+      - { kind: supplier_code, column: sku, source_system: joineryflow, unique_across_snapshot: true }
+    snapshot_rows: 4
+
   appliances:
-    category: appliance
+    category_code: appliance
+    category_display_name: Appliance
     pk: material_id
     endpoint: /catalog/appliances
+    unit: ea
+    own_cost_column: cost_per_unit
+    price_policy: unit_cost
+    family:
+      key: [manufacturer, product_type]
+      axis: []
+      name: "{manufacturer} {product_type}"
+    measures: {}
+    attributes: [manufacturer, model_number]
+    identifiers:
+      - { kind: model_no,      column: model_number, source_system: joineryflow, unique_across_snapshot: true }
+      - { kind: supplier_code, column: sku,          source_system: joineryflow, unique_across_snapshot: true }
+    snapshot_rows: 1
+
   custom_made:
-    category: custom
+    category_code: custom
+    category_display_name: Custom Made
     pk: material_id
     endpoint: /catalog/custom-made
-  equipment_hire:
-    category: hire
-    pk: hire_id
-    endpoint: /catalog/equipment-hire
-    note: requires project_id; on export put project_id into attributes, hire records are isolated by project
+    unit: ea
+    own_cost_column: cost
+    price_policy: unit_cost
+    family:
+      key: [vendor, product_type]
+      axis: []
+      name: "{vendor} {product_type}"
+    measures: {}
+    attributes: [vendor, vendor_quote_ref, internal_ref]
+    identifiers:
+      - { kind: internal_ref,  column: internal_ref, source_system: joineryflow, unique_across_snapshot: true }
+      - { kind: supplier_code, column: sku,          source_system: joineryflow, unique_across_snapshot: true }
+    snapshot_rows: 1
 
-# Types in joineryflow that "have only a tab and no separate table", keep the tab semantics on import:
+  equipment_hire:
+    category_code: hire
+    category_display_name: Equipment Hire
+    pk: hire_id                          # the only table whose pk is not material_id
+    endpoint: /catalog/equipment-hire
+    unit: ea
+    own_cost_column: null                # D2: no price row for a hire rate
+    price_policy: attributes_only        # D2: rate/rate_unit/total_cost are attributes only
+    family: null                         # hire rows get no family (family_id stays null)
+    measures: {}
+    attributes: [rate, rate_unit, total_cost, contract_ref, project_id,
+                 hire_start, hire_end, notes]
+    identifiers:
+      - { kind: contract_ref,  column: contract_ref, source_system: joineryflow, unique_across_snapshot: true }
+      - { kind: supplier_code, column: sku,          source_system: joineryflow, unique_across_snapshot: true }
+    snapshot_rows: 1
+
+# -----------------------------------------------------------------------------
+# 2. Tab-only product types (unchanged from v1). product_type is NULL on every
+#    live row, so this map and the category display name are the effective path.
+# -----------------------------------------------------------------------------
 tab_only_types: [Delivery, Supplies, Paint, TG Solid, Laminate, Contractor Manufacturing]
 tab_only_mapping:
-  Laminate:                 { table: board_materials,  force_product_type: Laminate }
+  Laminate:                 { table: board_materials,    force_product_type: Laminate }
   TG Solid:                 { table: benchtop_materials, force_product_type: TG Solid }
   Supplies:                 { table: hardware_materials, force_product_type: Supplies }
   Paint:                    { table: hardware_materials, force_product_type: Paint }
@@ -78,135 +268,156 @@ tab_only_mapping:
   Contractor Manufacturing: { table: custom_made,        force_product_type: Contractor Manufacturing }
 
 # -----------------------------------------------------------------------------
-# 2. Common column mapping (shared by the 9 tables)
+# 3. Common field rules. A fallback chain is a list of candidate source
+#    columns: the importer takes the first non-null value, and a column that is
+#    absent from a row behaves as null. This is what makes one rule work for
+#    nine tables with different columns.
 # -----------------------------------------------------------------------------
-common:
-  material_uid:     "mat_<ulid>"          # generated on first import, fixed afterwards; also written to identifiers.legacy_id
-  category:         "<category from the table above>"
-  product_type:     "product_type"        # varchar(64), use the tab_only force_product_type when empty
-  name:             "description"         # joineryflow has no separate name column, use description
-  description:      "description"
-  brand:            "brand | manufacturer | laminate_supplier"   # take the first non-null per table
-  lead_time_days:   "default_lead_time_days"
-  unit:             "um"
-  currency:         "'AUD'"
-  cost_basis:       "'ex_gst'"
-  unit_cost:        "COALESCE(unit_cost, <own_cost_column>)"     # see own_cost_column
-  default_supplier: "default_supplier | supplier | vendor"       # take the first non-null per table
-  default_supplier_ref: "default_supplier_id → vendors.name (same-workspace check)"
-  product_url:      "product_website"
-  image_url:        "image_blob IS NOT NULL → /catalog/{slug}/{id}/image"
-  synonyms:         "synonyms (text[])"
-  status:           "archived_at IS NOT NULL → 'archived' ELSE 'active'"
-  source_system:    "'joineryflow'"
-  source_id:        "material_id | hire_id"
-  source_payload:   "whole row to_jsonb(row) (excluding image_blob)"
-  imported_at:      "now()"
-  confidence:       "1.00 (manual import 0.80, CV-matched import 0.60)"
-
-# -----------------------------------------------------------------------------
-# 3. Per-table specific fields → attributes (key names stay unchanged, to make two-way write-back easy)
-# -----------------------------------------------------------------------------
-attributes:
-  board:
-    colour:        colour
-    substrate:     substrate
-    finish:        finish
-    sided:         sided
-    grain:         grain
-    rating:        rating
-    hmr:           hmr
-    sheet_len_mm:  sheet_len_mm
-    sheet_wid_mm:  sheet_wid_mm
-    thickness_mm:  thickness_mm
-    grain_locked:  grain_locked
-    own_cost_column: cost_per_sheet
-    codes: { code: internal_ref }
-
-  edging:
-    colour:            colour
-    edge_type:         edge_type
-    roll_length_m:     roll_length_m
-    edge_width_mm:     edge_width_mm
-    edge_thickness_mm: edge_thickness_mm
-    glued:             glued
-    own_cost_column:   cost_per_unit
-
-  glass:
-    colour:          colour
-    edge_finish:     edge_finish
-    glass_type:      glass_type
-    power_point:     power_point
-    length_mm:       length_mm
-    width_mm:        width_mm
-    thickness_mm:    thickness_mm
-    shaped:          shaped
-    own_cost_column: cost_per_unit
-
-  timber:
-    colour:          colour
-    finish:          finish
-    grain:           grain
-    rating:          rating
-    thickness_mm:    thickness_mm
-    width_mm:        width_mm
-    length_mm:       length_mm
-    own_cost_column: cost_per_unit
-
-  benchtop:
-    colour:            colour
-    underside:         underside
-    edge_details:      edge_details
-    laminate_supplier: laminate_supplier
-    laminate_code:     laminate_code
-    finish:            finish
-    bench_length_mm:   bench_length_mm
-    bench_width_mm:    bench_width_mm
-    thickness_mm:      thickness_mm
-    pieces:            pieces
-    joins:             joins
-    cable_entry:       cable_entry
-    shaped:            shaped
-    grain_locked:      grain_locked
-    slab_id:           slab_id          # also registered as identifier(kind=slab_id)
-    own_cost_column:   cost_per_slab
-
-  hardware:
-    brand:           brand
-    hardware_type:   hardware_type
-    own_cost_column: cost
-
-  appliance:
-    model_no:        model_number       # also registered as identifier(kind=model_no)
-    own_cost_column: cost_per_unit
-
-  custom:
-    internal_ref:    internal_ref       # also registered as identifier(kind=internal_ref)
-    vendor:          vendor             # → default_supplier
-    own_cost_column: cost
-
-  hire:
-    contract_ref:    contract_ref       # also registered as identifier(kind=contract_ref)
-    project_id:      project_id
-    rate:            rate
-    rate_unit:       rate_unit
-    own_cost_column: null               # equipment_hire has no cost column
+common_rules:
+  name:
+    column: description
+    trim: true
+    required: true                     # an empty description is a row error
+  product_type:
+    column: product_type
+    fallback: [tab_only_mapping, category_display_name]
+    note: null on all 18 live rows
+  brand_id:
+    columns: [brand, manufacturer, laminate_supplier, vendor]
+    first_non_null: true
+    party_kind: brand
+    null_when_all_missing: true
+    note: only hardware_materials has a brand column
+  default_supplier_id:
+    columns: [default_supplier, supplier, vendor]
+    first_non_null: true
+    party_kind: supplier
+    note: vendor added for custom_made; the vendors.name branch is not resolvable from a snapshot
+  default_supplier_ref:
+    column: default_supplier_id
+    as_text: true
+  lead_time_days:
+    columns: [default_lead_time_days, lead_time_days]
+    first_non_null: true
+    integer: true
+  unit:
+    column: um
+    fallback: table.unit
+    must_exist_in: unit                # an unknown code is a row error
+  unit_cost:
+    coalesce: [unit_cost, own_cost_column]
+    numeric: "numeric(14,4)"
+  currency: AUD
+  cost_basis: ex_gst
+  product_url:
+    column: product_website
+  synonyms:
+    column: synonyms
+    dedupe_case_insensitive: true
+    keep_source_order: true
+  description:
+    column: notes
+  status:
+    archived_when: archived_at is not null
+    draft_when: is_active is false and archived_at is null
+    is_active_tables: [board_materials, edging_materials, glass_materials,
+                       timber_materials, hardware_materials]
+    otherwise: active
+  attributes:
+    policy: unclaimed_columns
+    keep_source_names: true            # mechanical write-back
+  source_system: joineryflow
+  source_id: '<table>:<pk>'
+  source_payload:
+    policy: full_row_except_image_blob
+  confidence: 1.00
 
 # -----------------------------------------------------------------------------
-# 4. identifiers: register the "codes" scattered across tables in one place
+# 4. Identity, measures, families, prices and archiving (decisions E5-E11,
+#    D2, D3, D5). These are the rules ingest/joineryflow.py must implement.
 # -----------------------------------------------------------------------------
-identifiers:
-  - kind: sku           value: sku            source_system: joineryflow   is_primary: true
-  - kind: internal_ref  value: internal_ref   source_system: joineryflow   # custom_made
-  - kind: slab_id       value: slab_id        source_system: joineryflow   # benchtop
-  - kind: model_no      value: model_number   source_system: joineryflow   # appliance
-  - kind: contract_ref  value: contract_ref   source_system: joineryflow   # hire
-  - kind: legacy_id     value: material_id|hire_id  source_system: joineryflow
-  - kind: cv_code       value: cv_material_mapping.cv_code  source_system: cv  # supplier CV code
+identity:
+  material_uid: 'gen_uid("mat", "joineryflow:<table>:<pk>")'
+  legacy_identifier: { kind: legacy_id, value: '<table>:<pk>', source_system: joineryflow, is_primary: true }
+  uniqueness_check:
+    scope: whole snapshot
+    applies_to: [supplier_code, internal_ref, slab_id, model_no, contract_ref, cv_code]
+    on_collision: reject the row with an error   # E5
+    known_result: 25 non-null sku/code/internal_ref values, no cross-table duplicates
+  cv_identifiers:
+    enabled: true                              # D3
+    source_table: cv_material_mapping
+    kind: cv_code
+    source_system: cv
+    code_column: cv_code
+    target_table_column: target_material_table
+    target_id_column: target_material_id
+    attach_to: 'source_id of <target_material_table>:<target_material_id>'
+    expected_rows: 2
+
+measures:
+  source_system: joineryflow
+  source_ref: '<table>.<column>'
+  is_preferred: true
+  derived_thickness:
+    applies_to: [board_materials]
+    column: thickness_mm
+    unit: mm
+    only_when_column_is_null: true
+    regex: '^(\d+(?:\.\d+)?)\s*mm\b'
+    source_ref: '<table>.description#size'
+    warning: true
+    never_override_a_real_column: true
+    expected_rows: 10
+
+families:
+  key_columns: per table.family.key
+  axis: per table.family.axis
+  key_prefix: 'joineryflow:{category_code}:{key}'
+  fallback_when_every_key_part_is_null: description_without_leading_size_token
+  fallback_normalise: [lowercase, collapse whitespace]
+  fallback_axis: thickness_mm
+  no_family_when: [empty normalised description, equipment_hire]
+  report_counter: family_none
+
+prices:
+  policy: one row per material with a non-null unit_cost or own cost column
+  valid_from: 'date(row.updated_at)'       # E7, stable across re-imports
+  currency: AUD
+  cost_basis: ex_gst
+  source_system: joineryflow
+  expected_rows: 13                        # D2: 14 priced live rows minus the hire rate
+  hire_policy: attributes_only             # D2: no price, no "day" unit in seed.sql
+
+archived:
+  default: skip
+  include_flag: --include-archived
+  imported_status: archived
+  committed_fixture_rows: 18               # D5: real live rows only
+  acceptance: synthetic_rows               # D5: unit and contract tests, never fabricated fixture rows
 
 # -----------------------------------------------------------------------------
-# 5. Write-back: UMR is the master data, changes must be able to go back to joineryflow
-#    Principle: only write back fields joineryflow already has; do not change its table structure
+# 5. Import contract. Expected numbers for the committed fixture; the step 2
+#    dry-run report and the step 4 contract SQL assert these. Design section 10
+#    prints 14 prices; D2 resolves that to 13.
+# -----------------------------------------------------------------------------
+import_contract:
+  snapshot: fixtures/joineryflow-hartwood.jsonl
+  expected:
+    materials: 18
+    archived: 0
+    categories_with_rows: 6
+    derived_thickness_measures: 10
+    prices: 13
+    cv_identifiers: 2
+    source_payload_on_all_rows: true
+    families: 17
+    single_member_families: 17
+    second_import_new: 0
+  must_stay_green: [pytest, scripts/check_english.py, scripts/api_contract.sql, scripts/merge_contract.sql]
+
+# -----------------------------------------------------------------------------
+# 6. Write-back (unchanged from v1)
 # -----------------------------------------------------------------------------
 write_back:
   endpoint: "PATCH /catalog/{slug}/{mid}"
@@ -219,14 +430,14 @@ write_back:
     default_lead_time_days: lead_time_days
     product_website:  product_url
     synonyms:         synonyms
-  attributes: "flatten back into the same-named columns of each table (board.colour ← attributes.colour …)"
+  attributes: "flatten back into the same-named columns of each table (board.colour <- attributes.colour ...)"
   forbidden:
     - Do not write back archived_at (archiving is a joineryflow business action)
     - Do not change prices already snapshotted on a quote (it would alter the tender amount)
     - Do not delete rows, only soft-archive
 
 # -----------------------------------------------------------------------------
-# 6. Incremental sync
+# 7. Incremental sync (unchanged from v1)
 # -----------------------------------------------------------------------------
 sync:
   pull: "GET /catalog/by-type?q=&updated_since=<ts>  (joineryflow needs an updated_at column;
@@ -236,12 +447,12 @@ sync:
   batch: "1000 rows per batch, one transaction per batch, the whole batch rolls back on failure (following joineryflow's all-or-nothing convention)"
 
 # -----------------------------------------------------------------------------
-# 7. Export formats (for other systems to consume)
+# 8. Export formats (unchanged from v1)
 # -----------------------------------------------------------------------------
 export:
-  - format: jsonl        file: materials.jsonl      note: one UMR per line, streaming import
-  - format: csv          file: materials.csv        note: flat columns + attributes expanded into attr_* columns
-  - format: parquet      file: materials.parquet    note: analytics / BI
-  - format: json-schema  file: material.schema.json note: contract for consumers to generate clients
-  - format: openapi      file: openapi.yaml         note: query and write API
-  - format: sql          file: material.sql         note: consumers can create an isomorphic table directly
+  - { format: jsonl,       file: materials.jsonl,       note: "one UMR per line, streaming import" }
+  - { format: csv,         file: materials.csv,         note: "flat columns + attributes expanded into attr_* columns" }
+  - { format: parquet,     file: materials.parquet,     note: "analytics / BI" }
+  - { format: json-schema, file: material.schema.json,  note: "contract for consumers to generate clients" }
+  - { format: openapi,     file: openapi.yaml,          note: "query and write API" }
+  - { format: sql,         file: material.sql,          note: "consumers can create an isomorphic table directly" }
