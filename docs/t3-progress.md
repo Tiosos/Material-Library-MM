@@ -1,0 +1,216 @@
+# T3 write-back executor: step log
+
+Design: [t3-writeback.md](t3-writeback.md). This file records what has been done, what was
+verified, and the decisions taken after the design was written. It is the written log for the
+write-back task; the design document stays final except for the implementation notes that record
+facts the code revealed.
+
+Rule of the log: a step is "done" when it has a verification line, not when an edit compiles.
+Status legend: `[ ]` planned, `[~]` in progress, `[x]` done and verified, `[!]` blocked.
+
+## Status
+
+| # | Step | Status | Verification |
+| --- | --- | --- | --- |
+| 0 | Design record `docs/t3-writeback.md` and mapping-validator extension | [x] | PR #15 merged as `cbf1b5f`; 482-line design (33358 bytes), `scripts/check_joineryflow_mapping.py` asserts the `write_back` allowlist, nine endpoints and per-table attributes; see "Step 0" below |
+| 1 | `schema/writeback.sql`: additive columns, projection tables, `submit` / `decide` / `plan` / `queue` | [x] | PR #15 merged as `cbf1b5f`; 45 behavioural assertions on a fresh PostgreSQL 16 database, four CI jobs green; see "Step 1" |
+| 2 | `claim` / `settle` / `retry`, five-minute lease, `FOR UPDATE SKIP LOCKED` | [x] | 60/60 database assertions, including two sessions claiming disjoint batches; full suite `159 passed, 4 skipped`; see "Step 2" |
+| 3 | `scripts/apply_change_requests.py`, fake upstream and `tests/test_writeback.py` | [x] | `18 passed` with `ML_WRITEBACK_DSN`, `8 passed / 10 skipped` without; full suite `167 passed, 14 skipped`; see "Step 3" |
+| 4 | `scripts/writeback_contract.sql`, five HTTP review routes and the `writeback` CI job | [x] | SQL contract green with zero residual rows; 11 HTTP route tests; the three existing api SQL contracts still green; full suite `178 passed, 14 skipped` across five CI jobs; see "Step 4" |
+| 5 | Docs: this log, README status and `docs/data-model-v2.md` 5/6 | [x] | PR #16; `check_english.py` clean, full suite green locally (`178 passed, 14 skipped`), 64 relative doc links intact, JSONL byte contract intact; design section 14 |
+
+Steps 0-1 were merged in **PR #15** (merge commit `cbf1b5f`, 2026-11-11T22:01:22Z). Steps 2-5
+were implemented and verified on top of that commit and are delivered together in **PR #16**.
+The design document itself was not rewritten; the differences between its prose and the delivered
+contract are recorded in "Implementation decisions" below.
+
+## Source measurement
+
+Preflight facts established before any code was written, by reading the shipped repository rather
+than the design prose:
+
+| Question | Measured answer |
+| --- | --- |
+| Does `material_change_request` have any reader or writer? | No. Only `schema/material.sql` (DDL with a five-state CHECK) and one pending demo row in `schema/sample_demo.sql` reference it. |
+| What identifies the upstream row to PATCH? | All 18 imported joineryflow rows have `source_id` of the form `<table>:<int>`; each of the nine tables declares its own `endpoint` in `mapping/joineryflow.yaml`. |
+| Is the workspace persisted in the UMR? | No. The snapshot header carries `workspace_slug = hartwood-joinery`, but zero of the 18 `source_payload` objects contain that key. |
+| Does `material` expose the seven writable fields? | Yes: `name`, `product_type`, `unit`, `unit_cost` (numeric), `lead_time_days` (int), `product_url`, `synonyms` (text[]) and `attributes` (jsonb). |
+| Does the ETL's no-op re-import move `rev`? | No. `sync_seq` moves on 11 rows through `ml_child_touch()`, `rev` stays 1 on all 18. |
+
+The last row is why the approval fingerprint is field-level rather than a whole-row or
+`sync_seq` comparison.
+
+## Implementation decisions (after the design was written)
+
+* **D1 - `{slug}` is the per-table endpoint, not the workspace.** The nine `endpoint` values in
+  the mapping already supply it; `{mid}` is the numeric part of `source_id`. No new locator column
+  and no ETL change. The workspace is configuration, checked at executor startup against both
+  `source.workspace` in the mapping and `workspace_slug` in the snapshot header.
+* **D2 - `schema/writeback.sql` loads after `schema/seed.sql`.** Design section 5 originally said
+  "before seed.sql". `material_writeback_catalog.category_code` references `material_category`,
+  whose rows `seed.sql` inserts, so that order fails on the foreign key. Both the `api` job and
+  the `writeback` job now use `seed.sql` before `writeback.sql`; the design has an implementation
+  note recording the correction.
+* **D3 - A claim writes no `material_event`.** Acceptance criterion 2 counts exactly three events
+  on a happy path (insert, approve, apply). A claim changes no status, only bookkeeping columns,
+  so it is not a transition. `settle()` writes the third event.
+* **D4 - `retry()` is a SQL function, not CLI logic.** Design section 6 lists `failed -> approved`
+  but section 5's function table did not name it. SQL owns every transition (D4 of the design),
+  so step 2 added `material_change_request_retry()` and `--retry N` simply calls it.
+* **D5 - `claim()` gained an optional `p_only_id`.** The CLI's `--request-id N` must claim exactly
+  one request; filtering a batch in Python would either release a lease or write state outside
+  SQL. The fourth parameter defaults to NULL, so step 2's behaviour is unchanged.
+* **D6 - The SQL contract is transactional.** `scripts/writeback_contract.sql` wraps its `DO`
+  block in `BEGIN; ... ROLLBACK;`. It exercises real transitions yet leaves zero request and
+  event rows behind, so the integration tests that follow start clean and the file is re-runnable.
+* **D7 - Design section 14 expected contract assertions 1-3 in step 1.** They were delivered in
+  step 4 together with the HTTP routes and CI job, as one psql-runnable contract covering all
+  transitions. Step 1's verification used a temporary assertion script instead; those checks are
+  now permanent in the SQL contract.
+* **D8 - HTTP route tests build their own material row.** The `api` job's databases carry the
+  evaluation corpus and the supplier demo but not the joineryflow snapshot, so
+  `tests/test_writeback_api.py` inserts one disposable row with a valid `source_id` and deletes
+  it afterwards. Deletion needs `set_config('ml.allow_delete', 'on', false)` because `material`
+  has a `BEFORE DELETE` trigger; the fixture also self-heals rows left by an interrupted run so
+  the duplicate scan cannot see them.
+* **D9 - `jsonb_set` and SQL NULL.** `jsonb_set` returns SQL NULL (not JSON null) when its
+  `new_value` argument is SQL NULL, which corrupted `base.values` for a missing attribute.
+  `submit()` and `ml_writeback_current_values` now normalise missing values to JSON null so the
+  stale check compares byte-equal on both sides.
+* **D10 - The demo `unit_cost` diff is legal.** Design section 4.3: updating the catalogue's own
+  price is allowed; only a price already copied onto a quote is forbidden. The UMR has no quote
+  rows and the allowlist cannot express a path to one, so no special price check was added.
+
+## Step 0: design and mapping validator (PR #15)
+
+`docs/t3-writeback.md` (482 lines / 33358 bytes at merge time) records the state machine, diff allowlist,
+target resolution, executor, HTTP edge, test plan, acceptance criteria, decisions D1-D16 and open
+questions. `scripts/check_joineryflow_mapping.py` was extended to parse the SQL projection tables
+and assert they agree with the mapping: nine endpoints, seven inverse field rows and the
+per-table attribute lists. A five-case mutation test (endpoint, pk, attribute, field value,
+missing row) confirmed the validator catches drift rather than merely parsing.
+
+Verification: `check_english.py` clean; every relative link reachable; all 13 cited line numbers in
+`material.sql`, `merge.sql`, `main.py`, the mapping, `sample_demo.sql` and `ci.yml` checked;
+18/18 `source_id` values and the JSONL byte contract (15733 bytes, 0 CRLF) re-measured.
+
+## Step 1: SQL state machine (PR #15)
+
+`schema/writeback.sql` added six columns (`base`, `attempts`, `claimed_at`, `claimed_by`,
+`idempotency_key`, `last_status`), the `material_writeback_catalog` and
+`material_writeback_field` projections, and `submit` / `decide` / `plan` / `queue`. Caller
+mistakes raise SQLSTATE 22023; business outcomes return `{ok, code}`.
+
+Verification: two consecutive loads of the file succeed; 45 behavioural assertions on a fresh
+PostgreSQL 16 database with the committed snapshot imported cover server-computed `before`, the
+`base` fingerprint, forbidden paths (including the offending path in the response), the
+per-table `attributes.<col>` allowlist, `no_change`, `open_request`, archived material ->
+`conflict`, self-approval, `already_decided`, `stale_base` with a differing current/base report,
+the reject audit payload, plan URL / headers / inverse-translated body, and queue filters and
+paging. The full local suite stayed green (`check_english.py`, `compileall`, `check_mappings.py`,
+`check_joineryflow_mapping.py`, 93 unit tests, JSONL byte contract). All four CI jobs were green
+on PR #15.
+
+## Step 2: claim, settle, lease and concurrency
+
+`claim()` uses a materialised CTE with `FOR UPDATE SKIP LOCKED`, takes only `approved` rows whose
+lease is free or expired, increments `attempts` and fixes `idempotency_key = mlcr-{id}`.
+`settle()` re-checks the field-level base immediately before recording `applied`; a 2xx on stale
+data becomes `failed / applied_unverified`, a 5xx or timeout becomes
+`failed / uncertain_outcome`, and a caller that lost its lease cannot settle. `retry()` closes the
+last transition in design section 6.
+
+Verification: 60/60 database assertions on a fresh database. Two independent connections each
+claimed two rows with no overlap and no blocking (`statement_timeout = 8s` never fired), proving
+`SKIP LOCKED`; claim produced zero events and the happy path exactly three; a live lease blocked
+re-claiming, an expired one was reclaimed with `attempts = 2`; four settle outcomes, five
+parameter-validation errors, four retry branches, plan/queue regression and idempotency-key
+uniqueness all passed. Full regression: `check_english.py`, `compileall`, `check_mappings.py`,
+`check_joineryflow_mapping.py`, 93 unit tests, complete pytest `159 passed, 4 skipped, 200
+subtests`, JSONL `15733 / 78936` bytes with 0 CRLF.
+
+## Step 3: worker CLI and fake upstream
+
+`scripts/apply_change_requests.py` defaults to a true no-op dry run; `--apply` requires
+`ML_JF_BASE_URL` and `ML_JF_TOKEN` and exits 2 before opening the database when either is
+missing. It claims a batch, calls `plan()` for each row, sends one stdlib `urllib` PATCH outside
+any transaction, and settles 2xx / 4xx / 5xx / timeout through SQL. The token is never printed,
+never written to a report and never hard-coded; no real upstream URL appears in the source.
+
+`tests/test_writeback.py` starts a stdlib `ThreadingHTTPServer` on 127.0.0.1 with an ephemeral
+port, records method / path / headers / body, and can inject status codes and delays. Eight pure
+unit tests run without a database; ten integration tests skip unless `ML_WRITEBACK_DSN` is set.
+
+Verification: `18 passed` on a fresh `ml_writeback_ci` database (eight unit + ten integration),
+`8 passed / 10 skipped` without the DSN. Cases: dry-run zero writes / zero events / zero HTTP,
+happy path (3 events, 1 PATCH, `last_status = 200`), second apply with zero requests, 400 / 409,
+503, timeout, stale 2xx -> `applied_unverified`, forbidden paths, retry then apply, and two
+concurrent workers producing exactly one PATCH per request. Full suite `167 passed, 14 skipped,
+200 subtests`.
+
+## Step 4: SQL contract, review routes and CI
+
+`scripts/writeback_contract.sql` is psql-runnable and rolls back its own work. It asserts the six
+additive columns, the 9/7 projection tables, the untouched five-state CHECK, `SKIP LOCKED` in
+the function body, the allowlist, every legal transition, the illegality of `pending -> applied`,
+staleness at approve and at apply, lease reclaim, one event per transition, retry refusing an
+uncertain outcome, and a token-free plan.
+
+`api/main.py` gained five routes: `POST /v1/change-requests`, `GET /v1/change-requests`,
+`GET /v1/change-requests/{id}`, `POST .../approve` and `POST .../reject`. There is deliberately
+no apply route. `tests/test_writeback_api.py` covers 11 cases including error mapping, cursor
+paging, self-approval, stale base, terminal rejection and the absence of an apply route.
+
+CI now has five jobs: `static`, `database`, `api`, `etl` and `writeback`. The `api` job loads
+`writeback.sql` after `seed.sql` in all four of its databases; the `writeback` job uses a fresh
+`ml_writeback` database, sets only `ML_WRITEBACK_DSN` (no `ML_JF_*` credential), loads the
+schema, imports the snapshot, runs the SQL contract and runs
+`pytest -q tests/test_writeback.py --noconftest`.
+
+Verification: SQL contract printed `writeback contract OK` with zero residual rows; writeback job
+`18 passed`; api job after a fresh rebuild: `api_contract.sql` and `merge_contract.sql` on both
+`ml_fixture` and `ml_api` green, full suite `178 passed, 14 skipped, 200 subtests`; static job
+`check_english.py` (with `git add -N` for new files), `compileall`, schema JSON,
+`check_mappings.py`, `check_joineryflow_mapping.py` and 93 unit tests green; JSONL byte contract
+unchanged.
+
+Two local-only pitfalls, neither present in CI: running `merge_contract.sql` after pytest (the
+merge tests mutate `ml_api` duplicate pairs) produced a false failure, and an interrupted HTTP
+test left nine disposable material rows behind until the fixture was made self-healing. Running
+the steps in CI order and cleaning the rows made both disappear.
+
+## Constraints carried into implementation
+
+* SQL owns transitions, Python owns transport (design principle 1). Satisfied: all five
+  functions live in `schema/writeback.sql`; the CLI and API only map outcomes.
+* Only a human approves; no auto-approval, no self-approval, no `pending -> applied` shortcut.
+  Satisfied and asserted by `submit` / `decide` / `settle` and the SQL contract.
+* Dry-run is the default and a true no-op. Satisfied: `tests/test_writeback.py` asserts zero
+  request writes, zero events and zero HTTP calls.
+* CI never egresses to joineryflow. Satisfied: the fake upstream is a local `http.server`, the
+  `writeback` job sets no `ML_JF_*` variable, and `--apply` refuses to start without
+  `ML_JF_BASE_URL`.
+* No database lock crosses a network call; claim and settle are separate short transactions.
+  Satisfied by the worker's autocommit connection.
+* Never apply a stale approval, never blindly retry an uncertain outcome. Satisfied at both
+  `decide()` and `settle()`, plus `retry()` refusing `uncertain_outcome`.
+* Additive schema only; the five-state CHECK is untouched. Satisfied and asserted.
+* One allowlist, one translation table. Satisfied: `mapping/joineryflow.yaml` is the source of
+  truth and `scripts/check_joineryflow_mapping.py` keeps the SQL projections aligned.
+* Any implementation PR keeps `pytest`, `check_english.py`, `api_contract.sql`,
+  `merge_contract.sql` and the ETL contract green. Verified locally for every step; PR #15 had all
+  four jobs green before the `writeback` job existed.
+
+## Open
+
+Nothing blocking. All five delivery steps of design section 14 are implemented and verified:
+steps 0-1 are on `master` through PR #15, and steps 2-5 (including this log, README status and
+`docs/data-model-v2.md` 5/6) are delivered in PR #16. `check_english.py` is clean, the full suite
+is green, and the write-back SQL contract runs in CI on every subsequent PR.
+
+Still open for the project as a whole, and deliberately out of scope for T3: whether joineryflow
+honours `Idempotency-Key` (until confirmed, no retry depends on it), the exact form of the
+workspace guard, whether the upstream accepts a partial PATCH body, retention for `applied` and
+`rejected` requests, who schedules the worker, live incremental sync (which needs an
+`updated_at` column and real credentials), ETIM/eCl@ss real-code mapping and EPD collection.
+See `docs/t3-writeback.md` section 16 and the non-goals in section 13.
