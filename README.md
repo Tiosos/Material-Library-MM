@@ -26,7 +26,16 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 ├── scripts/eval_search.py      search evaluation runner (MRR@10, hit@1, zero-result, level accuracy)
 ├── tests/                      HTTP smoke tests (pytest + TestClient)
 ├── mapping/
-│   └── joineryflow.yaml        9 catalog tables → UMR field mapping, write-back, sync spec
+│   └── joineryflow.yaml        executable v2 rules: 9 catalog tables → UMR (ETL step 1)
+├── fixtures/
+│   └── joineryflow-hartwood.jsonl   committed 18-row snapshot, the ETL's only input
+├── scripts/export_joineryflow.py    read-only exporter for that snapshot (step 0)
+├── scripts/check_joineryflow_mapping.py  static mapping v2 validator
+├── scripts/import_joineryflow.py    snapshot import CLI (step 3)
+├── scripts/etl_contract.sql         post-import SQL assertions (step 4)
+├── ingest/joineryflow.py            pure snapshot reader and draft builder (step 2)
+├── docs/etl-joineryflow.md          ETL design (final)
+├── docs/etl-joineryflow-progress.md ETL implementation log and verification
 └── proto/                       ★ runnable prototype (zero dependencies, to validate the search feel)
     ├── build_db.py             generate the sample library (100 rows, real brands and field structure)
     ├── search.py               tiered graceful-degradation search implementation
@@ -147,8 +156,12 @@ Search quality is a gate, not an opinion:
 ```bash
 python scripts/eval_search.py --dsn "$ML_DSN" --dataset fixture   # deterministic corpus, five levels
 python scripts/eval_search.py --dsn "$ML_DSN" --dataset blum      # real part numbers from the sample import
-python -m pytest -q tests                                        # 104 tests: HTTP contract, MCP and mapping/importer unit tests
+python -m pytest -q tests                                        # HTTP contract, MCP, mapping/importer and ETL tests
 ```
+
+The four ETL integration cases in `tests/test_etl.py` skip unless `ML_ETL_DSN` points at a fresh
+database that has imported the joineryflow snapshot; the CI `etl` job supplies it. On the CI
+`api` recipe the suite reports `159 passed, 4 skipped`.
 
 Design and decisions: [`docs/api-v1.md`](docs/api-v1.md) (endpoints, SQL additions, instrumentation, evaluation thresholds). Implementation log with verification for every step: [`docs/t1-progress.md`](docs/t1-progress.md).
 
@@ -217,6 +230,47 @@ A second worked example imports a joinery procurement sheet with parsed sheet si
 
 ---
 
+## Real-data ETL (snapshot-first, joineryflow)
+
+The first real catalogue is joineryflow's nine material tables, imported through a **committed
+JSONL snapshot** rather than a live connection: CI never connects to the source system, and a
+byte-identical re-export is the acceptance criterion.
+
+```bash
+pip install -r ingest/requirements.txt
+
+# 1) Pure verification, no database: read the snapshot and build 18 Drafts
+python -m ingest.joineryflow --dry-run --json
+
+# 2) Static check that mapping v2 matches the snapshot, schema and seed data
+python scripts/check_joineryflow_mapping.py
+
+# 3) Dry-run report from the import CLI
+python scripts/import_joineryflow.py --dry-run --json report.json
+
+# 4) Write to a fresh PostgreSQL 16 database (schema + search + seed loaded first)
+set ML_DSN=postgresql://postgres:postgres@127.0.0.1:5432/ml
+python scripts/import_joineryflow.py --dsn %ML_DSN% --json first.json
+
+# 5) Assert the imported state (use docker exec ... psql if PG runs in a container)
+psql -v ON_ERROR_STOP=1 -q -d ml -f scripts/etl_contract.sql
+set ML_ETL_DSN=%ML_DSN%
+python -m pytest -q tests/test_etl.py --noconftest
+```
+
+Measured on a fresh database: 18 materials, 0 archived, 6 categories (`board:10 hardware:4
+benchtop:1 appliance:1 custom:1 hire:1`), 17 single-member families, 10 derived `thickness_mm`
+measures plus one from a real column, 13 prices, 2 `cv_code` identifiers and `source_payload`
+on all 18 rows. `material_search('18mm')` finds both 18 mm boards. A second import reports
+`new = 0, updated = 18`, and `rev` stays 1. The dedicated `etl` CI job rebuilds all of this from
+scratch on every PR using its own `ml_etl` database and `ML_ETL_DSN`.
+
+Design (final): [`docs/etl-joineryflow.md`](docs/etl-joineryflow.md). Verification log, decisions
+and the three numbers that differ from the design prose:
+[`docs/etl-joineryflow-progress.md`](docs/etl-joineryflow-progress.md).
+
+---
+
 ## Changing the prototype data
 
 Edit the material pool at the top of `proto/build_db.py` (`BOARDS` / `HARDWARE` / `EDGING` / `GLASS` / `TIMBER` / `BENCHTOP` / `APPLIANCE` / `CUSTOM` / `HIRE` / `CONSUMABLE`), then re-run `python3 build_db.py`.
@@ -238,10 +292,10 @@ Edit the material pool at the top of `proto/build_db.py` (`BOARDS` / `HARDWARE` 
 - [x] **Duplicate merge (T2)**: scan for candidate pairs, review queue, preview, merge with an explicit keeper (survivor becomes a superseded tombstone), ignore; HTTP routes and CLIs, contract assertions and pytest coverage in the `api` job
 - [x] **Read API v1b (T1b)**: families collapse to their best hit with `variant_count`/`variants` (`expand=variants` returns the records), and `format=json` exports the versioned envelope (`{schema_version, exported_at, count, records}`) validated by `schema/export.schema.json`
 - [x] **MCP server (B8)**: seven read-only tools plus a `materials://{uid}` resource over the read API, stdio by default and streamable HTTP on request, with the API's errors passed through verbatim
-- [ ] Real-data ETL (joineryflow database connection or exported snapshot)
+- [x] **Real-data ETL (snapshot-first)**: committed 18-row joineryflow snapshot, executable mapping v2, pure reader/draft builder, idempotent import CLI, SQL contract, integration tests and a dedicated `etl` CI job (PRs #9-#13), verified end to end on PostgreSQL 16
 - [ ] write-back executor (the request table is ready, the PATCH executor is not done)
 
-**Next step: the real-data ETL (joineryflow database connection or an exported snapshot), then the write-back executor.** T1b closed the two gaps the read API used to advertise: families collapse by default (`expand=variants` returns the records) and `format=json` exports the versioned envelope validated by `schema/export.schema.json`. `docs/t2-merge.md` §9 explains recovery without an `unmerge()`.
+**Next step: the write-back executor** — `material_change_request` and its approval state machine are in place, but the PATCH executor that applies an approved diff to joineryflow is not built. The real-data ETL no longer sits in front of it: it imports the committed snapshot, never connects to the source database, and is verified in CI. T1b closed the two gaps the read API used to advertise: families collapse by default (`expand=variants` returns the records) and `format=json` exports the versioned envelope validated by `schema/export.schema.json`. `docs/t2-merge.md` §9 explains recovery without an `unmerge()`.
 
 ---
 
