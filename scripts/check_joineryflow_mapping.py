@@ -9,8 +9,11 @@ the snapshot header and workspace match, all nine tables are present in contract
 order, referenced columns exist (or are declared as known_columns for the three
 tables with no rows), category/unit/identifier codes exist in the schema, and
 identifier values do not collide. It also asserts the decisions recorded in
-docs/etl-joineryflow-progress.md and recomputes the expected import counts from
-the fixture. Exits 1 and lists every problem; 0 means the mapping resolves.
+docs/etl-joineryflow-progress.md, recomputes the expected import counts from
+the fixture, and checks that the write-back projection in schema/writeback.sql
+(the catalog endpoints and the field allowlist inverse) agrees with the
+write_back section of the mapping, so the SQL side cannot drift from the YAML.
+Exits 1 and lists every problem; 0 means the mapping resolves.
 
 Step 4 wires this into CI. Nothing here connects to a database.
 """
@@ -32,6 +35,7 @@ if str(ROOT) not in sys.path:
 MAPPING_PATH = ROOT / "mapping" / "joineryflow.yaml"
 SEED_PATH = ROOT / "schema" / "seed.sql"
 SCHEMA_PATH = ROOT / "schema" / "material.sql"
+WRITEBACK_PATH = ROOT / "schema" / "writeback.sql"
 PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 REQUIRED_TABLE_KEYS = (
     "category_code", "pk", "unit", "own_cost_column", "price_policy",
@@ -117,6 +121,100 @@ def family_key(table: str, spec: dict, row: dict, size_re) -> str | None:
     if not key:
         return None
     return f"joineryflow:{spec['category_code']}:{key}"
+
+
+CATALOG_ROW = re.compile(
+    r"^\s*\('([a-z_]+)',\s*'([a-z_]+)',\s*'(/[a-z/-]+)',\s*'([a-z_]+)',\s*ARRAY\[(.*?)\]\),?$"
+)
+FIELD_ROW = re.compile(r"^\s*\('([a-z_.]+)',\s*'([a-z_]+)',\s*'([a-z_]+)'\),?$")
+
+
+def writeback_rows() -> tuple[dict[str, dict], dict[str, dict], list[str]]:
+    """Parse the mapping-projection INSERTs in schema/writeback.sql (no database)."""
+    errors: list[str] = []
+    catalog: dict[str, dict] = {}
+    fields: dict[str, dict] = {}
+    try:
+        text = WRITEBACK_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        return catalog, fields, [f"cannot read schema/writeback.sql: {exc}"]
+    section = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("INSERT INTO material_writeback_catalog"):
+            section = "catalog"
+            continue
+        if stripped.startswith("INSERT INTO material_writeback_field"):
+            section = "fields"
+            continue
+        if stripped.startswith("ON CONFLICT"):
+            section = None
+            continue
+        if section is None or not stripped.startswith("('"):
+            continue
+        if section == "catalog":
+            m = CATALOG_ROW.match(line)
+            if not m:
+                errors.append(f"schema/writeback.sql: unparsed catalog row: {stripped[:70]}")
+                continue
+            catalog[m.group(1)] = {
+                "category_code": m.group(2),
+                "endpoint": m.group(3),
+                "pk_column": m.group(4),
+                "attribute_keys": [k.strip().strip("'") for k in m.group(5).split(",") if k.strip()],
+            }
+        else:
+            m = FIELD_ROW.match(line)
+            if not m:
+                errors.append(f"schema/writeback.sql: unparsed field row: {stripped[:70]}")
+                continue
+            fields[m.group(1)] = {
+                "material_column": m.group(2),
+                "upstream_column": m.group(3),
+            }
+    return catalog, fields, errors
+
+
+def writeback_agreement(mapping: dict) -> tuple[list[str], dict]:
+    """schema/writeback.sql must project the mapping's write_back section exactly."""
+    problems: list[str] = []
+    report: dict = {}
+    tables = mapping.get("tables") or {}
+    catalog, fields, errors = writeback_rows()
+    problems.extend(errors)
+    report["writeback_tables"] = len(catalog)
+    report["writeback_fields"] = len(fields)
+
+    if sorted(catalog) != sorted(tables):
+        problems.append(
+            "writeback.sql catalog tables do not match the mapping tables: "
+            f"{sorted(catalog)} vs {sorted(tables)}"
+        )
+    for table, row in catalog.items():
+        spec = tables.get(table) or {}
+        if spec and row["category_code"] != str(spec.get("category_code")):
+            problems.append(f"writeback.sql {table}: category_code disagrees with the mapping")
+        if spec and row["endpoint"] != str(spec.get("endpoint")):
+            problems.append(f"writeback.sql {table}: endpoint disagrees with the mapping")
+        if spec and row["pk_column"] != str(spec.get("pk")):
+            problems.append(f"writeback.sql {table}: pk_column disagrees with the mapping")
+        if spec and sorted(row["attribute_keys"]) != sorted(str(a) for a in (spec.get("attributes") or [])):
+            problems.append(f"writeback.sql {table}: attribute_keys disagree with the mapping attributes list")
+
+    want: dict[str, dict] = {}
+    yaml_fields = (mapping.get("write_back") or {}).get("fields") or {}
+    for upstream, umr in yaml_fields.items():
+        want[str(umr)] = {"material_column": str(umr), "upstream_column": str(upstream)}
+    missing = sorted(set(want) - set(fields))
+    extra = sorted(set(fields) - set(want))
+    if missing:
+        problems.append(f"writeback.sql field rows missing: {', '.join(missing)}")
+    if extra:
+        problems.append(f"writeback.sql field rows not in write_back.fields: {', '.join(extra)}")
+    for umr in sorted(set(want) & set(fields)):
+        if fields[umr] != want[umr]:
+            problems.append(f"writeback.sql field row {umr}: disagrees with write_back.fields")
+    return problems, report
 
 
 def validate() -> tuple[list[str], dict, list[str]]:
@@ -263,6 +361,9 @@ def validate() -> tuple[list[str], dict, list[str]]:
             len(common["status"]["is_active_tables"]) != 5:
         problems.append("E8: is_active applies to exactly five tables")
 
+    wb_problems, wb_report = writeback_agreement(mapping)
+    problems.extend(wb_problems)
+
     report = {
         "tables": {t: counts.get(t, 0) for t in header_tables},
         "rows": len(rows),
@@ -275,6 +376,8 @@ def validate() -> tuple[list[str], dict, list[str]]:
         "prices": prices,
         "families": len(family_members),
         "single_member_families": sum(1 for n in family_members.values() if n == 1),
+        "writeback_tables": wb_report.get("writeback_tables", 0),
+        "writeback_fields": wb_report.get("writeback_fields", 0),
     }
     expected = (mapping.get("import_contract") or {}).get("expected") or {}
     measured = {
@@ -312,7 +415,8 @@ def main(argv: list[str] | None = None) -> int:
             f"{report['prices']} prices, {report['cv_identifiers']} cv codes, "
             f"{report['families']} families, "
             f"{report['identifier_values']} identifier values, "
-            f"{report['identifier_collisions']} collisions"
+            f"{report['identifier_collisions']} collisions, "
+            f"writeback {report['writeback_tables']} tables / {report['writeback_fields']} fields"
         )
     for problem in problems:
         print(f"  - {problem}")
