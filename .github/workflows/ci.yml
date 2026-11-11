@@ -275,3 +275,77 @@ jobs:
 
       - name: Search evaluation (Blum catalogue)
         run: python scripts/eval_search.py --dsn "$ML_BLUM_DSN" --dataset blum
+
+  # A separate job rather than a step in `api`: docs/etl-joineryflow.md 10.2
+  # requires a fresh database, while every api-job database also carries the
+  # evaluation corpus and the supplier demo. ML_ETL_DSN is deliberately not
+  # ML_DSN, so the shared pytest run against ml_api can never assert ETL counts.
+  etl:
+    name: Joineryflow ETL contract
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ml_etl
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      PGHOST: 127.0.0.1
+      PGUSER: postgres
+      PGDATABASE: ml_etl
+      PGPASSWORD: postgres
+      ML_ETL_DSN: postgresql://postgres:postgres@127.0.0.1:5432/ml_etl
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ETL dependencies
+        run: pip install --quiet pyyaml "psycopg[binary]" pytest
+
+      - name: Load schema, search functions and reference data
+        run: |
+          psql -v ON_ERROR_STOP=1 -q \
+            -f schema/material.sql -f schema/search.sql -f schema/seed.sql
+
+      - name: Import the committed snapshot
+        run: |
+          python scripts/import_joineryflow.py --dsn "$ML_ETL_DSN" --json /tmp/etl_first.json
+          python - <<'PY'
+          import json
+          report = json.load(open("/tmp/etl_first.json", encoding="utf-8"))
+          assert report["contract"]["ok"] is True, report["contract"]
+          assert report["errors"] == 0, report["errors"]
+          assert report["stats"]["new"] == 18, report["stats"]
+          assert report["stats"]["skipped"] == 0, report["stats"]
+          print("first import:", report["stats"])
+          PY
+
+      - name: Re-import is idempotent
+        run: |
+          python scripts/import_joineryflow.py --dsn "$ML_ETL_DSN" --json /tmp/etl_second.json
+          python - <<'PY'
+          import json
+          report = json.load(open("/tmp/etl_second.json", encoding="utf-8"))
+          assert report["stats"]["new"] == 0, report["stats"]
+          assert report["stats"]["updated"] == 18, report["stats"]
+          assert report["stats"]["skipped"] == 0, report["stats"]
+          print("second import:", report["stats"])
+          PY
+
+      - name: SQL contract (imported catalogue state)
+        run: psql -q -v ON_ERROR_STOP=1 -d ml_etl -f scripts/etl_contract.sql
+
+      # tests/conftest.py imports the FastAPI app for the HTTP suite; the ETL
+      # job installs no API dependencies, so load test_etl.py without it.
+      - name: ETL integration tests
+        run: python -m pytest -q tests/test_etl.py --noconftest
