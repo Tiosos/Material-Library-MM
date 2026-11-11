@@ -7,9 +7,11 @@
 -- column is dropped, and the five-state CHECK on material_change_request in
 -- material.sql is untouched (docs/t3-writeback.md D13).
 --
--- Step 1 lands the request columns, the mapping tables and four functions:
--- submit, decide, plan and queue. claim() and settle() follow in step 2; they
--- close the state machine that starts here.
+-- Step 1 lands the request columns, the mapping tables and submit, decide,
+-- plan and queue. Step 2 adds claim, settle and retry: the five-minute lease,
+-- FOR UPDATE SKIP LOCKED batch claiming, outcome handling and the explicit
+-- human retry. Together they close the state machine in docs/t3-writeback.md
+-- section 6; the executor in step 3 only transports the resulting plans.
 --
 -- Conventions copied from schema/merge.sql: caller mistakes raise SQLSTATE
 -- 22023 (the HTTP edge maps them to 400 bad_request); business outcomes come
@@ -524,3 +526,292 @@ END $$;
 
 COMMENT ON FUNCTION material_change_request_queue(text, integer, integer) IS
     'Review list for write-back requests; actionable = pending + approved + failed.';
+
+-- ---------------------------------------------------------------------------
+-- material_change_request_claim - take a disjoint batch on a lease (step 2)
+-- ---------------------------------------------------------------------------
+-- Claimable means approved and either never claimed or past the lease. The
+-- five status values stay untouched: claimed_at is the in-flight marker, not a
+-- sixth state (docs section 5). SKIP LOCKED lets a second worker take the next
+-- rows immediately instead of blocking on this one, and both claim and settle
+-- are short transactions, so no row lock is ever held across the upstream
+-- HTTP call (D11, D12, acceptance criterion 5).
+--
+-- p_lease is a parameter so a test can exercise expiry without waiting five
+-- minutes; production uses the default. A claim writes NO material_event:
+-- acceptance criterion 2 counts exactly three events on a happy path (insert,
+-- approve, apply), and a claim is bookkeeping rather than a state change.
+CREATE OR REPLACE FUNCTION material_change_request_claim(
+    p_limit   integer  DEFAULT 20,
+    p_actor   text     DEFAULT NULL,
+    p_lease   interval DEFAULT interval '5 minutes',
+    p_only_id bigint   DEFAULT NULL
+) RETURNS jsonb
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_actor text;
+    v_limit integer;
+    v_rows  jsonb;
+BEGIN
+    IF p_lease IS NULL OR p_lease <= interval '0' OR p_lease > interval '1 hour' THEN
+        RAISE EXCEPTION 'lease must be greater than zero and at most one hour'
+            USING ERRCODE = '22023';
+    END IF;
+    v_limit := least(greatest(coalesce(p_limit, 20), 1), 500);
+    v_actor := coalesce(nullif(btrim(p_actor), ''),
+                        nullif(current_setting('ml.actor', true), ''),
+                        'anonymous');
+
+    PERFORM set_config('ml.actor', v_actor, true);
+    PERFORM set_config('ml.source', 'writeback', true);
+
+    WITH candidates AS MATERIALIZED (
+        SELECT r.id
+          FROM material_change_request r
+         WHERE r.status = 'approved'
+           AND (p_only_id IS NULL OR r.id = p_only_id)
+           AND (r.claimed_at IS NULL OR r.claimed_at < now() - p_lease)
+         ORDER BY r.requested_at, r.id
+         LIMIT v_limit
+         FOR UPDATE SKIP LOCKED
+    ), claimed AS (
+        UPDATE material_change_request r
+           SET claimed_at      = now(),
+               claimed_by      = v_actor,
+               attempts        = r.attempts + 1,
+               idempotency_key = coalesce(r.idempotency_key, 'mlcr-' || r.id::text)
+          FROM candidates c
+         WHERE r.id = c.id
+        RETURNING r.*
+    )
+    SELECT coalesce(jsonb_agg(jsonb_build_object(
+                        'id', c.id,
+                        'material_uid', c.material_uid,
+                        'status', c.status,
+                        'diffs', c.diffs,
+                        'base', c.base,
+                        'attempts', c.attempts,
+                        'claimed_at', c.claimed_at,
+                        'claimed_by', c.claimed_by,
+                        'idempotency_key', c.idempotency_key
+                    ) ORDER BY c.id), '[]'::jsonb)
+      INTO v_rows
+      FROM claimed c;
+
+    RETURN jsonb_build_object('ok', true, 'code', 'claimed',
+                              'claimed', jsonb_array_length(v_rows),
+                              'actor', v_actor, 'lease', p_lease::text,
+                              'rows', v_rows);
+END $$;
+
+COMMENT ON FUNCTION material_change_request_claim(integer, text, interval, bigint) IS
+    'Claim a disjoint batch of approved requests with a five-minute lease; p_only_id supports the CLI --request-id.';
+
+-- ---------------------------------------------------------------------------
+-- material_change_request_settle - record the upstream outcome (step 2)
+-- ---------------------------------------------------------------------------
+-- p_outcome is applied (2xx), failed (known 4xx / local rejection) or unknown
+-- (5xx, timeout, connection error). Both failed and unknown end in the failed
+-- status; unknown is distinct only by error = 'uncertain_outcome', which
+-- retry() refuses (D10). Only a worker that still owns the live lease may
+-- settle, so a crashed worker that comes back late cannot overwrite a newer
+-- claim, and pending / rejected / applied rows refuse the transition outright.
+--
+-- D8: applied re-checks the field-level base one last time. If the master data
+-- moved after approval the request becomes failed with error 'stale_base' even
+-- when the upstream already answered 2xx; the report calls that outcome
+-- 'applied_unverified' because the two systems may legitimately diverge.
+CREATE OR REPLACE FUNCTION material_change_request_settle(
+    p_id          bigint,
+    p_outcome     text,
+    p_status_code integer  DEFAULT NULL,
+    p_error       text     DEFAULT NULL,
+    p_actor       text     DEFAULT NULL,
+    p_lease       interval DEFAULT interval '5 minutes'
+) RETURNS jsonb
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_row     material_change_request%ROWTYPE;
+    v_actor   text;
+    v_status  text := 'failed';
+    v_error   text;
+    v_outcome text;
+    v_paths   jsonb;
+    v_current jsonb;
+    v_stale   boolean := false;
+BEGIN
+    IF p_outcome IS NULL OR p_outcome NOT IN ('applied', 'failed', 'unknown') THEN
+        RAISE EXCEPTION 'outcome must be applied, failed or unknown'
+            USING ERRCODE = '22023';
+    END IF;
+    IF p_status_code IS NOT NULL AND (p_status_code < 100 OR p_status_code > 599) THEN
+        RAISE EXCEPTION 'status_code must be between 100 and 599 or null'
+            USING ERRCODE = '22023';
+    END IF;
+    IF length(coalesce(p_error, '')) > 500 THEN
+        RAISE EXCEPTION 'error must be at most 500 characters' USING ERRCODE = '22023';
+    END IF;
+    IF p_lease IS NULL OR p_lease <= interval '0' OR p_lease > interval '1 hour' THEN
+        RAISE EXCEPTION 'lease must be greater than zero and at most one hour'
+            USING ERRCODE = '22023';
+    END IF;
+    v_actor := coalesce(nullif(btrim(p_actor), ''),
+                        nullif(current_setting('ml.actor', true), ''),
+                        'anonymous');
+
+    SELECT * INTO v_row FROM material_change_request WHERE id = p_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'not_found', 'id', p_id);
+    END IF;
+    IF v_row.status <> 'approved' THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'conflict',
+                                  'id', p_id, 'status', v_row.status);
+    END IF;
+    IF v_row.claimed_at IS NULL THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'not_claimed', 'id', p_id);
+    END IF;
+    IF v_row.claimed_by IS DISTINCT FROM v_actor THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'lease_owner_mismatch',
+                                  'id', p_id, 'claimed_by', v_row.claimed_by,
+                                  'actor', v_actor);
+    END IF;
+    IF v_row.claimed_at < now() - p_lease THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'lease_expired',
+                                  'id', p_id, 'claimed_at', v_row.claimed_at);
+    END IF;
+
+    v_outcome := p_outcome;
+    IF p_outcome = 'applied' THEN
+        SELECT coalesce(jsonb_agg(d ->> 'path' ORDER BY ord), '[]'::jsonb)
+          INTO v_paths
+          FROM jsonb_array_elements(v_row.diffs) WITH ORDINALITY AS t(d, ord);
+        v_current := ml_writeback_current_values(v_row.material_uid, v_paths);
+        IF v_current IS DISTINCT FROM (v_row.base -> 'values') THEN
+            v_stale   := true;
+            v_error   := 'stale_base';
+            v_outcome := 'applied_unverified';
+        ELSE
+            v_status := 'applied';
+            v_error  := NULL;
+        END IF;
+    ELSIF p_outcome = 'unknown' THEN
+        v_error := 'uncertain_outcome';
+    ELSE
+        v_error := coalesce(nullif(btrim(coalesce(p_error, '')), ''), 'upstream_error');
+    END IF;
+
+    PERFORM set_config('ml.actor', v_actor, true);
+    PERFORM set_config('ml.source', 'writeback', true);
+
+    UPDATE material_change_request
+       SET status      = v_status,
+           applied_at  = CASE WHEN v_status = 'applied' THEN now() ELSE NULL END,
+           error       = v_error,
+           last_status = p_status_code,
+           claimed_at  = NULL,
+           claimed_by  = NULL
+     WHERE id = p_id;
+
+    INSERT INTO material_event (material_uid, entity, op, payload, actor)
+    VALUES (v_row.material_uid, 'material_change_request', 'update',
+            jsonb_build_object('request_id', p_id,
+                               'from', 'approved', 'to', v_status,
+                               'actor', v_actor, 'reason', p_error,
+                               'outcome', v_outcome,
+                               'status_code', p_status_code,
+                               'stale_base', v_stale),
+            v_actor);
+
+    RETURN jsonb_build_object('ok', true, 'code', v_status,
+                              'outcome', v_outcome, 'id', p_id,
+                              'status', v_status, 'error', v_error,
+                              'last_status', p_status_code,
+                              'applied_unverified', v_stale);
+END $$;
+
+COMMENT ON FUNCTION material_change_request_settle(bigint, text, integer, text, text, interval) IS
+    'Settle a claimed request: applied, failed or unknown; re-checks base before applied and writes one event.';
+
+-- ---------------------------------------------------------------------------
+-- material_change_request_retry - explicit human retry of a known failure
+-- ---------------------------------------------------------------------------
+-- This is the last transition in docs section 6 (failed -> approved). It is
+-- deliberately separate from settle and requires a new actor, because a retry
+-- is a fresh approval of the same diff. An uncertain outcome can never be
+-- retried: a human must GET the upstream record first (D10). The base is
+-- checked again so a retry cannot approve a diff against newer master data.
+CREATE OR REPLACE FUNCTION material_change_request_retry(
+    p_id     bigint,
+    p_actor  text DEFAULT NULL,
+    p_reason text DEFAULT NULL
+) RETURNS jsonb
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_row     material_change_request%ROWTYPE;
+    v_actor   text;
+    v_paths   jsonb;
+    v_current jsonb;
+BEGIN
+    IF length(coalesce(p_reason, '')) > 500 THEN
+        RAISE EXCEPTION 'reason must be at most 500 characters' USING ERRCODE = '22023';
+    END IF;
+    v_actor := coalesce(nullif(btrim(p_actor), ''),
+                        nullif(current_setting('ml.actor', true), ''),
+                        'anonymous');
+
+    SELECT * INTO v_row FROM material_change_request WHERE id = p_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'not_found', 'id', p_id);
+    END IF;
+    IF v_row.status <> 'failed' THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'conflict',
+                                  'id', p_id, 'status', v_row.status);
+    END IF;
+    IF v_row.error = 'uncertain_outcome' THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'uncertain_outcome',
+                                  'id', p_id, 'error', v_row.error);
+    END IF;
+    IF v_actor = v_row.requested_by OR v_actor = v_row.decided_by THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'self_approval',
+                                  'id', p_id, 'requested_by', v_row.requested_by,
+                                  'decided_by', v_row.decided_by);
+    END IF;
+
+    SELECT coalesce(jsonb_agg(d ->> 'path' ORDER BY ord), '[]'::jsonb)
+      INTO v_paths
+      FROM jsonb_array_elements(v_row.diffs) WITH ORDINALITY AS t(d, ord);
+    v_current := ml_writeback_current_values(v_row.material_uid, v_paths);
+    IF v_current IS DISTINCT FROM (v_row.base -> 'values') THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'stale_base', 'id', p_id,
+                                  'base', v_row.base -> 'values',
+                                  'current', v_current);
+    END IF;
+
+    PERFORM set_config('ml.actor', v_actor, true);
+    PERFORM set_config('ml.source', 'writeback', true);
+
+    UPDATE material_change_request
+       SET status      = 'approved',
+           decided_by  = v_actor,
+           decided_at  = now(),
+           applied_at  = NULL,
+           error       = NULL,
+           last_status = NULL,
+           claimed_at  = NULL,
+           claimed_by  = NULL
+     WHERE id = p_id;
+
+    INSERT INTO material_event (material_uid, entity, op, payload, actor)
+    VALUES (v_row.material_uid, 'material_change_request', 'update',
+            jsonb_build_object('request_id', p_id,
+                               'from', 'failed', 'to', 'approved',
+                               'actor', v_actor, 'reason', p_reason,
+                               'decision', 'retry'),
+            v_actor);
+
+    RETURN jsonb_build_object('ok', true, 'code', 'approved', 'id', p_id,
+                              'status', 'approved', 'decided_by', v_actor);
+END $$;
+
+COMMENT ON FUNCTION material_change_request_retry(bigint, text, text) IS
+    'Explicit human retry of a known-failed request; refuses uncertain outcomes and stale bases.';
