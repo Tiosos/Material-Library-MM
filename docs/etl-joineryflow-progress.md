@@ -17,14 +17,17 @@ Status legend: `[ ]` planned, `[~]` in progress, `[x]` done and verified, `[!]` 
 | 3 | Audit the design against schema and live source | [x] | 2026-11-08 read-only audit; schema claims hold, source drift and three internal contradictions found; see "Audit findings" |
 | 4 | Resolve the remaining open questions | [x] | Project owner answered all three; see "Decisions" |
 | 5 | Exporter + committed JSONL snapshot | [x] | 2026-11-08: `scripts/export_joineryflow.py` + `fixtures/joineryflow-hartwood.jsonl` (21 lines, 15733 bytes) in PR #9; see "Step 0" below |
-| 6 | `mapping/joineryflow.yaml` v2 | [ ] | not started |
-| 7 | `ingest/joineryflow.py` (read + build) | [ ] | not started |
-| 8 | `apply()` + import CLI | [ ] | not started |
-| 9 | Contract, unit tests, CI step, progress docs | [ ] | not started |
+| 6 | `mapping/joineryflow.yaml` v2 | [x] | PR #10 merged as `1b16c5d`; `scripts/check_joineryflow_mapping.py` verifies nine tables, 18 rows, 10 derived measures, 13 prices, 2 CV codes, 17 families; see "Step 1" |
+| 7 | `ingest/joineryflow.py` (read + build) | [x] | PR #11 merged as `a998165`; `python -m ingest.joineryflow --dry-run --json` reports 18 rows, 18 OK, 0 errors, 10 derived measures, 17 families and no contract mismatches; see "Step 2" |
+| 8 | `apply()` + import CLI | [x] | PR #12 merged as `191cb42`; fresh PostgreSQL 16 import `new=18`, re-import `new=0 updated=18`, 0 errors; see "Step 3" |
+| 9 | Contract, integration tests and CI step | [x] | PR #13 merged as `62af24f`; `scripts/etl_contract.sql` green, `tests/test_etl.py` 6/6 with `ML_ETL_DSN`, dedicated `etl` CI job green with all four checks; see "Step 4" |
+| 10 | Docs: this log, README status, `docs/data-model-v2.md` 5/6 | [~] | `check_english.py` clean and the full suite green locally (159 passed, 4 skipped); PR to be opened (design section 13) |
 
-PR #9 is the first implementation PR and contains exactly two files (the exporter and the snapshot).
-No schema, importer, mapping, CI or README change is in it. PR #8 (this log) stays documentation-only.
-The design document itself is unchanged (decision D1).
+PR #9 was the first implementation PR: exactly two files (the exporter and the snapshot), with no
+schema, importer, mapping, CI or README change. PR #8 (this log) was documentation-only. Steps 1-4
+followed as PRs #10-#13, all merged into `master` (currently `62af24f`). The design document itself
+is unchanged (decision D1); the differences between its prose and the delivered contract are
+recorded in "Implementation decisions" below rather than edited into the design.
 
 ## Source measurement
 
@@ -126,6 +129,32 @@ Confirmed on 2026-11-08 in answer to the "next step" questions:
   and `README.md`. It should be merged before the ETL CI step is added, to avoid a conflict. Step 0
   does not touch either file, so it does not depend on that merge.
 
+## Implementation decisions (after the design was frozen)
+
+Recorded here under D1; `etl-joineryflow.md` is not edited.
+
+* **D7 JSONL is a byte-level contract on Windows.** The global `core.autocrlf=true` checkout
+  rewrote `fixtures/joineryflow-hartwood.jsonl` to CRLF, changing it from 15733 to 15754 bytes and
+  breaking acceptance criterion 1. `.gitattributes` now marks `*.jsonl` as `-text` (no EOL
+  conversion at all); `text eol=lf` alone was not sufficient. Both tracked JSONL files were
+  restored to LF. PR #10.
+* **D8 Mapping rules follow the real column names.** Per audit finding 3, the family-key and
+  supplier rules use the columns the snapshot actually carries; `custom_made.vendor` was added to
+  the supplier fallback chain (the only populated supplier text on that row), and the
+  `vendors.name via default_supplier_id` branch was dropped because an importer reading only the
+  snapshot cannot resolve a table that is not exported. PR #10.
+* **D9 The CI ETL check is a separate job, not a step in `api`.** Design section 10.2 asks for a
+  step in the existing `api` job, but its verification demands a fresh database while every
+  `api`-job database also carries the evaluation corpus and the supplier demo. The new `etl` job
+  uses its own `postgres:16` service, `POSTGRES_DB=ml_etl` and `ML_ETL_DSN` (deliberately not
+  `ML_DSN`), so no shared pytest run can assert ETL counts against a populated catalogue. PR #13.
+* **D10 Three prose numbers are read as the contract states them.** 13 prices, not 14 (D2);
+  11 `thickness_mm` measures in total, of which 10 are derived (`source_ref` ends in `#size`) and
+  one comes from a populated column; and `rev` stays 1 after a re-import although `sync_seq` may
+  advance on the 11 rows carrying a measure (`ml_child_touch` bumps the parent cursor, but
+  `ml_material_before` sees no meaningful parent change). `scripts/etl_contract.sql` asserts all
+  three explicitly. PR #13.
+
 ## Step 0: exporter and committed snapshot (PR #9)
 
 Files: `scripts/export_joineryflow.py` (303 lines) and
@@ -166,20 +195,116 @@ Additional preflight measurements recorded for steps 1-2:
 * `synonyms` is a populated `text[]` on board and hardware rows, so the `Draft.synonyms`
   extension is exercised by real data.
 
+## Step 1: executable mapping v2 (PR #10)
+
+Files: `.gitattributes`, `mapping/joineryflow.yaml` (rewritten as `version: 2`),
+`scripts/check_joineryflow_mapping.py`.
+
+Verification:
+
+* `python scripts/check_joineryflow_mapping.py`: all six non-empty source tables verified against
+  the snapshot columns (10/1/4/1/1/1 rows, 34/39/24/23/23/26 known columns); the three empty
+  tables are checked as `known_columns`. Measured: 18 rows, 0 archived, 6 categories, 10 derived
+  measures, 13 prices, 2 CV codes, 17 families, 30 identifier values, 0 collisions.
+* The mapping resolves every table in design section 7, uses real column names (D8), keeps
+  `equipment_hire.rate` in `attributes` (D2), imports both `cv_material_mapping` rows as
+  `cv_code` identifiers (D3), and declares `import_contract.expected` so the harness and the
+  static validator assert the same numbers.
+* JSONL byte contract: `git check-attr text -- fixtures/joineryflow-hartwood.jsonl` reports
+  `unset`, the file is LF, 15733 bytes, 0 CRLF (D7). `.venv/` was prepared with
+  `api/requirements.txt` and `ingest/requirements.txt`.
+* `check_english.py`, `compileall`, the schema JSON, `check_mappings.py` and the 40 pre-existing
+  unit tests all green at merge; CI `static` job green.
+
+## Step 2: pure reader and draft builder (PR #11)
+
+Files: `ingest/joineryflow.py`, `tests/test_unit_joineryflow.py`, and `ingest/importer.py`
+(`Draft` gains optional UMR columns; `apply()` writes them through a whitelist).
+
+Verification:
+
+* `python -m ingest.joineryflow --dry-run --json`: 18 rows, 18 OK, 0 errors, 10 derived thickness
+  measures, 17 single-member families, 13 prices, 2 CV identifiers, `source_payload` on all 18.
+  `check_contract()` finds no mismatch with `import_contract.expected` (exit 0). `--json` without
+  a path prints to stdout; with a path it writes a file; a contract mismatch exits non-zero.
+  `--dry-run` is an explicit no-op flag.
+* `read_snapshot` rejects a missing or invalid header, unknown `kind`, duplicate primary keys,
+  `image_blob`, blank lines and invalid JSON; `build_drafts` is a pure function (no database, no
+  file writes); `--include-archived` is exercised with synthetic rows (D5).
+* `apply()` optional columns are whitelisted and cast as `%s::jsonb` / `%s::text[]`; supplier
+  importers are unaffected because every new `Draft` field is defaulted.
+* 80 pure-Python unit tests green at merge; both mapping validators, `check_english.py`,
+  `compileall` and the JSONL byte contract green.
+
+## Step 3: import CLI (PR #12)
+
+Files: `scripts/import_joineryflow.py`, `tests/test_unit_import_joineryflow.py`.
+
+Verification:
+
+* Against a fresh PostgreSQL 16 database loaded with `material.sql`, `search.sql` and `seed.sql`:
+  first import `new=18 updated=0 skipped=0`, 0 errors, `contract.ok = true`; second import
+  `new=0 updated=18 skipped=0`, 0 errors. The database holds 18 materials, 13 prices, 11
+  measures, 17 families and 48 identifiers.
+* `material_search('18mm')` returns 2; category spread `board:10 hardware:4 benchtop:1
+  appliance:1 custom:1 hire:1`; all 13 prices carry `source_system='joineryflow'`; all 18 rows
+  have a non-empty `source_payload`; 2 `cv_code` identifiers; 0 archived.
+* The CLI is one transaction for the whole file, aborts before connecting on row errors, rolls
+  back on a database error, and supports `--dry-run`, `--limit`, `--include-archived`,
+  `--json [FILE]`, `--quiet` and an injectable `connect` for tests. 13 new unit tests (93 total).
+* The branch was rebased with `git rebase --onto master feat/etl-step2-ingest feat/etl-step3-cli`
+  after PR #11 merged, so PR #12 carried exactly one commit.
+
+## Step 4: contract SQL, integration tests and CI (PR #13)
+
+Files: `scripts/etl_contract.sql`, `tests/test_etl.py`, `.github/workflows/ci.yml` (new `etl`
+job).
+
+Verification:
+
+* `psql -v ON_ERROR_STOP=1 -f scripts/etl_contract.sql` on a fresh imported database prints
+  `etl contract OK: 18 materials, 6 categories, 10 derived measures, 13 prices, 17 families`.
+  The DO block asserts active/archived counts, the category spread, the browse total, the
+  10-derived + 1-column measure split and the derived values, mm/cm/m measure windows, family
+  axis keys, 13 hire-free prices, the hire `rate` living in `attributes`, `source_payload`, CV
+  codes, `rev = 1`, 18 revisions and no parent UPDATE events.
+* `python -m pytest -q tests/test_etl.py --noconftest`: 2 passed, 4 skipped without
+  `ML_ETL_DSN`; 6 passed with it. The full suite on the CI `api` recipe is 159 passed, 4 skipped.
+* The CI `etl` job builds `ml_etl` from scratch, asserts `new=18` then `new=0 updated=18`, runs
+  the SQL contract and the ETL pytest file. PR #13 had all four checks green
+  (`English-only and syntax`, `Schema, demo and import pipeline`, `Read API, contract and search
+  evaluation`, `Joineryflow ETL contract`), mergeable state `clean`.
+* The local PostgreSQL 16 environment is a Docker container `ml-postgres16` (`postgres:16`,
+  volume `ml-pg16-data`, `127.0.0.1:5432`) with
+  `ML_DSN=postgresql://postgres:postgres@127.0.0.1:5432/ml`.
+
 ## Constraints carried into implementation
 
+These were the rules agreed before step 1. All five are now satisfied and verified by the steps
+above.
+
 * The importer reads one committed snapshot and nothing else; no CI step may connect to
-  joineryflow.
+  joineryflow. Confirmed: the `etl` job installs only `pyyaml`, `psycopg[binary]` and `pytest`,
+  and runs `scripts/import_joineryflow.py` against `fixtures/joineryflow-hartwood.jsonl`.
 * Default import into a fresh database: 18 materials, 0 archived, 6 categories, 17 single-member
   families, 10 derived `thickness_mm` measures (each with `source_ref` ending `#size` and a
-  warning), 13 price rows, 2 `cv_code` identifiers, `source_payload` on all 18.
-* A second import must report `new = 0`.
+  warning), 13 price rows, 2 `cv_code` identifiers, `source_payload` on all 18. Confirmed by
+  `scripts/etl_contract.sql`; the database also has one extra `thickness_mm` measure from a real
+  column (11 total, see D10).
+* A second import must report `new = 0`. Confirmed: `new=0 updated=18 skipped=0` in CI and locally.
 * Any implementation PR must keep `pytest`, `scripts/check_english.py`, `api_contract.sql` and
-  `merge_contract.sql` green.
-* PR #7 (25HAW import) should be merged before the ETL CI step (D6).
+  `merge_contract.sql` green. Confirmed on PRs #10-#13: every CI job green on every PR (three
+  jobs before the `etl` job existed, four afterwards).
+* PR #7 (25HAW import) should be merged before the ETL CI step (D6). Satisfied: PR #7 merged as
+  `e974c07` before PR #13 touched `.github/workflows/ci.yml`; no conflict occurred.
 
 ## Open
 
-Nothing blocking. Step 0 is complete in PR #9; steps 1-5 (mapping v2, pure importer functions,
-`apply()` + CLI, contract/tests/CI, docs) are queued. The project owner has authorised
-implementation to proceed step by step (D4).
+Nothing blocking. Steps 0-4 of design section 13 are complete and merged (PRs #9-#13); `master`
+is at `62af24f`. Step 5 (this log, README status and `docs/data-model-v2.md` 5/6) is the
+remaining delivery item and is done when `check_english.py` is clean and its PR is opened.
+
+Out of scope for this task, and still open for the project as a whole: the write-back executor
+(T3, the approved `material_change_request` has no PATCH executor yet), live incremental sync
+from joineryflow, ETIM/eCl@ss codes and EPD collection. See design section 12 for the non-goals
+list.
