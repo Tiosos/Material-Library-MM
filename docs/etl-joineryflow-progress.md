@@ -21,13 +21,14 @@ Status legend: `[ ]` planned, `[~]` in progress, `[x]` done and verified, `[!]` 
 | 7 | `ingest/joineryflow.py` (read + build) | [x] | PR #11 merged as `a998165`; `python -m ingest.joineryflow --dry-run --json` reports 18 rows, 18 OK, 0 errors, 10 derived measures, 17 families and no contract mismatches; see "Step 2" |
 | 8 | `apply()` + import CLI | [x] | PR #12 merged as `191cb42`; fresh PostgreSQL 16 import `new=18`, re-import `new=0 updated=18`, 0 errors; see "Step 3" |
 | 9 | Contract, integration tests and CI step | [x] | PR #13 merged as `62af24f`; `scripts/etl_contract.sql` green, `tests/test_etl.py` 6/6 with `ML_ETL_DSN`, dedicated `etl` CI job green with all four checks; see "Step 4" |
-| 10 | Docs: this log, README status, `docs/data-model-v2.md` 5/6 | [~] | `check_english.py` clean and the full suite green locally (159 passed, 4 skipped); PR to be opened (design section 13) |
+| 10 | Docs: this log, README status, `docs/data-model-v2.md` 5/6 | [x] | PR #14; `check_english.py` clean, full suite green locally (159 passed, 4 skipped), relative doc links intact, JSONL byte contract intact; design section 13 |
 
 PR #9 was the first implementation PR: exactly two files (the exporter and the snapshot), with no
 schema, importer, mapping, CI or README change. PR #8 (this log) was documentation-only. Steps 1-4
-followed as PRs #10-#13, all merged into `master` (currently `62af24f`). The design document itself
-is unchanged (decision D1); the differences between its prose and the delivered contract are
-recorded in "Implementation decisions" below rather than edited into the design.
+followed as PRs #10-#13, all merged into `master`; step 5 closes the delivery plan in PR #14. The
+design document itself is unchanged (decision D1); the differences between its prose and the
+delivered contract are recorded in "Implementation decisions" below rather than edited into the
+design.
 
 ## Source measurement
 
@@ -300,9 +301,10 @@ above.
 
 ## Open
 
-Nothing blocking. Steps 0-4 of design section 13 are complete and merged (PRs #9-#13); `master`
-is at `62af24f`. Step 5 (this log, README status and `docs/data-model-v2.md` 5/6) is the
-remaining delivery item and is done when `check_english.py` is clean and its PR is opened.
+Nothing blocking. All five delivery steps of design section 13 are complete: steps 0-4 were merged
+as PRs #9-#13, and step 5 (this log, README status and `docs/data-model-v2.md` 5/6) is delivered
+in PR #14. `check_english.py` is clean, the full suite is green, and the ETL contract runs in CI
+on every subsequent PR.
 
 Out of scope for this task, and still open for the project as a whole: the write-back executor
 (T3, the approved `material_change_request` has no PATCH executor yet), live incremental sync
