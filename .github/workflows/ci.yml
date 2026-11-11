@@ -211,9 +211,11 @@ jobs:
       # catalogue, and the HTTP tests exercise both at once (docs/api-v1.md 9).
       - name: Prepare databases
         run: |
+          # writeback.sql follows seed.sql: material_writeback_catalog references
+          # the material_category rows that seed.sql inserts (docs/t3-writeback.md 5).
           for db in ml_api ml_fixture ml_blum ml_merge; do
             createdb "$db"
-            psql -q -v ON_ERROR_STOP=1 -d "$db"               -f schema/material.sql -f schema/search.sql -f schema/api.sql -f schema/merge.sql               -f schema/seed.sql
+            psql -q -v ON_ERROR_STOP=1 -d "$db"               -f schema/material.sql -f schema/search.sql -f schema/api.sql -f schema/merge.sql               -f schema/seed.sql -f schema/writeback.sql
           done
           psql -q -v ON_ERROR_STOP=1 -d ml_fixture -f eval/fixture.sql
           psql -q -v ON_ERROR_STOP=1 -d ml_api -f eval/fixture.sql
@@ -349,3 +351,63 @@ jobs:
       # job installs no API dependencies, so load test_etl.py without it.
       - name: ETL integration tests
         run: python -m pytest -q tests/test_etl.py --noconftest
+
+  # A fifth job: write-back also needs a fresh database, and CI must never
+  # egress to joineryflow. tests/test_writeback.py starts a fake http.server on
+  # 127.0.0.1 with an ephemeral port; no ML_JF_* credential is set here.
+  writeback:
+    name: Write-back state machine and executor
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ml_writeback
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      PGHOST: 127.0.0.1
+      PGUSER: postgres
+      PGDATABASE: ml_writeback
+      PGPASSWORD: postgres
+      ML_WRITEBACK_DSN: postgresql://postgres:postgres@127.0.0.1:5432/ml_writeback
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install write-back dependencies
+        run: pip install --quiet pyyaml "psycopg[binary]" pytest
+
+      - name: Load schema, reference data and the write-back state machine
+        run: |
+          psql -v ON_ERROR_STOP=1 -q \
+            -f schema/material.sql -f schema/search.sql -f schema/seed.sql -f schema/writeback.sql
+
+      - name: Import the committed snapshot
+        run: |
+          python scripts/import_joineryflow.py --dsn "$ML_WRITEBACK_DSN" --json /tmp/wb_import.json
+          python - <<'PY'
+          import json
+          report = json.load(open("/tmp/wb_import.json", encoding="utf-8"))
+          assert report["contract"]["ok"] is True, report["contract"]
+          assert report["stats"]["new"] == 18, report["stats"]
+          print("snapshot import:", report["stats"])
+          PY
+
+      - name: SQL contract (write-back transitions)
+        run: psql -q -v ON_ERROR_STOP=1 -d ml_writeback -f scripts/writeback_contract.sql
+
+      # conftest.py imports the FastAPI app for the HTTP suite; this job installs
+      # no API dependencies, so load test_writeback.py without it. The fake
+      # upstream is started inside the test process on 127.0.0.1.
+      - name: Write-back integration tests
+        run: python -m pytest -q tests/test_writeback.py --noconftest
