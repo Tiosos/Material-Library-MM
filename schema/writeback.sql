@@ -13,6 +13,12 @@
 -- human retry. Together they close the state machine in docs/t3-writeback.md
 -- section 6; the executor in step 3 only transports the resulting plans.
 --
+-- T3 x T2 consistency (docs section 6.1): every approval transition and the
+-- plan re-check material.status, so a merge that supersedes a row turns its
+-- in-flight requests into material_inactive instead of patching a tombstone.
+-- The other half of the rule lives in material_merge_preview(), which refuses
+-- to merge either side of a pair while a pending or approved request is open.
+--
 -- Conventions copied from schema/merge.sql: caller mistakes raise SQLSTATE
 -- 22023 (the HTTP edge maps them to 400 bad_request); business outcomes come
 -- back as {ok, code} so the edge can map them to 404/409 without parsing
@@ -136,8 +142,11 @@ COMMENT ON FUNCTION ml_writeback_current_values(text, jsonb) IS
 -- material_change_request_submit - file a diff request, before computed here
 -- ---------------------------------------------------------------------------
 -- The caller sends only {path, after}; `before` is always read from the live
--- row, so a caller cannot forge it (docs section 7). Structural caller
--- mistakes raise 22023; semantic rejections return {ok, code}:
+-- row, so a caller cannot forge it (docs section 7). Values are also checked
+-- against what the master record can store - the unit foreign key, the
+-- numeric(14,4) and integer ranges - because settle writes them home (docs
+-- 6.2). Structural caller mistakes raise 22023; semantic rejections return
+-- {ok, code}:
 --   not_found       unknown material_uid
 --   conflict        material is archived or superseded
 --   forbidden_path  path outside the allowlist, named in the response
@@ -198,7 +207,9 @@ BEGIN
                 USING ERRCODE = '22023';
         END IF;
         v_path  := btrim(v_item ->> 'path');
-        v_after := v_item -> 'after';
+        -- JSON null means "clear this field"; normalise it to SQL NULL so
+        -- every type rule below reads its own "or null" literally.
+        v_after := nullif(v_item -> 'after', 'null'::jsonb);
         IF v_path = ANY (v_paths) THEN
             RAISE EXCEPTION 'duplicate path in diffs: %', v_path USING ERRCODE = '22023';
         END IF;
@@ -224,7 +235,8 @@ BEGIN
                 RAISE EXCEPTION 'attributes.% must be a scalar or null', v_path
                     USING ERRCODE = '22023';
             END IF;
-            v_before := v_row.attributes -> regexp_replace(v_path, '^attributes\.', '');
+            v_before := nullif(v_row.attributes -> regexp_replace(v_path, '^attributes\.', ''),
+                               'null'::jsonb);
         ELSE
             v_before := NULL;
             v_keys := NULL;
@@ -243,15 +255,26 @@ BEGIN
                 IF v_after IS NOT NULL AND jsonb_typeof(v_after) <> 'string' THEN
                     RAISE EXCEPTION '% must be a string or null', v_path USING ERRCODE = '22023';
                 END IF;
+                -- unit is a foreign key to the local unit table: a value the
+                -- master record cannot store must not be approvable (docs 6.2)
+                IF v_path = 'unit' AND v_after IS NOT NULL
+                   AND NOT EXISTS (SELECT 1 FROM unit u WHERE u.code = v_after #>> '{}') THEN
+                    RAISE EXCEPTION 'unit % is not a known unit code', v_after #>> '{}'
+                        USING ERRCODE = '22023';
+                END IF;
             ELSIF v_path = 'unit_cost' THEN
                 IF v_after IS NOT NULL AND (jsonb_typeof(v_after) <> 'number'
-                                            OR (v_after #>> '{}')::numeric < 0) THEN
-                    RAISE EXCEPTION 'unit_cost must be a non-negative number or null' USING ERRCODE = '22023';
+                                            OR (v_after #>> '{}')::numeric < 0
+                                            OR (v_after #>> '{}')::numeric >= 10000000000) THEN
+                    RAISE EXCEPTION 'unit_cost must be between 0 and 10^10 or null'
+                        USING ERRCODE = '22023';
                 END IF;
             ELSIF v_path = 'lead_time_days' THEN
                 IF v_after IS NOT NULL AND (jsonb_typeof(v_after) <> 'number'
-                                            OR (v_after #>> '{}') !~ '^[0-9]+$') THEN
-                    RAISE EXCEPTION 'lead_time_days must be a non-negative integer or null' USING ERRCODE = '22023';
+                                            OR (v_after #>> '{}') !~ '^[0-9]+$'
+                                            OR (v_after #>> '{}')::numeric > 2147483647) THEN
+                    RAISE EXCEPTION 'lead_time_days must be a non-negative integer or null'
+                        USING ERRCODE = '22023';
                 END IF;
             ELSIF v_path = 'synonyms' THEN
                 IF v_after IS NOT NULL AND (jsonb_typeof(v_after) <> 'array'
@@ -259,7 +282,7 @@ BEGIN
                     RAISE EXCEPTION 'synonyms must be an array of non-empty strings or null' USING ERRCODE = '22023';
                 END IF;
             END IF;
-            v_before := to_jsonb(v_row) -> v_keys[1];
+            v_before := nullif(to_jsonb(v_row) -> v_keys[1], 'null'::jsonb);
         END IF;
 
         IF v_before IS NOT DISTINCT FROM v_after THEN
@@ -317,6 +340,12 @@ COMMENT ON FUNCTION material_change_request_submit(text, jsonb, text, text, text
 -- only accepted while the diffed fields still match the base fingerprint:
 -- approve on a stale base returns {ok:false, code:'stale_base'} (409 at the
 -- edge). Rejection skips the staleness check; rejecting stale data is safe.
+--
+-- T3 x T2: approval also requires a live material. A merge (T2) can supersede
+-- a row after the request was filed, and the tombstone keeps its old field
+-- values, so the base check alone would still pass. Approving there would send
+-- a PATCH to an upstream record another human just declared a duplicate, so
+-- the transition returns material_inactive instead (docs section 6.1).
 CREATE OR REPLACE FUNCTION material_change_request_decide(
     p_id       bigint,
     p_decision text,
@@ -325,10 +354,11 @@ CREATE OR REPLACE FUNCTION material_change_request_decide(
 ) RETURNS jsonb
 LANGUAGE plpgsql AS $$
 DECLARE
-    v_row     material_change_request%ROWTYPE;
-    v_actor   text;
-    v_status  text;
-    v_current jsonb;
+    v_row       material_change_request%ROWTYPE;
+    v_actor     text;
+    v_status    text;
+    v_current   jsonb;
+    v_matstatus text;
 BEGIN
     IF p_decision NOT IN ('approve', 'reject') THEN
         RAISE EXCEPTION 'decision must be approve or reject (got %)', p_decision
@@ -356,6 +386,15 @@ BEGIN
 
     v_status := CASE p_decision WHEN 'approve' THEN 'approved' ELSE 'rejected' END;
     IF p_decision = 'approve' THEN
+        -- the FK guarantees the material row exists; a merge or an archive may
+        -- still have moved it out of 'active' since submit (docs 6.1)
+        SELECT m.status INTO v_matstatus
+          FROM material m WHERE m.material_uid = v_row.material_uid;
+        IF v_matstatus IN ('archived', 'superseded') THEN
+            RETURN jsonb_build_object('ok', false, 'code', 'material_inactive', 'id', p_id,
+                                      'material_uid', v_row.material_uid,
+                                      'material_status', v_matstatus);
+        END IF;
         SELECT coalesce(jsonb_agg(d ->> 'path' ORDER BY ord), '[]'::jsonb)
           INTO v_current
           FROM jsonb_array_elements(v_row.diffs) WITH ORDINALITY AS t(d, ord);
@@ -415,7 +454,19 @@ BEGIN
         RETURN jsonb_build_object('ok', false, 'code', 'not_found', 'id', p_id);
     END IF;
     SELECT * INTO v_mat FROM material WHERE material_uid = v_row.material_uid;
-    IF NOT FOUND OR v_mat.source_system <> 'joineryflow'
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'invalid_target',
+                                  'id', p_id, 'source_id', NULL);
+    END IF;
+    -- T3 x T2: no plan for a tombstone. This is the guard the executor relies
+    -- on: --apply turns a non-ok plan into settle('failed', error=code) before
+    -- any HTTP call, so a merged-away material can never be patched upstream.
+    IF v_mat.status IN ('archived', 'superseded') THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'material_inactive',
+                                  'id', p_id, 'material_uid', v_mat.material_uid,
+                                  'material_status', v_mat.status);
+    END IF;
+    IF v_mat.source_system <> 'joineryflow'
        OR v_mat.source_id !~ '^[a-z_]+:[0-9]+$' THEN
         RETURN jsonb_build_object('ok', false, 'code', 'invalid_target',
                                   'id', p_id, 'source_id', v_mat.source_id);
@@ -621,6 +672,19 @@ COMMENT ON FUNCTION material_change_request_claim(integer, text, interval, bigin
 -- moved after approval the request becomes failed with error 'stale_base' even
 -- when the upstream already answered 2xx; the report calls that outcome
 -- 'applied_unverified' because the two systems may legitimately diverge.
+--
+-- T3 x T2: applied also re-checks material.status, for the merge that lands
+-- between plan() and this call. The 2xx may well be real, but it landed on a
+-- row T2 has just superseded, so it is recorded as failed / material_inactive
+-- and reported the same way as stale_base - a human decides (docs 6.1).
+--
+-- T3 x T3 (docs 6.2): a confirmed write is written home. The library is the
+-- source of truth, so the approved `after` values are applied to `material` in
+-- this transaction; the triggers turn that into one revision and one material
+-- event, and a later submit of the same diff returns no_change instead of
+-- filing it twice. A local write that fails (constraint, unknown unit, ...)
+-- does not lose the 2xx: the request becomes failed / local_write_failed and
+-- is reported as applied_unverified.
 CREATE OR REPLACE FUNCTION material_change_request_settle(
     p_id          bigint,
     p_outcome     text,
@@ -631,14 +695,22 @@ CREATE OR REPLACE FUNCTION material_change_request_settle(
 ) RETURNS jsonb
 LANGUAGE plpgsql AS $$
 DECLARE
-    v_row     material_change_request%ROWTYPE;
-    v_actor   text;
-    v_status  text := 'failed';
-    v_error   text;
-    v_outcome text;
-    v_paths   jsonb;
-    v_current jsonb;
-    v_stale   boolean := false;
+    v_row        material_change_request%ROWTYPE;
+    v_actor      text;
+    v_status     text := 'failed';
+    v_error      text;
+    v_outcome    text;
+    v_paths      jsonb;
+    v_current    jsonb;
+    v_matstatus  text;
+    v_unverified boolean := false;
+    v_diff       jsonb;
+    v_path       text;
+    v_after      jsonb;
+    v_col        text;
+    v_attrs      jsonb;
+    v_attrs_done boolean := false;
+    v_sets       text[] := '{}';
 BEGIN
     IF p_outcome IS NULL OR p_outcome NOT IN ('applied', 'failed', 'unknown') THEN
         RAISE EXCEPTION 'outcome must be applied, failed or unknown'
@@ -686,13 +758,76 @@ BEGIN
           INTO v_paths
           FROM jsonb_array_elements(v_row.diffs) WITH ORDINALITY AS t(d, ord);
         v_current := ml_writeback_current_values(v_row.material_uid, v_paths);
+        SELECT m.status, m.attributes INTO v_matstatus, v_attrs
+          FROM material m WHERE m.material_uid = v_row.material_uid;
         IF v_current IS DISTINCT FROM (v_row.base -> 'values') THEN
-            v_stale   := true;
+            v_unverified := true;
             v_error   := 'stale_base';
+            v_outcome := 'applied_unverified';
+        ELSIF v_matstatus IN ('archived', 'superseded') THEN
+            -- a merge landed while the PATCH was in flight: the upstream write
+            -- may well have succeeded, but it landed on a record T2 has just
+            -- declared a duplicate. Report it like stale_base: a human decides.
+            v_unverified := true;
+            v_error   := 'material_inactive';
             v_outcome := 'applied_unverified';
         ELSE
             v_status := 'applied';
             v_error  := NULL;
+            -- T3 x T3 (docs 6.2): the library is the source of truth, so a
+            -- confirmed write is written home in the same transaction. The
+            -- triggers turn this into one revision and one material event.
+            -- A local write that fails must not lose the 2xx: it degrades to
+            -- applied_unverified instead of raising after the PATCH landed.
+            BEGIN
+                v_attrs := coalesce(v_attrs, '{}'::jsonb);
+                FOR v_diff IN SELECT * FROM jsonb_array_elements(v_row.diffs) LOOP
+                    v_path  := v_diff ->> 'path';
+                    v_after := CASE WHEN jsonb_typeof(v_diff -> 'after') = 'null'
+                                    THEN NULL ELSE v_diff -> 'after' END;
+                    IF v_path LIKE 'attributes.%' THEN
+                        v_attrs := jsonb_set(
+                            v_attrs,
+                            ARRAY[regexp_replace(v_path, '^attributes\.', '')],
+                            coalesce(v_after, 'null'::jsonb), true);
+                        v_attrs_done := true;
+                    ELSE
+                        SELECT f.material_column INTO v_col
+                          FROM material_writeback_field f WHERE f.umr_path = v_path;
+                        IF v_col IS NULL THEN
+                            RAISE EXCEPTION 'no material column for path %', v_path;
+                        END IF;
+                        IF v_col = 'synonyms' THEN
+                            -- synonyms is NOT NULL: a null after means "clear"
+                            v_sets := v_sets || CASE WHEN v_after IS NULL
+                                THEN 'synonyms = ''{}''::text[]'
+                                ELSE format('synonyms = ARRAY(SELECT jsonb_array_elements_text(%L::jsonb))',
+                                            v_after)
+                                END;
+                        ELSIF v_col = 'unit_cost' THEN
+                            v_sets := v_sets || format('unit_cost = %s::numeric',
+                                                       quote_nullable(v_after #>> '{}'));
+                        ELSIF v_col = 'lead_time_days' THEN
+                            v_sets := v_sets || format('lead_time_days = %s::integer',
+                                                       quote_nullable(v_after #>> '{}'));
+                        ELSE
+                            v_sets := v_sets || format('%I = %L', v_col, v_after #>> '{}');
+                        END IF;
+                    END IF;
+                END LOOP;
+                IF v_attrs_done THEN
+                    v_sets := v_sets || format('attributes = %L::jsonb', v_attrs);
+                END IF;
+                IF cardinality(v_sets) > 0 THEN
+                    EXECUTE 'UPDATE material SET ' || array_to_string(v_sets, ', ')
+                         || ' WHERE material_uid = $1' USING v_row.material_uid;
+                END IF;
+            EXCEPTION WHEN others THEN
+                v_status     := 'failed';
+                v_error      := 'local_write_failed';
+                v_outcome    := 'applied_unverified';
+                v_unverified := true;
+            END;
         END IF;
     ELSIF p_outcome = 'unknown' THEN
         v_error := 'uncertain_outcome';
@@ -719,18 +854,20 @@ BEGIN
                                'actor', v_actor, 'reason', p_error,
                                'outcome', v_outcome,
                                'status_code', p_status_code,
-                               'stale_base', v_stale),
+                               'unverified', v_unverified,
+                               'error', v_error,
+                               'material_status', v_matstatus),
             v_actor);
 
     RETURN jsonb_build_object('ok', true, 'code', v_status,
                               'outcome', v_outcome, 'id', p_id,
                               'status', v_status, 'error', v_error,
                               'last_status', p_status_code,
-                              'applied_unverified', v_stale);
+                              'applied_unverified', v_unverified);
 END $$;
 
 COMMENT ON FUNCTION material_change_request_settle(bigint, text, integer, text, text, interval) IS
-    'Settle a claimed request: applied, failed or unknown; re-checks base before applied and writes one event.';
+    'Settle a claimed request: applied, failed or unknown; re-checks base and material status before applied and writes one event.';
 
 -- ---------------------------------------------------------------------------
 -- material_change_request_retry - explicit human retry of a known failure
@@ -747,10 +884,11 @@ CREATE OR REPLACE FUNCTION material_change_request_retry(
 ) RETURNS jsonb
 LANGUAGE plpgsql AS $$
 DECLARE
-    v_row     material_change_request%ROWTYPE;
-    v_actor   text;
-    v_paths   jsonb;
-    v_current jsonb;
+    v_row       material_change_request%ROWTYPE;
+    v_actor     text;
+    v_paths     jsonb;
+    v_current   jsonb;
+    v_matstatus text;
 BEGIN
     IF length(coalesce(p_reason, '')) > 500 THEN
         RAISE EXCEPTION 'reason must be at most 500 characters' USING ERRCODE = '22023';
@@ -775,6 +913,15 @@ BEGIN
         RETURN jsonb_build_object('ok', false, 'code', 'self_approval',
                                   'id', p_id, 'requested_by', v_row.requested_by,
                                   'decided_by', v_row.decided_by);
+    END IF;
+    -- retry is an approval transition too, so it carries the same T3 x T2
+    -- guard: a retried request must not be approved onto a tombstone
+    SELECT m.status INTO v_matstatus
+      FROM material m WHERE m.material_uid = v_row.material_uid;
+    IF v_matstatus IN ('archived', 'superseded') THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'material_inactive', 'id', p_id,
+                                  'material_uid', v_row.material_uid,
+                                  'material_status', v_matstatus);
     END IF;
 
     SELECT coalesce(jsonb_agg(d ->> 'path' ORDER BY ord), '[]'::jsonb)

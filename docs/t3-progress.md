@@ -18,6 +18,8 @@ Status legend: `[ ]` planned, `[~]` in progress, `[x]` done and verified, `[!]` 
 | 3 | `scripts/apply_change_requests.py`, fake upstream and `tests/test_writeback.py` | [x] | `18 passed` with `ML_WRITEBACK_DSN`, `8 passed / 10 skipped` without; full suite `167 passed, 14 skipped`; see "Step 3" |
 | 4 | `scripts/writeback_contract.sql`, five HTTP review routes and the `writeback` CI job | [x] | SQL contract green with zero residual rows; 11 HTTP route tests; the three existing api SQL contracts still green; full suite `178 passed, 14 skipped` across five CI jobs; see "Step 4" |
 | 5 | Docs: this log, README status and `docs/data-model-v2.md` 5/6 | [x] | PR #16; `check_english.py` clean, full suite green locally (`178 passed, 14 skipped`), 64 relative doc links intact, JSONL byte contract intact; design section 14 |
+| 6 | T3 x T2 consistency: merge blocker plus the decide / plan / settle / retry status guards, contract assertions and integration cases (design 6.1) | [x] | Contract green on a fresh PostgreSQL 16 database (both load orders), `tests/test_writeback.py` 21/21 with `ML_WRITEBACK_DSN`, `tests/test_writeback_api.py` 12/12, full suite `179 passed, 17 skipped`, api and merge contracts still green; see "Follow-up 1" |
+| 7 | T3 x T3 loop: `settle()` writes the diff into `material`, submit validates storable values, JSON null clears a field, the importer refuses a stale snapshot (design 6.2, D18/D19) | [x] | Contract green with the new assertions; `tests/test_writeback.py` 22/22; full suite `179 passed, 18 skipped`; api and merge contracts green on a rebuilt database; see "Follow-up 2" |
 
 Steps 0-1 were merged in **PR #15** (merge commit `cbf1b5f`, 2026-11-11T22:01:22Z). Steps 2-5
 were implemented and verified on top of that commit and are delivered together in **PR #16**.
@@ -179,6 +181,105 @@ merge tests mutate `ml_api` duplicate pairs) produced a false failure, and an in
 test left nine disposable material rows behind until the fixture was made self-healing. Running
 the steps in CI order and cleaning the rows made both disappear.
 
+## Follow-up 1: T3 x T2 consistency
+
+The first gap found after T3 closed: T2 and T3 meet at `material_uid` and nothing guarded the
+meeting. `material_merge()` supersedes the loser (T2 D4) and the tombstone keeps its field values,
+so T3's field-level `base` fingerprint still matched. A merge that landed after `submit()` let
+`decide()` approve and `plan()` build a PATCH against an upstream row another human had just
+declared a duplicate. `submit()` refuses a tombstone, but only at submit time.
+
+Neither shortcut was taken. Re-pointing the request at the keeper would change `{mid}`, hence the
+upstream record the approver saw; auto-failing requests inside `material_merge()` would add a
+`pending -> failed` edge that D13 keeps out of the five-state CHECK. The rule is therefore split
+(design 6.1, decision D17):
+
+| # | Function | Guard |
+| --- | --- | --- |
+| 1 | `material_merge_preview()` (T2) | a `pending`/`approved` request on either side adds the blocker `open_change_request` and lists the ids in `blocking_requests`; `material_merge()` returns 409 `conflict` |
+| 2 | `material_change_request_decide()` | `approve` on an `archived`/`superseded` material returns `material_inactive` (409 at the edge); `reject` still works |
+| 3 | `material_change_request_plan()` | same check before target resolution; `--apply` already turns a non-ok plan into `settle('failed', error=code)` with no HTTP call |
+| 4 | `material_change_request_settle()` / `retry()` | a 2xx on a row merged away mid-flight becomes `failed / material_inactive` and is reported as `applied_unverified`; `retry()` refuses the tombstone |
+
+`claim()` is deliberately not a guard: skipping a tombstone there would leave an `approved` row
+nobody can see. Claiming it and letting `plan()` refuse ends it as `failed / material_inactive`,
+which shows up in the review queue.
+
+Files: `schema/writeback.sql` (four checks), `schema/merge.sql` (blocker and `blocking_requests`),
+`api/main.py` (`material_inactive` -> 409), `scripts/writeback_contract.sql` (section 11),
+`tests/test_writeback.py` (three cases), `tests/test_writeback_api.py` (one case), design 6.1/9/12/15.
+
+Verification on a fresh PostgreSQL 16 database (postgres:16 in Docker, 127.0.0.1:5432):
+
+* `scripts/writeback_contract.sql` printed `writeback contract OK` on both load orders - the api
+  job's (`material, search, api, merge, seed, writeback` plus `eval/fixture.sql`) and the
+  writeback job's. The contract rolls back, so it leaves zero request and event rows.
+* `tests/test_writeback.py` 21/21 with `ML_WRITEBACK_DSN` (eight unit + thirteen integration), on
+  a database shaped exactly like the CI `writeback` job.
+* `tests/test_writeback_api.py` 12/12 and the full suite `179 passed, 17 skipped, 200 subtests` on
+  a database shaped like the CI `api` job (`api_contract.sql` and `merge_contract.sql` green
+  before it).
+* `check_english.py`, `compileall`, `check_mappings.py`, `check_joineryflow_mapping.py` and the 93
+  static unit tests are clean; the JSONL byte contract is untouched.
+
+One finding the run produced, which static checks could not: the contract now calls
+`material_merge_preview()`, and the `writeback` CI job did not load `schema/merge.sql`. The
+minimal-order database failed with `function material_merge_preview(text, text) does not exist`,
+so the job now loads `material, search, merge, seed, writeback` and design section 11 records why.
+The `api` job already loaded `merge.sql`, which is why only the `writeback` job needed the change.
+
+## Follow-up 2: T3 x T3, the write never reached the master record
+
+Found while closing Follow-up 1, by asking what `applied` actually means. Measured on the fresh
+database, in a transaction that was rolled back:
+
+```
+status=applied  before=3450.0000  requested_after=3460.0000  live_after_settle=3450.0000
+re-submit after applied -> code=submitted  id=50
+```
+
+`settle()` recorded the outcome and wrote an event, but nothing ever wrote the approved values into
+`material`. The consequences were wider than one stale field: detail, export and search kept
+returning the old value until the next snapshot; `base` compared the local row with itself, so the
+staleness guard could not see upstream drift; and the same diff could be filed and PATCHed again,
+because `submit()` reads `before` from that stale value and `open_request` only covers `pending`
+and `approved`.
+
+[design-v1](design-v1.md) line 311 left master-data ownership open; section 0 of the T3 design had
+already asserted "Material Library stays the single source of truth". D18 makes the code agree:
+`settle('applied')` applies the diffed paths to `material` in the same transaction, after the base
+and status checks, and the existing triggers produce one revision and one event. A local write that
+fails degrades to `failed / local_write_failed` reported as `applied_unverified` - a 2xx is never
+lost because the local row could not take the value.
+
+Two supporting changes were needed:
+
+* **`submit()` now validates what the master row can store** - `unit` must exist in `unit`
+  (a foreign key), `unit_cost` must fit `numeric(14,4)`, `lead_time_days` must fit `integer` - so
+  the local write cannot fail after the PATCH has already landed.
+* **JSON null was unusable.** Every type rule said "or null" but tested `jsonb_typeof(...) <> 'string'`,
+  which is true for JSON null, so `after: null` was rejected for every path; clearing a field was
+  impossible. `submit()` normalises JSON null to SQL NULL before the rules, which also makes
+  `no_change` compare two nulls correctly. `synonyms` is `NOT NULL`, so clearing it writes `{}`.
+
+D19 closes the other direction: the importer copies snapshot values over the master row, so a
+snapshot exported before an apply would silently revert it. `scripts/import_joineryflow.py` now
+refuses to import when any `applied` request has `applied_at > snapshot.exported_at`, naming the
+ids and the first `source_id`, and writes nothing.
+
+Verification on a fresh PostgreSQL 16 database (postgres:16 in Docker, 127.0.0.1:5432):
+
+* `scripts/writeback_contract.sql` printed `writeback contract OK` with the new section 13: the
+  happy path's `999.5` is in `material`, `rev` moved, the same diff returns `no_change`, a stale
+  settle and a superseded-material settle leave the row untouched, and `after: null` writes NULL.
+* `tests/test_writeback.py` 22/22 with `ML_WRITEBACK_DSN`, including the new case where the
+  importer refuses the committed snapshot after an apply (`predates 1 applied write-back request`)
+  and the material count and value are unchanged.
+* Full suite `179 passed, 18 skipped, 200 subtests` on a rebuilt `api`-shaped database;
+  `api_contract.sql` and `merge_contract.sql` green in CI order before it.
+* `check_english.py`, `compileall`, `check_mappings.py`, `check_joineryflow_mapping.py` and the 93
+  static unit tests are clean; the JSONL byte contract is untouched.
+
 ## Constraints carried into implementation
 
 * SQL owns transitions, Python owns transport (design principle 1). Satisfied: all five
@@ -207,6 +308,21 @@ Nothing blocking. All five delivery steps of design section 14 are implemented a
 steps 0-1 are on `master` through PR #15, and steps 2-5 (including this log, README status and
 `docs/data-model-v2.md` 5/6) are delivered in PR #16. `check_english.py` is clean, the full suite
 is green, and the write-back SQL contract runs in CI on every subsequent PR.
+
+Follow-up 1 (T3 x T2 consistency, design 6.1) is implemented and verified on a fresh PostgreSQL 16
+database: the SQL contract is green on both load orders, `tests/test_writeback.py` reports 21/21
+with `ML_WRITEBACK_DSN`, and the full suite reports `179 passed, 17 skipped`. The README counts
+were refreshed in the same change.
+
+Follow-up 2 (T3 x T3, design 6.2, D18/D19) is also implemented and verified: `settle('applied')`
+writes the diff into `material`, `submit()` rejects values the master row cannot store, JSON null
+clears a field, and the importer refuses a snapshot that predates an applied request. Counts are
+now 22/22 write-back tests and `179 passed, 18 skipped`.
+
+Two items are deliberately left open and recorded in design section 16: who resolves
+`applied_unverified` (a `--verify` GET pass is the natural next step, but it needs the upstream's
+read shape), and how retention interacts with the D19 guard - purging `applied` rows re-opens the
+window in which a stale snapshot could revert a confirmed write.
 
 Still open for the project as a whole, and deliberately out of scope for T3: whether joineryflow
 honours `Idempotency-Key` (until confirmed, no retry depends on it), the exact form of the

@@ -205,6 +205,16 @@ def test_approve_refuses_a_stale_base(client: TestClient, conn, jf_uid: str):
     assert "base" in error["detail"] and "current" in error["detail"]
 
 
+def test_approve_refuses_a_merged_away_material(client: TestClient, conn, jf_uid: str):
+    """T3 x T2: a tombstone keeps its field values, so only the status check saves us."""
+    rid = _submit(client, jf_uid).json()["id"]
+    conn.execute("UPDATE material SET status='superseded' WHERE material_uid=%s", (jf_uid,))
+    error = assert_error(
+        client.post(f"/v1/change-requests/{rid}/approve", json={},
+                    headers={"X-Actor": "bob"}), 409, "conflict")
+    assert error["detail"]["material_status"] == "superseded"
+
+
 def test_reject_is_terminal(client: TestClient, jf_uid: str):
     rid = _submit(client, jf_uid).json()["id"]
     ok = client.post(f"/v1/change-requests/{rid}/reject", json={"reason": "no"},

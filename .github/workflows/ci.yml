@@ -389,8 +389,12 @@ jobs:
 
       - name: Load schema, reference data and the write-back state machine
         run: |
+          # merge.sql is needed by the T3 x T2 assertions in the contract: the
+          # merge preview is the half of the rule that blocks a merge while a
+          # request is open (docs/t3-writeback.md 6.1).
           psql -v ON_ERROR_STOP=1 -q \
-            -f schema/material.sql -f schema/search.sql -f schema/seed.sql -f schema/writeback.sql
+            -f schema/material.sql -f schema/search.sql -f schema/merge.sql \
+            -f schema/seed.sql -f schema/writeback.sql
 
       - name: Import the committed snapshot
         run: |

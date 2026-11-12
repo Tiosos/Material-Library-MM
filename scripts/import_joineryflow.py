@@ -43,6 +43,23 @@ from ingest.mapping import Mapping
 USAGE = 2
 FAILURE = 1
 
+# A snapshot older than a write-back that already landed would silently revert
+# it, because the importer copies source values over the master row. The check
+# is a hard error: re-export is cheap, losing an applied change is not.
+STALE_SNAPSHOT_SQL = """
+SELECT r.id, m.source_id, r.applied_at
+  FROM material_change_request r
+  JOIN material m ON m.material_uid = r.material_uid
+ WHERE r.status = 'applied'
+   AND r.applied_at IS NOT NULL
+   AND r.applied_at > %(exported_at)s::timestamptz
+ ORDER BY r.id
+"""
+
+
+class StaleSnapshotError(RuntimeError):
+    """The snapshot predates a write-back request that was already applied."""
+
 
 def make_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -78,6 +95,7 @@ def build_plan(args: argparse.Namespace) -> tuple[dict, list, Rules]:
     report.update({
         "snapshot": str(snapshot.path),
         "workspace": meta["workspace"],
+        "exported_at": snapshot.header.get("exported_at"),
         "source_rows": source_rows,
         "limit": args.limit,
         "include_archived": include_archived,
@@ -92,7 +110,27 @@ def build_plan(args: argparse.Namespace) -> tuple[dict, list, Rules]:
     return report, drafts, rules
 
 
-def execute(dsn: str, drafts: list, rules: Rules, *, connect=None) -> dict:
+def stale_snapshot_conflicts(conn, exported_at: str) -> list[tuple]:
+    """Applied write-backs that happened after the snapshot was exported."""
+    with conn.cursor() as cur:
+        cur.execute(STALE_SNAPSHOT_SQL, {"exported_at": exported_at})
+        return cur.fetchall()
+
+
+def _stale_message(exported_at: str, conflicts: list[tuple]) -> str:
+    ids = ", ".join(str(row[0]) for row in conflicts[:5])
+    more = "" if len(conflicts) <= 5 else f" (+{len(conflicts) - 5} more)"
+    first = conflicts[0][1]
+    return (
+        f"snapshot exported_at {exported_at} predates {len(conflicts)} applied "
+        f"write-back request(s) [{ids}{more}]; the first row is {first}. "
+        "Re-export the snapshot first: an older snapshot would overwrite a change "
+        "that was already applied upstream."
+    )
+
+
+def execute(dsn: str, drafts: list, rules: Rules, *, connect=None,
+            exported_at: str | None = None) -> dict:
     """One transaction for the whole file. ``connect`` is injectable for tests."""
     if connect is None:
         import psycopg
@@ -101,6 +139,10 @@ def execute(dsn: str, drafts: list, rules: Rules, *, connect=None) -> dict:
                        "source_system": rules.source_system, "defaults": {}})
     conn = connect(dsn)
     try:
+        if exported_at:
+            conflicts = stale_snapshot_conflicts(conn, exported_at)
+            if conflicts:
+                raise StaleSnapshotError(_stale_message(exported_at, conflicts))
         stats = apply_drafts(conn, drafts, mapping)
         conn.commit()
         return stats
@@ -124,7 +166,8 @@ def emit(report: dict, args: argparse.Namespace) -> None:
         print(payload, end="")
         return
 
-    status = "FAIL" if report["errors"] or report.get("database_error") else "OK"
+    status = ("FAIL" if report["errors"] or report.get("database_error")
+              or report.get("stale_snapshot") else "OK")
     mode = "dry-run" if args.dry_run else "applied"
     stats = report.get("stats") or {}
 
@@ -154,6 +197,8 @@ def emit(report: dict, args: argparse.Namespace) -> None:
         print(f"  - warning: {warning}")
     for row in report["error_rows"]:
         print(f"  - row {row['row']}: {', '.join(row['errors'])}")
+    if report.get("stale_snapshot"):
+        print(f"  - stale snapshot: {report['stale_snapshot']}")
     if report.get("database_error"):
         print(f"  - database: {report['database_error']}")
     if args.json_out:
@@ -179,13 +224,17 @@ def main(argv: list[str] | None = None, *, connect=None) -> int:
     # All-or-nothing: a single bad row aborts the batch before touching the DB.
     if not args.dry_run and not report["errors"]:
         try:
-            report["stats"] = execute(args.dsn, drafts, rules, connect=connect)
+            report["stats"] = execute(args.dsn, drafts, rules, connect=connect,
+                                      exported_at=report.get("exported_at"))
+        except StaleSnapshotError as exc:
+            report["stale_snapshot"] = str(exc)
+            print(f"stale snapshot: {exc}", file=sys.stderr)
         except Exception as exc:                     # psycopg errors, bad DSN, ...
             report["database_error"] = str(exc)
             print(f"database error: {exc}", file=sys.stderr)
 
     emit(report, args)
-    if report["errors"] or report.get("database_error"):
+    if report["errors"] or report.get("database_error") or report.get("stale_snapshot"):
         return FAILURE
     return 0
 

@@ -835,6 +835,9 @@ _DECISION_FAILURES = {
     "already_decided": (409, "conflict", "the request was already decided"),
     "self_approval": (409, "conflict", "the submitter cannot approve their own request"),
     "stale_base": (409, "conflict", "the approval no longer matches the live material"),
+    # T3 x T2: the material was archived or merged away after the request was
+    # filed, so approving it would PATCH a tombstone (docs/t3-writeback.md 6.1).
+    "material_inactive": (409, "conflict", "the material was archived or merged away"),
 }
 
 

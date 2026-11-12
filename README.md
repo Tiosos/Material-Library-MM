@@ -166,10 +166,10 @@ python -m pytest -q tests                                        # HTTP contract
 ```
 
 The four ETL integration cases in `tests/test_etl.py` skip unless `ML_ETL_DSN` points at a fresh
-database that has imported the joineryflow snapshot; the ten write-back integration cases in
+database that has imported the joineryflow snapshot; the fourteen write-back integration cases in
 `tests/test_writeback.py` skip unless `ML_WRITEBACK_DSN` is set. The dedicated `etl` and
 `writeback` CI jobs supply those DSNs. On the CI `api` recipe the suite reports
-`178 passed, 14 skipped`.
+`179 passed, 18 skipped`.
 
 Design and decisions: [`docs/api-v1.md`](docs/api-v1.md) (endpoints, SQL additions, instrumentation, evaluation thresholds). Implementation log with verification for every step: [`docs/t1-progress.md`](docs/t1-progress.md).
 
@@ -317,10 +317,22 @@ fingerprint are computed server-side; a stale approval is refused at approve and
 is never retried automatically. `Idempotency-Key: mlcr-{id}` is sent but not relied upon, and the
 token is never printed or written to a report.
 
+Merge and write-back cannot both be in flight: a merge is refused while a `pending` or `approved`
+request names either side of the pair (blocker `open_change_request`), and a request whose material
+was merged away or archived can no longer be approved, planned, applied or retried - it ends as
+`failed / material_inactive` without a PATCH. A tombstone keeps its field values, so the
+field-level `base` fingerprint alone would not have caught it.
+
+A confirmed write is written home. `settle('applied')` applies the diffed fields to the master row
+in the same transaction (triggers produce the revision and the event), so reads are correct
+immediately, the same diff returns `no_change` instead of being filed twice, and `after: null`
+clears a field. An import of a snapshot exported before an applied request is refused rather than
+allowed to revert it.
+
 Measured on a fresh PostgreSQL 16 database: `scripts/writeback_contract.sql` green with zero
-residual rows, `tests/test_writeback.py` 18/18 with `ML_WRITEBACK_DSN`,
-`tests/test_writeback_api.py` 11/11 in the `api` job, and the full suite
-`178 passed, 14 skipped` on the CI `api` recipe. The dedicated `writeback` CI job rebuilds this
+residual rows, `tests/test_writeback.py` 22/22 with `ML_WRITEBACK_DSN`,
+`tests/test_writeback_api.py` 12/12 in the `api` job, and the full suite
+`179 passed, 18 skipped` on the CI `api` recipe. The dedicated `writeback` CI job rebuilds this
 from scratch on every PR with its own `ml_writeback` database; no `ML_JF_*` credential is set
 there.
 

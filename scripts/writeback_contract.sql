@@ -2,10 +2,13 @@
 --
 -- Design: docs/t3-writeback.md sections 5, 6, 11 and 12 (delivery step 4).
 -- CI runs this against a FRESH database after loading
--- material.sql, search.sql, seed.sql, writeback.sql and importing the committed
--- snapshot fixtures/joineryflow-hartwood.jsonl. It is the write-side counterpart
--- of scripts/etl_contract.sql: every check raises, so ON_ERROR_STOP=1 turns a
--- broken state machine into a red build.
+-- material.sql, search.sql, merge.sql, seed.sql, writeback.sql and importing
+-- the committed snapshot fixtures/joineryflow-hartwood.jsonl. It is the
+-- write-side counterpart of scripts/etl_contract.sql: every check raises, so
+-- ON_ERROR_STOP=1 turns a broken state machine into a red build.
+--
+-- merge.sql is required by section 11: the T3 x T2 rule is half-owned by
+-- material_merge_preview(), which refuses a merge while a request is open.
 --
 -- The whole block runs inside a transaction that is rolled back. The contract
 -- exercises real transitions (submit, decide, claim, settle, retry) but leaves
@@ -34,6 +37,7 @@ DECLARE
     v_failed   bigint;
     v_unknown  bigint;
     v_stale    bigint;
+    v_merged   bigint;
     r          jsonb;
     v_claim    jsonb;
     v_events   bigint;
@@ -44,6 +48,10 @@ DECLARE
     v_last     bigint;
     v_applied  timestamptz;
     v_claimed  timestamptz;
+    v_cost     numeric;
+    v_rev      integer;
+    v_null     bigint;
+    v_null_uid text;
 BEGIN
     -- 1. Additive columns, projection tables and the untouched CHECK -----------
     SELECT count(*) INTO v_count FROM information_schema.columns
@@ -85,8 +93,8 @@ BEGIN
              WHERE source_system = 'joineryflow' AND unit_cost IS NOT NULL
              ORDER BY source_id LIMIT 10
            ) t;
-    IF coalesce(array_length(v_uids, 1), 0) < 8 THEN
-        RAISE EXCEPTION 'the snapshot does not provide eight priced joineryflow rows';
+    IF coalesce(array_length(v_uids, 1), 0) < 9 THEN
+        RAISE EXCEPTION 'the snapshot does not provide nine priced joineryflow rows';
     END IF;
     SELECT material_uid INTO v_hardware FROM material
      WHERE category_code = 'hardware' AND source_system = 'joineryflow'
@@ -277,8 +285,86 @@ BEGIN
        OR r->>'outcome' <> 'applied_unverified' THEN
         RAISE EXCEPTION 'a stale 2xx was not reported as applied_unverified: %', r;
     END IF;
+    -- and it must not have touched the master record (docs 6.2)
+    IF (SELECT unit_cost FROM material WHERE material_uid = v_uids[7]) <> 23456 THEN
+        RAISE EXCEPTION 'a stale settle still wrote the master record';
+    END IF;
 
-    -- 11. The plan is a pure preview: no token, forbidden keys ----------------
+    -- 11. T3 x T2: a merge and an in-flight request cannot both be true -------
+    -- The two tables meet at material_uid. A merge supersedes the loser but
+    -- keeps its field values, so the base fingerprint alone would let a
+    -- tombstone be approved and patched upstream. These four guards are the
+    -- contract for that (docs/t3-writeback.md 6.1).
+    SELECT material_change_request_submit(
+               v_uids[8], '[{"path":"unit_cost","after":333}]'::jsonb,
+               NULL, 'requester') INTO r;
+    IF NOT (r->>'ok')::boolean THEN
+        RAISE EXCEPTION 'could not file the T3 x T2 request: %', r;
+    END IF;
+    v_merged := (r->>'id')::bigint;
+
+    -- (a) T2 refuses the merge while the request is open, and names the request
+    SELECT material_merge_preview(v_uids[8], v_uids[9]) INTO r;
+    IF r IS NULL OR NOT ((r->'blockers') ? 'open_change_request')
+       OR NOT ((r->'blocking_requests') @> to_jsonb(v_merged)) THEN
+        RAISE EXCEPTION 'an open request did not block the merge preview: %', r;
+    END IF;
+    SELECT material_merge(v_uids[8], v_uids[9], v_uids[9], 'contract', true, 'contract') INTO r;
+    IF (r->>'ok')::boolean OR r->>'code' <> 'conflict'
+       OR NOT ((r->'blockers') ? 'open_change_request') THEN
+        RAISE EXCEPTION 'material_merge ignored an open write-back request: %', r;
+    END IF;
+
+    -- (b) approving a tombstone is refused, with the material status named
+    UPDATE material SET status = 'superseded', superseded_by = v_uids[9]
+     WHERE material_uid = v_uids[8];
+    SELECT material_change_request_decide(v_merged, 'approve', NULL, 'reviewer') INTO r;
+    IF r->>'code' <> 'material_inactive' OR r->>'material_status' <> 'superseded' THEN
+        RAISE EXCEPTION 'a superseded material was approved: %', r;
+    END IF;
+    -- (c) and the plan refuses to build a PATCH for it, which is the guard the
+    -- executor turns into settle('failed', error='material_inactive')
+    SELECT material_change_request_plan(v_merged) INTO r;
+    IF (r->>'ok')::boolean OR r->>'code' <> 'material_inactive' THEN
+        RAISE EXCEPTION 'the plan built a PATCH for a tombstone: %', r;
+    END IF;
+
+    -- restore, approve, then merge between approve and apply
+    UPDATE material SET status = 'active', superseded_by = NULL
+     WHERE material_uid = v_uids[8];
+    SELECT material_change_request_decide(v_merged, 'approve', NULL, 'reviewer') INTO r;
+    IF NOT (r->>'ok')::boolean THEN
+        RAISE EXCEPTION 'the restored material could not be approved: %', r;
+    END IF;
+    SELECT material_change_request_claim(10, 'worker', interval '5 minutes', v_merged) INTO r;
+    SELECT unit_cost INTO v_cost FROM material WHERE material_uid = v_uids[8];
+    UPDATE material SET status = 'superseded', superseded_by = v_uids[9]
+     WHERE material_uid = v_uids[8];
+    -- (d) a 2xx that landed on a row merged away mid-flight is not 'applied'
+    SELECT material_change_request_settle(v_merged, 'applied', 200, NULL, 'worker') INTO r;
+    IF r->>'code' <> 'failed' OR r->>'error' <> 'material_inactive'
+       OR r->>'outcome' <> 'applied_unverified' THEN
+        RAISE EXCEPTION 'a 2xx on a tombstone was recorded as applied: %', r;
+    END IF;
+    IF (SELECT unit_cost FROM material WHERE material_uid = v_uids[8]) IS DISTINCT FROM v_cost THEN
+        RAISE EXCEPTION 'a tombstone was written to the master record';
+    END IF;
+    SELECT material_change_request_retry(v_merged, 'auditor', NULL) INTO r;
+    IF r->>'code' <> 'material_inactive' THEN
+        RAISE EXCEPTION 'a retry re-approved a tombstone: %', r;
+    END IF;
+
+    -- the blocker is about open requests only: once none is open, the pair is
+    -- mergeable again and the preview stops naming a request
+    UPDATE material SET status = 'active', superseded_by = NULL
+     WHERE material_uid = v_uids[8];
+    SELECT material_merge_preview(v_uids[8], v_uids[9]) INTO r;
+    IF (r->'blockers') ? 'open_change_request'
+       OR jsonb_array_length(r->'blocking_requests') <> 0 THEN
+        RAISE EXCEPTION 'a decided request still blocked the merge: %', r->'blockers';
+    END IF;
+
+    -- 12. The plan is a pure preview: no token, forbidden keys ----------------
     SELECT material_change_request_plan(v_id) INTO r;
     IF NOT (r->>'ok')::boolean OR r->>'method' <> 'PATCH'
        OR r->>'url' !~ '^/catalog/[a-z-]+/[0-9]+$'
@@ -287,8 +373,52 @@ BEGIN
         RAISE EXCEPTION 'the plan is not a safe PATCH preview: %', r;
     END IF;
 
+    -- 13. applied writes the master record (design 6.2) ----------------------
+    -- The happy path above applied unit_cost 999.5 to v_uids[1]. The library is
+    -- the source of truth, so the value must be there and the diff must not be
+    -- filable again.
+    SELECT unit_cost, rev INTO v_cost, v_rev
+      FROM material WHERE material_uid = v_uids[1];
+    IF v_cost IS DISTINCT FROM 999.5::numeric THEN
+        RAISE EXCEPTION 'applied did not write the master record (unit_cost=%)', v_cost;
+    END IF;
+    IF v_rev < 2 THEN
+        RAISE EXCEPTION 'the local write did not bump rev (rev=%)', v_rev;
+    END IF;
+    SELECT material_change_request_submit(
+               v_uids[1], '[{"path":"unit_cost","after":999.5}]'::jsonb,
+               NULL, 'requester') INTO r;
+    IF r->>'code' <> 'no_change' THEN
+        RAISE EXCEPTION 'an applied diff could be filed a second time: %', r;
+    END IF;
+
+    -- clearing a field is part of the contract and lands as SQL NULL, not as
+    -- the string 'null' and not as a no-op
+    SELECT material_uid INTO v_null_uid FROM material
+     WHERE source_system = 'joineryflow' AND product_type IS NOT NULL
+       AND status = 'active'
+     ORDER BY source_id LIMIT 1;
+    IF v_null_uid IS NULL THEN
+        RAISE EXCEPTION 'the snapshot has no joineryflow row with a product_type';
+    END IF;
+    SELECT material_change_request_submit(
+               v_null_uid, '[{"path":"product_type","after":null}]'::jsonb,
+               NULL, 'requester') INTO r;
+    IF NOT (r->>'ok')::boolean THEN
+        RAISE EXCEPTION 'after: null was rejected for product_type: %', r;
+    END IF;
+    v_null := (r->>'id')::bigint;
+    SELECT material_change_request_decide(v_null, 'approve', NULL, 'reviewer') INTO r;
+    SELECT material_change_request_claim(10, 'worker', interval '5 minutes', v_null) INTO r;
+    SELECT material_change_request_settle(v_null, 'applied', 200, NULL, 'worker') INTO r;
+    IF (SELECT product_type FROM material WHERE material_uid = v_null_uid) IS NOT NULL THEN
+        RAISE EXCEPTION 'clearing product_type did not write NULL';
+    END IF;
+
     RAISE NOTICE 'writeback contract OK: 9 endpoints, 7 fields, 6 additive columns, '
-                 'submit/decide/claim/settle/retry transitions, 1 event per transition';
+                 'submit/decide/claim/settle/retry transitions, 1 event per transition, '
+                 'T3 x T2 guards (merge blocker, decide, plan, settle, retry), '
+                 'applied writes the master record and cannot be filed twice';
 END $$;
 
 ROLLBACK;
