@@ -34,6 +34,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "scripts" / "apply_change_requests.py"
+IMPORT_CLI = ROOT / "scripts" / "import_joineryflow.py"
 MAPPING = ROOT / "mapping" / "joineryflow.yaml"
 WRITE_SQL = ROOT / "schema" / "writeback.sql"
 
@@ -305,6 +306,19 @@ def state(conn, rid) -> dict:
                      "applied_at", "claimed_at"), row))
 
 
+def live_cost(conn, uid: str):
+    """The master record's unit_cost, which a confirmed write must have updated."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT unit_cost FROM material WHERE material_uid=%s", (uid,))
+        return cur.fetchone()[0]
+
+
+def count_materials(conn) -> int:
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM material")
+        return cur.fetchone()[0]
+
+
 def count_events(conn, rid=None) -> int:
     with conn.cursor() as cur:
         if rid is None:
@@ -359,7 +373,8 @@ def test_dry_run_is_a_true_no_op(clean_db, upstream, wb_dsn):
 
 
 def test_happy_path_applies_exactly_once(clean_db, upstream, wb_dsn):
-    rid = make_request(clean_db, one_uid(clean_db, 0), 903.0)
+    uid = one_uid(clean_db, 0)
+    rid = make_request(clean_db, uid, 903.0)
     proc = run_cli(upstream, wb_dsn, "--apply", "--request-id", str(rid))
     assert proc.returncode == 0, proc.stderr
     rep = json.loads(proc.stdout)
@@ -372,6 +387,14 @@ def test_happy_path_applies_exactly_once(clean_db, upstream, wb_dsn):
     assert st["last_status"] == 200 and st["error"] is None
     assert st["applied_at"] is not None and st["claimed_at"] is None
     assert count_events(clean_db, rid) == 3
+
+    # T3 x T3: the confirmed write lands in the master record, so the same diff
+    # is a no-op afterwards and cannot be filed (or PATCHed) a second time.
+    assert float(live_cost(clean_db, uid)) == 903.0
+    with clean_db.cursor() as cur:
+        cur.execute("SELECT material_change_request_submit(%s, %s, NULL, 'alice')",
+                    (uid, json.dumps([{"path": "unit_cost", "after": 903.0}])))
+        assert cur.fetchone()[0]["code"] == "no_change"
 
     assert len(upstream.records) == 1
     rec = upstream.records[0]
@@ -405,6 +428,7 @@ def test_4xx_is_a_known_failure(clean_db, upstream, wb_dsn):
     assert st["status"] == "failed" and st["last_status"] == 400
     assert "bad request" in st["error"]
     assert len(upstream.records) == 1
+    assert float(live_cost(clean_db, uid)) != 905.0
 
 
 def test_5xx_is_unknown_and_refuses_retry(clean_db, upstream, wb_dsn):
@@ -451,6 +475,8 @@ def test_stale_approval_becomes_failed_even_after_a_2xx(clean_db, upstream, wb_d
     assert st["status"] == "failed" and st["error"] == "stale_base"
     assert st["applied_at"] is None
     assert len(upstream.records) == 1
+    # a stale confirmation must not overwrite the newer master value
+    assert float(live_cost(clean_db, uid)) == 777.0
 
 
 def test_forbidden_paths_never_reach_the_worker(clean_db, upstream, wb_dsn):
@@ -571,3 +597,28 @@ def test_merge_is_blocked_while_a_request_is_open(clean_db):
         after = cur.fetchone()[0]
     assert "open_change_request" not in after["blockers"]
     assert after["blocking_requests"] == []
+
+
+# ---------------------------------------------------------------------------
+# T3 x T3: a confirmed write lands locally, and an old snapshot must not undo it
+# ---------------------------------------------------------------------------
+
+def test_import_refuses_a_snapshot_older_than_an_applied_change(clean_db, upstream, wb_dsn):
+    """The importer copies source values over the master row: a stale snapshot
+    would silently revert a change that was already applied upstream."""
+    uid = one_uid(clean_db, 0)
+    rid = make_request(clean_db, uid, 914.0)
+    assert run_cli(upstream, wb_dsn, "--apply", "--request-id", str(rid)).returncode == 0
+    assert float(live_cost(clean_db, uid)) == 914.0
+
+    before = count_materials(clean_db)
+    proc = subprocess.run(
+        [sys.executable, str(IMPORT_CLI), "--dsn", wb_dsn, "--quiet"],
+        capture_output=True, text=True, cwd=ROOT, timeout=120, check=False,
+    )
+    assert proc.returncode == 1, proc.stdout
+    assert "predates 1 applied write-back request" in proc.stderr
+    assert "Re-export the snapshot first" in proc.stderr
+    # nothing was imported, so nothing was reverted
+    assert count_materials(clean_db) == before
+    assert float(live_cost(clean_db, uid)) == 914.0

@@ -187,7 +187,7 @@ one would require editing the CHECK in `schema/material.sql`.
 | `material_change_request_decide(p_id, p_decision, p_reason, p_actor)` | `jsonb` | status, `decided_by/at`, one event |
 | `material_change_request_claim(p_limit, p_actor, p_lease)` | `setof`/`jsonb` batch | `claimed_at/by`, `attempts + 1`, `idempotency_key` |
 | `material_change_request_plan(p_id)` | `jsonb` | none (pure, used by dry-run and `GET`) |
-| `material_change_request_settle(p_id, p_outcome, p_status_code, p_error, p_actor)` | `jsonb` | status, `applied_at`, `error`, `last_status`, clears claim, one event |
+| `material_change_request_settle(p_id, p_outcome, p_status_code, p_error, p_actor)` | `jsonb` | status, `applied_at`, `error`, `last_status`, clears claim, the master row for `applied`, one event |
 | `material_change_request_queue(p_status, p_limit, p_cursor)` | `jsonb` | none |
 
 `base` is `{ "rev": <material.rev at submit>, "values": { "<path>": <live value> } }`. It is
@@ -225,7 +225,7 @@ pending --approve--> approved --claim--> approved (claimed) --settle(applied)-->
 | (new) | `pending` | uid exists, `status` not archived/superseded, `target_system='joineryflow'`, every path allowed, `diffs` non-empty, `base.values` computed server-side |
 | `pending` | `approved` | `decided_by <> requested_by` in v1; the material is still `active` (not archived, not merged away); `base` still matches; no other open request for the same uid + path |
 | `pending` | `rejected` | `decided_by` set, reason optional (T2 D10); a tombstone may still be rejected, which is how a queue is cleared |
-| `approved` | `applied` | only from `settle()` after a 2xx, only if the row is still claimed by this worker, and only if the material is still `active` |
+| `approved` | `applied` | only from `settle()` after a 2xx, only if the row is still claimed by this worker, only if the material is still `active`, and the master row is updated in the same transaction (section 6.2) |
 | `approved` | `failed` | stale base, invalid target, material archived or merged away, 4xx, 5xx, timeout or connection error |
 | `failed` | `approved` | explicit `--retry N` with a new actor; only when `outcome` is known-failed, never `unknown`; material still `active` |
 | `rejected`, `applied` | any | terminal; 409 `conflict` |
@@ -280,6 +280,59 @@ Four consequences worth stating:
 The guard lives in the status column, not in the fingerprint, so the field-level `base` design is
 untouched: a no-op re-import still cannot make an approval stale.
 
+### 6.2 T3 x T3: a confirmed write lands in the master record
+
+The first implementation of `settle()` recorded `applied` and stopped there: it never wrote the
+approved values into `material`. Measured on a fresh database, a request moving `unit_cost` from
+`3450` to `3460` ended `applied` while the master row still read `3450` - and the same diff could
+be filed again immediately, because `submit()` computes `before` from that stale local value and
+`open_request` only looks at `pending` and `approved`.
+
+That contradicts section 0 ("Material Library stays the single source of truth") and leaves
+[design-v1](design-v1.md) section 10 item 2 - the master-data ownership decision - answered in
+prose but not in code. The two coherent options were:
+
+- **ML is the source of truth** - `settle()` writes the diff home. The request table records the
+  approval; the master row is the data.
+- **ML is a mirror** - the next snapshot brings the value back, and the same diff must be refused
+  in the meantime. That keeps the ETL as the only writer, but makes every read between the PATCH
+  and the next export wrong, and weakens `base` to a local-only comparison.
+
+The first is chosen (D18). `settle('applied')` therefore:
+
+1. re-checks the field-level `base` and the material status, as before;
+2. applies **only the diffed paths** to `material` in the same transaction - field paths through
+   `material_writeback_field`, `attributes.<key>` through `jsonb_set`, `synonyms` as a text array,
+   and JSON null as SQL NULL (clearing a field);
+3. lets the existing triggers turn that into one `material_revision` row and one `material_event`
+   with `ml.source = 'writeback'`;
+4. records `applied` afterwards. A local write that fails (constraint, unknown unit, ...) does not
+   lose the 2xx: the request becomes `failed / local_write_failed` and is reported as
+   `applied_unverified`, exactly like a stale base.
+
+Three consequences:
+
+- **The same diff cannot be filed twice.** After a successful apply, `submit()` sees
+  `before = after` and returns `no_change`. This is what makes a second `--apply` safe for a
+  different reason than before: previously the request was terminal, now the data agrees.
+- **The window closes for readers.** `GET /v1/materials/{uid}`, export and search show the new
+  value as soon as the worker commits, instead of waiting for the next snapshot.
+- **`submit()` validates what the master row can store**, because the value will be written there:
+  `unit` must be a known unit code (it is a foreign key), `unit_cost` must fit `numeric(14,4)`, and
+  `lead_time_days` must fit `integer`. Rejecting them at submit keeps the write from failing after
+  a PATCH has already landed.
+
+**JSON null was previously unusable.** Every type rule said "or null" but compared
+`jsonb_typeof(...) <> 'string'`, which is true for JSON null, so `after: null` was rejected for
+every path - clearing a field was impossible. `submit()` now normalises JSON null to SQL NULL
+before the type rules, which also makes `no_change` compare two nulls correctly.
+
+**The ETL must not undo it.** The importer copies snapshot values over the master row, so a
+snapshot taken *before* an apply would silently revert it. `scripts/import_joineryflow.py` now
+refuses to import when any `applied` request has `applied_at > snapshot.exported_at`, and names the
+offending ids and the first `source_id` (D19). The check reads the request table, so it depends on
+`applied` rows being retained; retention is still an operations decision (section 16).
+
 Implementation note (step 2): `claim()` and `settle()` keep the five states and use `claimed_at`
 as the in-flight marker. A claim writes no event row, so a happy path emits exactly three events
 (insert, approve, apply) as acceptance criterion 2 requires; `settle()` writes the third one.
@@ -296,7 +349,9 @@ lease, and `retry()` is the explicit human `failed -> approved` transition that 
 `diffs` is a JSON array of `{ "path", "before", "after" }`, matching
 [docs/data-model-v2.md](data-model-v2.md) section 1. The client submits only `path` and `after`;
 **`before` is always computed server-side** from the live UMR row, so a caller cannot forge it.
-An empty array, a duplicate path, or `before = after` is a 400 `bad_request`.
+An empty array, a duplicate path, or `before = after` is a 400 `bad_request`. A JSON null `after`
+means "clear this field": it is normalised to SQL NULL, written home as NULL (or `{}` for
+`synonyms`, which is `NOT NULL`), and a repeated null is a `no_change`.
 
 Allowed paths:
 
@@ -413,15 +468,18 @@ worker does not need FastAPI or httpx.
   every legal transition, the illegality of `pending -> applied`, `base` staleness, the allowlist
   (including the demo `unit_cost` diff being accepted while `archived_at` is rejected), the
   `Idempotency-Key` being unique, one `material_event` per transition, and the T3 x T2 guards of
-  section 6.1 (merge blocker, decide, plan, settle, retry).
+  section 6.1 (merge blocker, decide, plan, settle, retry), plus section 6.2: an applied write is
+  in the master row, `rev` moved, the same diff returns `no_change`, and `after: null` clears a
+  field.
 - `tests/test_writeback.py`: pure unit cases for path translation and target resolution run
   without a database; integration cases skip unless `ML_WRITEBACK_DSN` is set, exactly as
   `tests/test_etl.py` skips without `ML_ETL_DSN`. The fake upstream is a stdlib `http.server`
   started by a pytest fixture on 127.0.0.1 with an ephemeral port; it records method, path,
   headers and body. Cases: dry-run is a no-op, happy path, 400 / 409 / 500 / timeout, stale
   approval, concurrent claim (two workers, one PATCH per request), forbidden paths, a merge
-  blocked by an open request, and a request whose material was merged away (approve refused,
-  zero PATCHes).
+  blocked by an open request, a request whose material was merged away (approve refused,
+  zero PATCHes), the master row taking the value, and the importer refusing a stale snapshot
+  after an apply.
 - New CI job `writeback` with its own fresh `POSTGRES_DB=ml_writeback` and
   `ML_WRITEBACK_DSN`. Steps: install `pyyaml`, `psycopg[binary]`, `pytest`; load
   `material.sql, search.sql, merge.sql, seed.sql, writeback.sql` (merge.sql is needed by the
@@ -465,6 +523,10 @@ worker does not need FastAPI or httpx.
     PATCHes and ends the request as `failed / material_inactive`, and a merge is refused with the
     blocker `open_change_request` while a `pending` or `approved` request names either side of the
     pair (section 6.1).
+11. A confirmed write is in the master record: after `--apply` the diffed fields hold the `after`
+    values, `rev` has moved, the same diff returns `no_change`, and `after: null` clears a field
+    (section 6.2). An import of a snapshot whose `exported_at` predates an applied request fails
+    with the offending ids named and writes nothing.
 
 ---
 
@@ -504,6 +566,7 @@ and EPD collection, changes to search ranking, and any change to the ETL snapsho
 | 4 | HTTP review routes, `scripts/writeback_contract.sql`, new `writeback` CI job | five CI jobs green; full pytest green |
 | 5 | Docs: README status, `data-model-v2.md` section 6, `docs/t3-progress.md` | `check_english.py` clean, relative links intact, PR opened |
 | 6 | T3 x T2 consistency (section 6.1): merge blocker, status guards at decide / plan / settle / retry, contract assertions and integration cases | contract green on both CI load orders, 21/21 write-back tests, full suite green |
+| 7 | T3 x T3 loop (section 6.2): `settle()` writes the diff home, submit validates storable values, JSON null clears, the importer refuses a stale snapshot | contract green, 22/22 write-back tests, full suite green, an old snapshot is refused after an apply |
 
 Effort: about two to three days at the T1/T2/ETL pace; most of it is the state machine, the
 outcome handling and making the CI simulation honest.
@@ -531,6 +594,8 @@ outcome handling and making the CI simulation honest.
 | D15 | `Idempotency-Key` is sent but never relied on | upstream support is unconfirmed; behaviour must be correct without it |
 | D16 | T2 merge still bypasses `material_change_request` | T2 D7: that table models cross-system approvals, not internal master-data maintenance |
 | D17 | A merge is blocked by an open request on either side; T3 re-checks `material.status` at decide, plan, settle and retry | a tombstone keeps its field values, so the base fingerprint cannot see a merge; re-pointing a request would change the upstream record its approver saw, and auto-failing it inside merge would add a sixth transition (section 6.1) |
+| D18 | `settle('applied')` writes the diff into `material` in the same transaction | the library is the source of truth (section 0); without it every read stays stale until the next snapshot, `base` compares local-to-local, and the same diff can be filed and PATCHed twice (section 6.2) |
+| D19 | An import whose snapshot predates an applied request is a hard error | the importer copies source values over the master row, so an old snapshot silently reverts a confirmed write; re-exporting is cheap, losing an applied change is not |
 
 ---
 
@@ -548,4 +613,9 @@ outcome handling and making the CI simulation honest.
    v1.
 5. Retention for `applied` and `rejected` requests, and who runs the worker on a schedule, are
    operations decisions. Like the 90-day search-log retention, they are documented rather than
-   scheduled in this repository.
+   scheduled in this repository. Retention now also bounds the D19 guard: purging `applied` rows
+   re-opens the window in which a stale snapshot could revert a confirmed write.
+6. Who resolves `applied_unverified` - a stale base, a material merged away mid-flight, or a local
+   write that failed? v1 leaves all three to a human. A `--verify` pass that GETs the upstream row
+   and compares it with the local one is the natural next step, but it needs the upstream's read
+   shape and a token with read scope, so it is deliberately not in this round.

@@ -142,8 +142,11 @@ COMMENT ON FUNCTION ml_writeback_current_values(text, jsonb) IS
 -- material_change_request_submit - file a diff request, before computed here
 -- ---------------------------------------------------------------------------
 -- The caller sends only {path, after}; `before` is always read from the live
--- row, so a caller cannot forge it (docs section 7). Structural caller
--- mistakes raise 22023; semantic rejections return {ok, code}:
+-- row, so a caller cannot forge it (docs section 7). Values are also checked
+-- against what the master record can store - the unit foreign key, the
+-- numeric(14,4) and integer ranges - because settle writes them home (docs
+-- 6.2). Structural caller mistakes raise 22023; semantic rejections return
+-- {ok, code}:
 --   not_found       unknown material_uid
 --   conflict        material is archived or superseded
 --   forbidden_path  path outside the allowlist, named in the response
@@ -204,7 +207,9 @@ BEGIN
                 USING ERRCODE = '22023';
         END IF;
         v_path  := btrim(v_item ->> 'path');
-        v_after := v_item -> 'after';
+        -- JSON null means "clear this field"; normalise it to SQL NULL so
+        -- every type rule below reads its own "or null" literally.
+        v_after := nullif(v_item -> 'after', 'null'::jsonb);
         IF v_path = ANY (v_paths) THEN
             RAISE EXCEPTION 'duplicate path in diffs: %', v_path USING ERRCODE = '22023';
         END IF;
@@ -230,7 +235,8 @@ BEGIN
                 RAISE EXCEPTION 'attributes.% must be a scalar or null', v_path
                     USING ERRCODE = '22023';
             END IF;
-            v_before := v_row.attributes -> regexp_replace(v_path, '^attributes\.', '');
+            v_before := nullif(v_row.attributes -> regexp_replace(v_path, '^attributes\.', ''),
+                               'null'::jsonb);
         ELSE
             v_before := NULL;
             v_keys := NULL;
@@ -249,15 +255,26 @@ BEGIN
                 IF v_after IS NOT NULL AND jsonb_typeof(v_after) <> 'string' THEN
                     RAISE EXCEPTION '% must be a string or null', v_path USING ERRCODE = '22023';
                 END IF;
+                -- unit is a foreign key to the local unit table: a value the
+                -- master record cannot store must not be approvable (docs 6.2)
+                IF v_path = 'unit' AND v_after IS NOT NULL
+                   AND NOT EXISTS (SELECT 1 FROM unit u WHERE u.code = v_after #>> '{}') THEN
+                    RAISE EXCEPTION 'unit % is not a known unit code', v_after #>> '{}'
+                        USING ERRCODE = '22023';
+                END IF;
             ELSIF v_path = 'unit_cost' THEN
                 IF v_after IS NOT NULL AND (jsonb_typeof(v_after) <> 'number'
-                                            OR (v_after #>> '{}')::numeric < 0) THEN
-                    RAISE EXCEPTION 'unit_cost must be a non-negative number or null' USING ERRCODE = '22023';
+                                            OR (v_after #>> '{}')::numeric < 0
+                                            OR (v_after #>> '{}')::numeric >= 10000000000) THEN
+                    RAISE EXCEPTION 'unit_cost must be between 0 and 10^10 or null'
+                        USING ERRCODE = '22023';
                 END IF;
             ELSIF v_path = 'lead_time_days' THEN
                 IF v_after IS NOT NULL AND (jsonb_typeof(v_after) <> 'number'
-                                            OR (v_after #>> '{}') !~ '^[0-9]+$') THEN
-                    RAISE EXCEPTION 'lead_time_days must be a non-negative integer or null' USING ERRCODE = '22023';
+                                            OR (v_after #>> '{}') !~ '^[0-9]+$'
+                                            OR (v_after #>> '{}')::numeric > 2147483647) THEN
+                    RAISE EXCEPTION 'lead_time_days must be a non-negative integer or null'
+                        USING ERRCODE = '22023';
                 END IF;
             ELSIF v_path = 'synonyms' THEN
                 IF v_after IS NOT NULL AND (jsonb_typeof(v_after) <> 'array'
@@ -265,7 +282,7 @@ BEGIN
                     RAISE EXCEPTION 'synonyms must be an array of non-empty strings or null' USING ERRCODE = '22023';
                 END IF;
             END IF;
-            v_before := to_jsonb(v_row) -> v_keys[1];
+            v_before := nullif(to_jsonb(v_row) -> v_keys[1], 'null'::jsonb);
         END IF;
 
         IF v_before IS NOT DISTINCT FROM v_after THEN
@@ -660,6 +677,14 @@ COMMENT ON FUNCTION material_change_request_claim(integer, text, interval, bigin
 -- between plan() and this call. The 2xx may well be real, but it landed on a
 -- row T2 has just superseded, so it is recorded as failed / material_inactive
 -- and reported the same way as stale_base - a human decides (docs 6.1).
+--
+-- T3 x T3 (docs 6.2): a confirmed write is written home. The library is the
+-- source of truth, so the approved `after` values are applied to `material` in
+-- this transaction; the triggers turn that into one revision and one material
+-- event, and a later submit of the same diff returns no_change instead of
+-- filing it twice. A local write that fails (constraint, unknown unit, ...)
+-- does not lose the 2xx: the request becomes failed / local_write_failed and
+-- is reported as applied_unverified.
 CREATE OR REPLACE FUNCTION material_change_request_settle(
     p_id          bigint,
     p_outcome     text,
@@ -679,6 +704,13 @@ DECLARE
     v_current    jsonb;
     v_matstatus  text;
     v_unverified boolean := false;
+    v_diff       jsonb;
+    v_path       text;
+    v_after      jsonb;
+    v_col        text;
+    v_attrs      jsonb;
+    v_attrs_done boolean := false;
+    v_sets       text[] := '{}';
 BEGIN
     IF p_outcome IS NULL OR p_outcome NOT IN ('applied', 'failed', 'unknown') THEN
         RAISE EXCEPTION 'outcome must be applied, failed or unknown'
@@ -726,7 +758,7 @@ BEGIN
           INTO v_paths
           FROM jsonb_array_elements(v_row.diffs) WITH ORDINALITY AS t(d, ord);
         v_current := ml_writeback_current_values(v_row.material_uid, v_paths);
-        SELECT m.status INTO v_matstatus
+        SELECT m.status, m.attributes INTO v_matstatus, v_attrs
           FROM material m WHERE m.material_uid = v_row.material_uid;
         IF v_current IS DISTINCT FROM (v_row.base -> 'values') THEN
             v_unverified := true;
@@ -742,6 +774,60 @@ BEGIN
         ELSE
             v_status := 'applied';
             v_error  := NULL;
+            -- T3 x T3 (docs 6.2): the library is the source of truth, so a
+            -- confirmed write is written home in the same transaction. The
+            -- triggers turn this into one revision and one material event.
+            -- A local write that fails must not lose the 2xx: it degrades to
+            -- applied_unverified instead of raising after the PATCH landed.
+            BEGIN
+                v_attrs := coalesce(v_attrs, '{}'::jsonb);
+                FOR v_diff IN SELECT * FROM jsonb_array_elements(v_row.diffs) LOOP
+                    v_path  := v_diff ->> 'path';
+                    v_after := CASE WHEN jsonb_typeof(v_diff -> 'after') = 'null'
+                                    THEN NULL ELSE v_diff -> 'after' END;
+                    IF v_path LIKE 'attributes.%' THEN
+                        v_attrs := jsonb_set(
+                            v_attrs,
+                            ARRAY[regexp_replace(v_path, '^attributes\.', '')],
+                            coalesce(v_after, 'null'::jsonb), true);
+                        v_attrs_done := true;
+                    ELSE
+                        SELECT f.material_column INTO v_col
+                          FROM material_writeback_field f WHERE f.umr_path = v_path;
+                        IF v_col IS NULL THEN
+                            RAISE EXCEPTION 'no material column for path %', v_path;
+                        END IF;
+                        IF v_col = 'synonyms' THEN
+                            -- synonyms is NOT NULL: a null after means "clear"
+                            v_sets := v_sets || CASE WHEN v_after IS NULL
+                                THEN 'synonyms = ''{}''::text[]'
+                                ELSE format('synonyms = ARRAY(SELECT jsonb_array_elements_text(%L::jsonb))',
+                                            v_after)
+                                END;
+                        ELSIF v_col = 'unit_cost' THEN
+                            v_sets := v_sets || format('unit_cost = %s::numeric',
+                                                       quote_nullable(v_after #>> '{}'));
+                        ELSIF v_col = 'lead_time_days' THEN
+                            v_sets := v_sets || format('lead_time_days = %s::integer',
+                                                       quote_nullable(v_after #>> '{}'));
+                        ELSE
+                            v_sets := v_sets || format('%I = %L', v_col, v_after #>> '{}');
+                        END IF;
+                    END IF;
+                END LOOP;
+                IF v_attrs_done THEN
+                    v_sets := v_sets || format('attributes = %L::jsonb', v_attrs);
+                END IF;
+                IF cardinality(v_sets) > 0 THEN
+                    EXECUTE 'UPDATE material SET ' || array_to_string(v_sets, ', ')
+                         || ' WHERE material_uid = $1' USING v_row.material_uid;
+                END IF;
+            EXCEPTION WHEN others THEN
+                v_status     := 'failed';
+                v_error      := 'local_write_failed';
+                v_outcome    := 'applied_unverified';
+                v_unverified := true;
+            END;
         END IF;
     ELSIF p_outcome = 'unknown' THEN
         v_error := 'uncertain_outcome';

@@ -48,6 +48,10 @@ DECLARE
     v_last     bigint;
     v_applied  timestamptz;
     v_claimed  timestamptz;
+    v_cost     numeric;
+    v_rev      integer;
+    v_null     bigint;
+    v_null_uid text;
 BEGIN
     -- 1. Additive columns, projection tables and the untouched CHECK -----------
     SELECT count(*) INTO v_count FROM information_schema.columns
@@ -281,6 +285,10 @@ BEGIN
        OR r->>'outcome' <> 'applied_unverified' THEN
         RAISE EXCEPTION 'a stale 2xx was not reported as applied_unverified: %', r;
     END IF;
+    -- and it must not have touched the master record (docs 6.2)
+    IF (SELECT unit_cost FROM material WHERE material_uid = v_uids[7]) <> 23456 THEN
+        RAISE EXCEPTION 'a stale settle still wrote the master record';
+    END IF;
 
     -- 11. T3 x T2: a merge and an in-flight request cannot both be true -------
     -- The two tables meet at material_uid. A merge supersedes the loser but
@@ -329,6 +337,7 @@ BEGIN
         RAISE EXCEPTION 'the restored material could not be approved: %', r;
     END IF;
     SELECT material_change_request_claim(10, 'worker', interval '5 minutes', v_merged) INTO r;
+    SELECT unit_cost INTO v_cost FROM material WHERE material_uid = v_uids[8];
     UPDATE material SET status = 'superseded', superseded_by = v_uids[9]
      WHERE material_uid = v_uids[8];
     -- (d) a 2xx that landed on a row merged away mid-flight is not 'applied'
@@ -336,6 +345,9 @@ BEGIN
     IF r->>'code' <> 'failed' OR r->>'error' <> 'material_inactive'
        OR r->>'outcome' <> 'applied_unverified' THEN
         RAISE EXCEPTION 'a 2xx on a tombstone was recorded as applied: %', r;
+    END IF;
+    IF (SELECT unit_cost FROM material WHERE material_uid = v_uids[8]) IS DISTINCT FROM v_cost THEN
+        RAISE EXCEPTION 'a tombstone was written to the master record';
     END IF;
     SELECT material_change_request_retry(v_merged, 'auditor', NULL) INTO r;
     IF r->>'code' <> 'material_inactive' THEN
@@ -361,9 +373,52 @@ BEGIN
         RAISE EXCEPTION 'the plan is not a safe PATCH preview: %', r;
     END IF;
 
+    -- 13. applied writes the master record (design 6.2) ----------------------
+    -- The happy path above applied unit_cost 999.5 to v_uids[1]. The library is
+    -- the source of truth, so the value must be there and the diff must not be
+    -- filable again.
+    SELECT unit_cost, rev INTO v_cost, v_rev
+      FROM material WHERE material_uid = v_uids[1];
+    IF v_cost IS DISTINCT FROM 999.5::numeric THEN
+        RAISE EXCEPTION 'applied did not write the master record (unit_cost=%)', v_cost;
+    END IF;
+    IF v_rev < 2 THEN
+        RAISE EXCEPTION 'the local write did not bump rev (rev=%)', v_rev;
+    END IF;
+    SELECT material_change_request_submit(
+               v_uids[1], '[{"path":"unit_cost","after":999.5}]'::jsonb,
+               NULL, 'requester') INTO r;
+    IF r->>'code' <> 'no_change' THEN
+        RAISE EXCEPTION 'an applied diff could be filed a second time: %', r;
+    END IF;
+
+    -- clearing a field is part of the contract and lands as SQL NULL, not as
+    -- the string 'null' and not as a no-op
+    SELECT material_uid INTO v_null_uid FROM material
+     WHERE source_system = 'joineryflow' AND product_type IS NOT NULL
+       AND status = 'active'
+     ORDER BY source_id LIMIT 1;
+    IF v_null_uid IS NULL THEN
+        RAISE EXCEPTION 'the snapshot has no joineryflow row with a product_type';
+    END IF;
+    SELECT material_change_request_submit(
+               v_null_uid, '[{"path":"product_type","after":null}]'::jsonb,
+               NULL, 'requester') INTO r;
+    IF NOT (r->>'ok')::boolean THEN
+        RAISE EXCEPTION 'after: null was rejected for product_type: %', r;
+    END IF;
+    v_null := (r->>'id')::bigint;
+    SELECT material_change_request_decide(v_null, 'approve', NULL, 'reviewer') INTO r;
+    SELECT material_change_request_claim(10, 'worker', interval '5 minutes', v_null) INTO r;
+    SELECT material_change_request_settle(v_null, 'applied', 200, NULL, 'worker') INTO r;
+    IF (SELECT product_type FROM material WHERE material_uid = v_null_uid) IS NOT NULL THEN
+        RAISE EXCEPTION 'clearing product_type did not write NULL';
+    END IF;
+
     RAISE NOTICE 'writeback contract OK: 9 endpoints, 7 fields, 6 additive columns, '
                  'submit/decide/claim/settle/retry transitions, 1 event per transition, '
-                 'T3 x T2 guards (merge blocker, decide, plan, settle, retry)';
+                 'T3 x T2 guards (merge blocker, decide, plan, settle, retry), '
+                 'applied writes the master record and cannot be filed twice';
 END $$;
 
 ROLLBACK;
