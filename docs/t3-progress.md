@@ -20,6 +20,7 @@ Status legend: `[ ]` planned, `[~]` in progress, `[x]` done and verified, `[!]` 
 | 5 | Docs: this log, README status and `docs/data-model-v2.md` 5/6 | [x] | PR #16; `check_english.py` clean, full suite green locally (`178 passed, 14 skipped`), 64 relative doc links intact, JSONL byte contract intact; design section 14 |
 | 6 | T3 x T2 consistency: merge blocker plus the decide / plan / settle / retry status guards, contract assertions and integration cases (design 6.1) | [x] | Contract green on a fresh PostgreSQL 16 database (both load orders), `tests/test_writeback.py` 21/21 with `ML_WRITEBACK_DSN`, `tests/test_writeback_api.py` 12/12, full suite `179 passed, 17 skipped`, api and merge contracts still green; see "Follow-up 1" |
 | 7 | T3 x T3 loop: `settle()` writes the diff into `material`, submit validates storable values, JSON null clears a field, the importer refuses a stale snapshot (design 6.2, D18/D19) | [x] | Contract green with the new assertions; `tests/test_writeback.py` 22/22; full suite `179 passed, 18 skipped`; api and merge contracts green on a rebuilt database; see "Follow-up 2" |
+| 8 | Retention and the watermark (design 6.3, D20): `material_writeback_state`, a watermark-driven import guard, `scripts/prune_change_requests.py` | [x] | Contract green with section 14; `tests/test_writeback.py` 25/25; full suite `179 passed, 21 skipped`; api / merge / etl contracts green; see "Follow-up 3" |
 
 Steps 0-1 were merged in **PR #15** (merge commit `cbf1b5f`, 2026-11-11T22:01:22Z). Steps 2-5
 were implemented and verified on top of that commit and are delivered together in **PR #16**.
@@ -280,6 +281,45 @@ Verification on a fresh PostgreSQL 16 database (postgres:16 in Docker, 127.0.0.1
 * `check_english.py`, `compileall`, `check_mappings.py`, `check_joineryflow_mapping.py` and the 93
   static unit tests are clean; the JSONL byte contract is untouched.
 
+## Follow-up 3: retention and the upstream-write watermark
+
+Follow-up 2 closed the loop with D19 - an import whose snapshot predates an `applied` request is
+refused - but that guard read `material_change_request`. As soon as retention prunes those rows the
+guard stops firing, silently: an old snapshot would import cleanly and overwrite a confirmed write.
+The guard and the retention policy were one decision, so this follow-up makes both (design 6.3,
+D20).
+
+`material_writeback_state` holds one row per target system with `last_upstream_write_at`,
+`last_request_id` and an `advances` counter. `settle()` advances it on **any 2xx**, including all
+three `applied_unverified` branches (stale base, superseded material, local write failed), because
+the PATCH answered 2xx before the local row was refused - the upstream may have taken the change.
+A 4xx and an `unknown` outcome do not advance it; the 5xx / timeout case is deliberately left to
+the `--verify` question (section 16), because a monotonic watermark on a transient 503 would
+permanently refuse every older snapshot.
+
+`scripts/import_joineryflow.py` now compares `snapshot.exported_at` with the watermark. Request ids
+and `source_id` remain in the error message when the rows exist, but are no longer the criterion.
+The `etl` CI job loads no `writeback.sql`, so the watermark table is absent there: the importer
+checks `to_regclass` and falls back to the old `applied`-row query, which keeps that job green.
+`scripts/prune_change_requests.py` is dry-run by default, takes `--older-than DAYS` (default 90),
+deletes only `applied` and `rejected`, and never touches `material_event` or the watermark.
+
+Verification on a fresh PostgreSQL 16 database:
+
+* `scripts/writeback_contract.sql` section 14 asserts exactly four 2xx settles advance the
+  watermark (the happy path, the stale 2xx, the tombstone 2xx and the null clear), that the
+  pending -> applied refusal, the 400 and the 503 do not, and that deleting all terminal request
+  rows leaves the watermark intact.
+* `tests/test_writeback.py` 25/25 with `ML_WRITEBACK_DSN`, including: prune via the CLI with
+  `--older-than 0 --apply`, then confirm the importer **still** refuses the committed snapshot
+  and the master value is unchanged; the prune dry-run writing nothing and keeping a pending row;
+  and a future `exported_at` passing the guarded comparison.
+* Full suite `179 passed, 21 skipped, 200 subtests`; `api_contract.sql`, `merge_contract.sql` and
+  `etl_contract.sql` green on rebuilt databases; the ETL path still imports twice
+  (`18 new` then `0 new / 18 updated`).
+* `check_english.py`, `compileall`, `check_mappings.py` x3, `check_joineryflow_mapping.py` and the
+  93 static unit tests clean; JSONL byte contract untouched.
+
 ## Constraints carried into implementation
 
 * SQL owns transitions, Python owns transport (design principle 1). Satisfied: all five
@@ -321,12 +361,17 @@ now 22/22 write-back tests and `179 passed, 18 skipped`.
 
 Two items are deliberately left open and recorded in design section 16: who resolves
 `applied_unverified` (a `--verify` GET pass is the natural next step, but it needs the upstream's
-read shape), and how retention interacts with the D19 guard - purging `applied` rows re-opens the
-window in which a stale snapshot could revert a confirmed write.
+read shape), and who schedules the worker and the prune CLI. The retention *policy* is no longer
+open: D20 fixed what may be deleted and made the snapshot guard independent of those rows.
+
+Follow-up 3 (design 6.3, D20) is implemented and verified: every 2xx advances the upstream-write
+watermark, the importer judges staleness against it, and the prune CLI is a dry-run-by-default
+operation that cannot touch the watermark or the audit trail. Counts are now 25/25 write-back
+tests and `179 passed, 21 skipped`.
 
 Still open for the project as a whole, and deliberately out of scope for T3: whether joineryflow
 honours `Idempotency-Key` (until confirmed, no retry depends on it), the exact form of the
-workspace guard, whether the upstream accepts a partial PATCH body, retention for `applied` and
-`rejected` requests, who schedules the worker, live incremental sync (which needs an
-`updated_at` column and real credentials), ETIM/eCl@ss real-code mapping and EPD collection.
+workspace guard, whether the upstream accepts a partial PATCH body, who schedules the worker and
+the retention job, live incremental sync (which needs an `updated_at` column and real
+credentials), ETIM/eCl@ss real-code mapping and EPD collection.
 See `docs/t3-writeback.md` section 16 and the non-goals in section 13.
