@@ -52,6 +52,10 @@ DECLARE
     v_rev      integer;
     v_null     bigint;
     v_null_uid text;
+    v_adv      integer;
+    v_adv_start integer;
+    v_wm_id    bigint;
+    v_wm_at    timestamptz;
 BEGIN
     -- 1. Additive columns, projection tables and the untouched CHECK -----------
     SELECT count(*) INTO v_count FROM information_schema.columns
@@ -101,6 +105,10 @@ BEGIN
      ORDER BY source_id LIMIT 1;
 
     -- 2. Submit: before is computed here, allowlist is enforced here -----------
+    -- Record the watermark's starting point, so this contract can be run on a
+    -- database that has already applied a change.
+    SELECT coalesce((SELECT advances FROM material_writeback_state
+                       WHERE target_system = 'joineryflow'), 0) INTO v_adv_start;
     SELECT material_change_request_submit(
                v_uids[1], '[{"path":"unit_cost","after":999.5}]'::jsonb,
                'contract demo', 'requester') INTO r;
@@ -415,10 +423,31 @@ BEGIN
         RAISE EXCEPTION 'clearing product_type did not write NULL';
     END IF;
 
+    -- 14. the upstream-write watermark survives request retention (docs 6.3) --
+    -- Exactly four settles reported a 2xx in this contract: the happy path (7),
+    -- the stale 2xx (10), the tombstone 2xx (11) and the null clear (13). The
+    -- pending -> applied refusal (3), the 400 (9) and the 503 (9) must not
+    -- advance it: a failed or unknown outcome is not an upstream write.
+    SELECT advances, last_request_id, last_upstream_write_at
+      INTO v_adv, v_wm_id, v_wm_at
+      FROM material_writeback_state WHERE target_system = 'joineryflow';
+    IF v_adv <> v_adv_start + 4 OR v_wm_id <> v_null OR v_wm_at IS NULL THEN
+        RAISE EXCEPTION 'wrong upstream watermark: advances=% (expected %) last_request_id=%',
+            v_adv, v_adv_start + 4, v_wm_id;
+    END IF;
+    -- retention removes terminal request rows, not the watermark
+    DELETE FROM material_change_request WHERE status IN ('applied', 'rejected');
+    SELECT count(*) INTO v_count FROM material_writeback_state
+     WHERE target_system = 'joineryflow';
+    IF v_count <> 1 THEN
+        RAISE EXCEPTION 'pruning terminal requests removed the watermark';
+    END IF;
+
     RAISE NOTICE 'writeback contract OK: 9 endpoints, 7 fields, 6 additive columns, '
                  'submit/decide/claim/settle/retry transitions, 1 event per transition, '
                  'T3 x T2 guards (merge blocker, decide, plan, settle, retry), '
-                 'applied writes the master record and cannot be filed twice';
+                 'applied writes the master record and cannot be filed twice, '
+                 'the upstream watermark survives request retention';
 END $$;
 
 ROLLBACK;

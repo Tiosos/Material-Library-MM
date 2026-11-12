@@ -45,6 +45,22 @@ CREATE INDEX IF NOT EXISTS material_change_request_claim_idx
     ON material_change_request (status, claimed_at, requested_at);
 
 -- ---------------------------------------------------------------------------
+-- material_writeback_state - the upstream-write watermark (docs 6.3)
+-- ---------------------------------------------------------------------------
+-- One row per target system. settle() advances it on every 2xx, including an
+-- applied_unverified one: the PATCH may well have landed upstream even when
+-- the local row was deliberately not written (stale base, merged material,
+-- local write failure). The importer compares a snapshot's exported_at with
+-- this value, so the stale-snapshot guard keeps working after terminal requests
+-- have been pruned by retention. 4xx, 5xx and timeouts do not advance it.
+CREATE TABLE IF NOT EXISTS material_writeback_state (
+    target_system          text PRIMARY KEY,
+    last_upstream_write_at timestamptz NOT NULL,
+    last_request_id        bigint,
+    advances               integer NOT NULL DEFAULT 1
+);
+
+-- ---------------------------------------------------------------------------
 -- material_writeback_catalog - one row per joineryflow source table
 -- ---------------------------------------------------------------------------
 -- endpoint and pk_column come from the per-table entries in the mapping
@@ -685,6 +701,9 @@ COMMENT ON FUNCTION material_change_request_claim(integer, text, interval, bigin
 -- filing it twice. A local write that fails (constraint, unknown unit, ...)
 -- does not lose the 2xx: the request becomes failed / local_write_failed and
 -- is reported as applied_unverified.
+--
+-- 6.3: any 2xx advances material_writeback_state, so a snapshot older than
+-- the last upstream write stays refused even after applied rows are pruned.
 CREATE OR REPLACE FUNCTION material_change_request_settle(
     p_id          bigint,
     p_outcome     text,
@@ -704,6 +723,7 @@ DECLARE
     v_current    jsonb;
     v_matstatus  text;
     v_unverified boolean := false;
+    v_upstream   boolean := false;
     v_diff       jsonb;
     v_path       text;
     v_after      jsonb;
@@ -835,6 +855,23 @@ BEGIN
         v_error := coalesce(nullif(btrim(coalesce(p_error, '')), ''), 'upstream_error');
     END IF;
 
+    -- The watermark is about the upstream write, not the local one: a 2xx on
+    -- stale data or a tombstone still counts, because the PATCH may have landed.
+    -- A 5xx / timeout is left to the --verify question (docs 6.3, section 16).
+    v_upstream := p_outcome = 'applied'
+                  AND (p_status_code IS NULL
+                       OR (p_status_code >= 200 AND p_status_code < 300));
+    IF v_upstream THEN
+        INSERT INTO material_writeback_state AS s
+               (target_system, last_upstream_write_at, last_request_id)
+        VALUES (v_row.target_system, now(), p_id)
+        ON CONFLICT (target_system) DO UPDATE
+           SET last_upstream_write_at = greatest(s.last_upstream_write_at,
+                                                 EXCLUDED.last_upstream_write_at),
+               last_request_id = EXCLUDED.last_request_id,
+               advances       = s.advances + 1;
+    END IF;
+
     PERFORM set_config('ml.actor', v_actor, true);
     PERFORM set_config('ml.source', 'writeback', true);
 
@@ -856,7 +893,8 @@ BEGIN
                                'status_code', p_status_code,
                                'unverified', v_unverified,
                                'error', v_error,
-                               'material_status', v_matstatus),
+                               'material_status', v_matstatus,
+                               'upstream_write', v_upstream),
             v_actor);
 
     RETURN jsonb_build_object('ok', true, 'code', v_status,
@@ -867,7 +905,7 @@ BEGIN
 END $$;
 
 COMMENT ON FUNCTION material_change_request_settle(bigint, text, integer, text, text, interval) IS
-    'Settle a claimed request: applied, failed or unknown; re-checks base and material status before applied and writes one event.';
+    'Settle a claimed request: applied, failed or unknown; re-checks base and material status, writes the diff home, advances the upstream watermark and writes one event.';
 
 -- ---------------------------------------------------------------------------
 -- material_change_request_retry - explicit human retry of a known failure

@@ -37,6 +37,7 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 ├── scripts/etl_contract.sql         post-import SQL assertions (step 4)
 ├── scripts/apply_change_requests.py dry-run-first write-back worker (T3 step 3)
 ├── scripts/writeback_contract.sql   SQL assertions for the T3 state machine (step 4)
+├── scripts/prune_change_requests.py dry-run-first retention worker (T3 6.3)
 ├── ingest/joineryflow.py            pure snapshot reader and draft builder (step 2)
 ├── docs/etl-joineryflow.md          ETL design (final)
 ├── docs/etl-joineryflow-progress.md ETL implementation log and verification
@@ -166,10 +167,10 @@ python -m pytest -q tests                                        # HTTP contract
 ```
 
 The four ETL integration cases in `tests/test_etl.py` skip unless `ML_ETL_DSN` points at a fresh
-database that has imported the joineryflow snapshot; the fourteen write-back integration cases in
+database that has imported the joineryflow snapshot; the seventeen write-back integration cases in
 `tests/test_writeback.py` skip unless `ML_WRITEBACK_DSN` is set. The dedicated `etl` and
 `writeback` CI jobs supply those DSNs. On the CI `api` recipe the suite reports
-`179 passed, 18 skipped`.
+`179 passed, 21 skipped`.
 
 Design and decisions: [`docs/api-v1.md`](docs/api-v1.md) (endpoints, SQL additions, instrumentation, evaluation thresholds). Implementation log with verification for every step: [`docs/t1-progress.md`](docs/t1-progress.md).
 
@@ -329,10 +330,16 @@ immediately, the same diff returns `no_change` instead of being filed twice, and
 clears a field. An import of a snapshot exported before an applied request is refused rather than
 allowed to revert it.
 
+Retention cannot weaken that guard. Every 2xx advances a dedicated upstream-write watermark
+(`material_writeback_state`), including the `applied_unverified` cases where the PATCH landed but
+the local row was not written; the importer compares `snapshot.exported_at` against the watermark,
+not against live request rows. `scripts/prune_change_requests.py` is dry-run by default, deletes
+only `applied` and `rejected` after 90 days, and never touches the watermark or `material_event`.
+
 Measured on a fresh PostgreSQL 16 database: `scripts/writeback_contract.sql` green with zero
-residual rows, `tests/test_writeback.py` 22/22 with `ML_WRITEBACK_DSN`,
+residual rows, `tests/test_writeback.py` 25/25 with `ML_WRITEBACK_DSN`,
 `tests/test_writeback_api.py` 12/12 in the `api` job, and the full suite
-`179 passed, 18 skipped` on the CI `api` recipe. The dedicated `writeback` CI job rebuilds this
+`179 passed, 21 skipped` on the CI `api` recipe. The dedicated `writeback` CI job rebuilds this
 from scratch on every PR with its own `ml_writeback` database; no `ML_JF_*` credential is set
 there.
 
@@ -365,7 +372,7 @@ Edit the material pool at the top of `proto/build_db.py` (`BOARDS` / `HARDWARE` 
 - [x] **Real-data ETL (snapshot-first)**: committed 18-row joineryflow snapshot, executable mapping v2, pure reader/draft builder, idempotent import CLI, SQL contract, integration tests and a dedicated `etl` CI job (PRs #9-#13), verified end to end on PostgreSQL 16
 - [x] **Write-back executor (T3)**: SQL-owned approval state machine with a five-minute lease and `FOR UPDATE SKIP LOCKED`, dry-run-first PATCH worker with a fake upstream in CI, five HTTP review routes, SQL contract and a dedicated `writeback` CI job
 
-**Next step: operational hardening, not another structural gap.** The model layer now covers design, search, supplier imports, duplicate merge, MCP, real-data ETL and approval-based write-back. What remains depends on the live source system: incremental sync needs joineryflow's `updated_at` and real credentials, while `Idempotency-Key` support, the exact workspace guard, request retention and worker scheduling are open questions recorded in [`docs/t3-writeback.md`](docs/t3-writeback.md) §16 and [`docs/t3-progress.md`](docs/t3-progress.md). ETIM/eCl@ss codes and EPD collection stay reserved slots until real supplier classification data arrives. T1b closed the two gaps the read API used to advertise: families collapse by default (`expand=variants` returns the records) and `format=json` exports the versioned envelope validated by `schema/export.schema.json`. `docs/t2-merge.md` §9 explains recovery without an `unmerge()`.
+**Next step: operational hardening, not another structural gap.** The model layer now covers design, search, supplier imports, duplicate merge, MCP, real-data ETL and approval-based write-back, and the three T3 consistency follow-ups are merged (PR #17). What remains depends on the live source system: incremental sync needs joineryflow's `updated_at` and real credentials, while `Idempotency-Key` support, the exact workspace guard and resolving `applied_unverified` with a `--verify` GET pass are open questions recorded in [`docs/t3-writeback.md`](docs/t3-writeback.md) §16 and [`docs/t3-progress.md`](docs/t3-progress.md). Request retention is no longer open: the 90-day prune CLI and the watermark are shipped. Who schedules the worker and the prune job is an operations choice. ETIM/eCl@ss codes and EPD collection stay reserved slots until real supplier classification data arrives. T1b closed the two gaps the read API used to advertise: families collapse by default (`expand=variants` returns the records) and `format=json` exports the versioned envelope validated by `schema/export.schema.json`. `docs/t2-merge.md` §9 explains recovery without an `unmerge()`.
 
 ---
 

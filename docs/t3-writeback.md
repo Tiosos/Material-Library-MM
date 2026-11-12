@@ -187,7 +187,7 @@ one would require editing the CHECK in `schema/material.sql`.
 | `material_change_request_decide(p_id, p_decision, p_reason, p_actor)` | `jsonb` | status, `decided_by/at`, one event |
 | `material_change_request_claim(p_limit, p_actor, p_lease)` | `setof`/`jsonb` batch | `claimed_at/by`, `attempts + 1`, `idempotency_key` |
 | `material_change_request_plan(p_id)` | `jsonb` | none (pure, used by dry-run and `GET`) |
-| `material_change_request_settle(p_id, p_outcome, p_status_code, p_error, p_actor)` | `jsonb` | status, `applied_at`, `error`, `last_status`, clears claim, the master row for `applied`, one event |
+| `material_change_request_settle(p_id, p_outcome, p_status_code, p_error, p_actor)` | `jsonb` | status, `applied_at`, `error`, `last_status`, clears claim, the master row for `applied`, the upstream watermark, one event |
 | `material_change_request_queue(p_status, p_limit, p_cursor)` | `jsonb` | none |
 
 `base` is `{ "rev": <material.rev at submit>, "values": { "<path>": <live value> } }`. It is
@@ -328,10 +328,42 @@ every path - clearing a field was impossible. `submit()` now normalises JSON nul
 before the type rules, which also makes `no_change` compare two nulls correctly.
 
 **The ETL must not undo it.** The importer copies snapshot values over the master row, so a
-snapshot taken *before* an apply would silently revert it. `scripts/import_joineryflow.py` now
-refuses to import when any `applied` request has `applied_at > snapshot.exported_at`, and names the
-offending ids and the first `source_id` (D19). The check reads the request table, so it depends on
-`applied` rows being retained; retention is still an operations decision (section 16).
+snapshot taken *before* an apply would silently revert it. `scripts/import_joineryflow.py` refuses
+to import when the snapshot's `exported_at` predates the last upstream write (D19). Section 6.3
+moves that judgement off the request rows and onto a watermark, so retention cannot weaken it.
+
+### 6.3 Retention and the upstream-write watermark
+
+D19 originally detected a stale snapshot by querying `material_change_request` for `applied` rows.
+That couples a safety guard to the lifetime of the records it protects: the moment retention prunes
+those rows, an old snapshot imports cleanly and reverts a confirmed write. The guard and the
+retention policy therefore had to be decided together.
+
+`material_writeback_state` is a single row per `target_system` holding
+`last_upstream_write_at`, `last_request_id` and an `advances` counter. `settle()` advances it on
+**any 2xx**, including the three `applied_unverified` branches: a stale base, a tombstone and a
+failed local write all happen *after* the PATCH answered 2xx, so the upstream may well have taken
+the change even though `material` deliberately did not. Keying the watermark on "a 2xx arrived"
+rather than "the local row was written" is the whole point.
+
+A 4xx does not advance it. A 5xx or timeout (`uncertain_outcome`) also does not: it is genuinely
+unknown whether the write landed, but advancing a monotonic watermark on a transient 503 would
+permanently refuse every snapshot exported before that moment. That case belongs with the
+`--verify` question in section 16, where a human GET decides it; the conservative alternative is
+recorded there.
+
+`scripts/import_joineryflow.py` now compares `snapshot.exported_at` with the watermark. Request ids
+and `source_id` are best-effort detail in the error message - useful when the rows still exist,
+absent when they have been pruned. For a database loaded without `writeback.sql` (the `etl` CI
+job), the table does not exist; the importer checks `to_regclass` and falls back to the old
+`applied`-row query, which is both harmless and backwards compatible. The check is a comparison,
+not a ban: a freshly exported snapshot passes.
+
+Retention is now a decision rather than an open question. `scripts/prune_change_requests.py` is
+dry-run by default (like the executor), takes `--older-than DAYS` (default 90, matching the
+search-log retention), and deletes only `applied` and `rejected` rows. It never touches `pending`,
+`approved` or `failed`, never deletes `material_event` (the audit trail) and never touches the
+watermark. Who schedules it is still an operations choice, but what it may delete is not.
 
 Implementation note (step 2): `claim()` and `settle()` keep the five states and use `claimed_at`
 as the in-flight marker. A claim writes no event row, so a happy path emits exactly three events
@@ -470,7 +502,8 @@ worker does not need FastAPI or httpx.
   `Idempotency-Key` being unique, one `material_event` per transition, and the T3 x T2 guards of
   section 6.1 (merge blocker, decide, plan, settle, retry), plus section 6.2: an applied write is
   in the master row, `rev` moved, the same diff returns `no_change`, and `after: null` clears a
-  field.
+  field. Section 6.3 adds the watermark: exactly four 2xx settles advance it, failed and unknown
+  outcomes do not, and deleting terminal request rows leaves it intact.
 - `tests/test_writeback.py`: pure unit cases for path translation and target resolution run
   without a database; integration cases skip unless `ML_WRITEBACK_DSN` is set, exactly as
   `tests/test_etl.py` skips without `ML_ETL_DSN`. The fake upstream is a stdlib `http.server`
@@ -478,8 +511,9 @@ worker does not need FastAPI or httpx.
   headers and body. Cases: dry-run is a no-op, happy path, 400 / 409 / 500 / timeout, stale
   approval, concurrent claim (two workers, one PATCH per request), forbidden paths, a merge
   blocked by an open request, a request whose material was merged away (approve refused,
-  zero PATCHes), the master row taking the value, and the importer refusing a stale snapshot
-  after an apply.
+  zero PATCHes), the master row taking the value, the importer refusing a stale snapshot
+  after an apply, the watermark surviving a retention prune, the prune CLI's dry-run no-op,
+  and a fresher snapshot passing the guarded comparison.
 - New CI job `writeback` with its own fresh `POSTGRES_DB=ml_writeback` and
   `ML_WRITEBACK_DSN`. Steps: install `pyyaml`, `psycopg[binary]`, `pytest`; load
   `material.sql, search.sql, merge.sql, seed.sql, writeback.sql` (merge.sql is needed by the
@@ -527,6 +561,10 @@ worker does not need FastAPI or httpx.
     values, `rev` has moved, the same diff returns `no_change`, and `after: null` clears a field
     (section 6.2). An import of a snapshot whose `exported_at` predates an applied request fails
     with the offending ids named and writes nothing.
+12. Retention cannot weaken the snapshot guard (section 6.3): every 2xx advances the watermark,
+    failed and unknown outcomes do not, and after the terminal request rows are pruned the importer
+    still refuses the old snapshot. The prune CLI is a no-op without `--apply`, deletes only
+    `applied` and `rejected`, and leaves the watermark and the audit trail alone.
 
 ---
 
@@ -567,6 +605,7 @@ and EPD collection, changes to search ranking, and any change to the ETL snapsho
 | 5 | Docs: README status, `data-model-v2.md` section 6, `docs/t3-progress.md` | `check_english.py` clean, relative links intact, PR opened |
 | 6 | T3 x T2 consistency (section 6.1): merge blocker, status guards at decide / plan / settle / retry, contract assertions and integration cases | contract green on both CI load orders, 21/21 write-back tests, full suite green |
 | 7 | T3 x T3 loop (section 6.2): `settle()` writes the diff home, submit validates storable values, JSON null clears, the importer refuses a stale snapshot | contract green, 22/22 write-back tests, full suite green, an old snapshot is refused after an apply |
+| 8 | Retention and the watermark (section 6.3): `material_writeback_state`, the watermark-based import guard, the prune CLI, contract assertions and integration cases | contract green, 25/25 write-back tests, full suite green, a stale snapshot stays refused after terminal rows are pruned |
 
 Effort: about two to three days at the T1/T2/ETL pace; most of it is the state machine, the
 outcome handling and making the CI simulation honest.
@@ -596,6 +635,7 @@ outcome handling and making the CI simulation honest.
 | D17 | A merge is blocked by an open request on either side; T3 re-checks `material.status` at decide, plan, settle and retry | a tombstone keeps its field values, so the base fingerprint cannot see a merge; re-pointing a request would change the upstream record its approver saw, and auto-failing it inside merge would add a sixth transition (section 6.1) |
 | D18 | `settle('applied')` writes the diff into `material` in the same transaction | the library is the source of truth (section 0); without it every read stays stale until the next snapshot, `base` compares local-to-local, and the same diff can be filed and PATCHed twice (section 6.2) |
 | D19 | An import whose snapshot predates an applied request is a hard error | the importer copies source values over the master row, so an old snapshot silently reverts a confirmed write; re-exporting is cheap, losing an applied change is not |
+| D20 | Every 2xx advances a dedicated upstream-write watermark; the importer judges staleness against it, not against live request rows | D19's guard would silently stop working as soon as retention prunes `applied` rows; the watermark is about the upstream write, so `applied_unverified` 2xx responses count too (section 6.3) |
 
 ---
 
@@ -611,11 +651,13 @@ outcome handling and making the CI simulation honest.
 4. Does the upstream accept a partial PATCH body, or does it require the full row? A full-row
    body would be riskier and would need a `GET` before each PATCH; this is deliberately out of
    v1.
-5. Retention for `applied` and `rejected` requests, and who runs the worker on a schedule, are
-   operations decisions. Like the 90-day search-log retention, they are documented rather than
-   scheduled in this repository. Retention now also bounds the D19 guard: purging `applied` rows
-   re-opens the window in which a stale snapshot could revert a confirmed write.
+5. Who schedules the worker and `scripts/prune_change_requests.py` is an operations decision.
+   What retention may delete is no longer open (D20): dry-run by default, 90 days, only `applied`
+   and `rejected`, and never the watermark or the audit trail (section 6.3).
 6. Who resolves `applied_unverified` - a stale base, a material merged away mid-flight, or a local
    write that failed? v1 leaves all three to a human. A `--verify` pass that GETs the upstream row
    and compares it with the local one is the natural next step, but it needs the upstream's read
-   shape and a token with read scope, so it is deliberately not in this round.
+   shape and a token with read scope, so it is deliberately not in this round. It should also
+   settle the one conservative choice in section 6.3: a 5xx or timeout does **not** advance the
+   watermark, so an `uncertain_outcome` that actually wrote upstream is covered only by human
+   adjudication until that pass exists.

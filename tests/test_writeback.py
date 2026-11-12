@@ -35,8 +35,19 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "scripts" / "apply_change_requests.py"
 IMPORT_CLI = ROOT / "scripts" / "import_joineryflow.py"
+PRUNE_CLI = ROOT / "scripts" / "prune_change_requests.py"
 MAPPING = ROOT / "mapping" / "joineryflow.yaml"
 WRITE_SQL = ROOT / "schema" / "writeback.sql"
+
+
+@pytest.fixture(scope="module")
+def importer():
+    spec = importlib.util.spec_from_file_location("import_joineryflow", IMPORT_CLI)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.fixture(scope="module")
@@ -236,6 +247,9 @@ def clean_db(wb_conn):
         before = cur.fetchall()
         cur.execute("DELETE FROM material_event WHERE entity='material_change_request'")
         cur.execute("DELETE FROM material_change_request")
+        # Each test starts with no upstream-write watermark; retention tests
+        # prove it survives pruning, but must not leak into the next test.
+        cur.execute("DELETE FROM material_writeback_state")
     yield wb_conn
     # T3 x T2 tests supersede a row to prove the guards; put it back so the next
     # test and the duplicate scan see the imported catalogue again.
@@ -302,6 +316,8 @@ def state(conn, rid) -> dict:
             "SELECT status, attempts, last_status, error, applied_at, claimed_at "
             "FROM material_change_request WHERE id=%s", (rid,))
         row = cur.fetchone()
+    if row is None:
+        return None
     return dict(zip(("status", "attempts", "last_status", "error",
                      "applied_at", "claimed_at"), row))
 
@@ -317,6 +333,29 @@ def count_materials(conn) -> int:
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM material")
         return cur.fetchone()[0]
+
+
+def watermark(conn) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT last_upstream_write_at, last_request_id, advances "
+            "FROM material_writeback_state WHERE target_system='joineryflow'")
+        row = cur.fetchone()
+    return dict(zip(("at", "request_id", "advances"), row)) if row else None
+
+
+def run_prune(dsn, *extra):
+    return subprocess.run(
+        [sys.executable, str(PRUNE_CLI), "--dsn", dsn, *extra, "--json", "-"],
+        capture_output=True, text=True, cwd=ROOT, timeout=60, check=False,
+    )
+
+
+def run_import(dsn):
+    return subprocess.run(
+        [sys.executable, str(IMPORT_CLI), "--dsn", dsn, "--quiet"],
+        capture_output=True, text=True, cwd=ROOT, timeout=120, check=False,
+    )
 
 
 def count_events(conn, rid=None) -> int:
@@ -617,8 +656,67 @@ def test_import_refuses_a_snapshot_older_than_an_applied_change(clean_db, upstre
         capture_output=True, text=True, cwd=ROOT, timeout=120, check=False,
     )
     assert proc.returncode == 1, proc.stdout
-    assert "predates 1 applied write-back request" in proc.stderr
+    assert "predates an upstream write" in proc.stderr
+    assert "watermark" in proc.stderr
     assert "Re-export the snapshot first" in proc.stderr
     # nothing was imported, so nothing was reverted
     assert count_materials(clean_db) == before
     assert float(live_cost(clean_db, uid)) == 914.0
+
+
+# ---------------------------------------------------------------------------
+# 6.3: retention and the upstream-write watermark
+# ---------------------------------------------------------------------------
+
+def test_watermark_survives_pruning_and_still_refuses_the_old_snapshot(
+        clean_db, upstream, wb_dsn):
+    """The D19 guard must not depend on the applied rows still being there."""
+    uid = one_uid(clean_db, 0)
+    rid = make_request(clean_db, uid, 915.0)
+    assert run_cli(upstream, wb_dsn, "--apply", "--request-id", str(rid)).returncode == 0
+    wm = watermark(clean_db)
+    assert wm is not None and wm["request_id"] == rid and wm["advances"] == 1
+
+    pruned = run_prune(wb_dsn, "--older-than", "0", "--apply")
+    assert pruned.returncode == 0, pruned.stderr
+    rep = json.loads(pruned.stdout)
+    assert rep["mode"] == "apply" and rep["deleted"] == 1
+    assert state(clean_db, rid) is None                 # row is gone
+    assert watermark(clean_db) == wm                    # watermark untouched
+
+    proc = run_import(wb_dsn)
+    assert proc.returncode == 1, proc.stdout
+    assert "predates an upstream write" in proc.stderr
+    assert "still-applied request" not in proc.stderr  # no rows left to name
+    assert float(live_cost(clean_db, uid)) == 915.0    # nothing was reverted
+
+
+def test_prune_dry_run_writes_nothing_and_keeps_actionable_rows(clean_db, upstream, wb_dsn):
+    applied = make_request(clean_db, one_uid(clean_db, 0), 916.0)
+    assert run_cli(upstream, wb_dsn, "--apply", "--request-id", str(applied)).returncode == 0
+    pending = make_request(clean_db, one_uid(clean_db, 1), 917.0, approve=False)
+
+    proc = run_prune(wb_dsn, "--older-than", "0")
+    assert proc.returncode == 0, proc.stderr
+    rep = json.loads(proc.stdout)
+    assert rep["mode"] == "dry-run" and rep["candidates"] == 1 and rep["deleted"] == 0
+    assert state(clean_db, applied)["status"] == "applied"
+    assert state(clean_db, pending)["status"] == "pending"
+    assert watermark(clean_db)["advances"] == 1
+
+    real = run_prune(wb_dsn, "--older-than", "0", "--apply")
+    assert real.returncode == 0, real.stderr
+    assert json.loads(real.stdout)["deleted"] == 1
+    assert state(clean_db, pending)["status"] == "pending"
+    assert watermark(clean_db)["advances"] == 1
+
+
+def test_a_fresher_snapshot_passes_the_watermark(clean_db, upstream, wb_dsn, importer):
+    """The guard is a comparison, not a permanent ban on imports."""
+    rid = make_request(clean_db, one_uid(clean_db, 0), 918.0)
+    assert run_cli(upstream, wb_dsn, "--apply", "--request-id", str(rid)).returncode == 0
+
+    with (ROOT / "fixtures" / "joineryflow-hartwood.jsonl").open(encoding="utf-8") as fh:
+        old = json.loads(fh.readline())["exported_at"]
+    assert importer.snapshot_conflict(clean_db, old)["stale"] is True
+    assert importer.snapshot_conflict(clean_db, "2099-01-01T00:00:00Z")["stale"] is False

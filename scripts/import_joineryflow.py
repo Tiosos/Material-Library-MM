@@ -43,11 +43,19 @@ from ingest.mapping import Mapping
 USAGE = 2
 FAILURE = 1
 
-# A snapshot older than a write-back that already landed would silently revert
-# it, because the importer copies source values over the master row. The check
-# is a hard error: re-export is cheap, losing an applied change is not.
+# A snapshot older than the last upstream write would silently revert it,
+# because the importer copies source values over the master row. The judge is
+# material_writeback_state: a watermark that survives request retention. The
+# applied rows are only best-effort detail in the error message, and a fallback
+# for a database that predates the watermark (docs/t3-writeback.md 6.3).
+WATERMARK_SQL = """
+SELECT last_upstream_write_at, last_request_id,
+       last_upstream_write_at > %(exported_at)s::timestamptz AS stale
+  FROM material_writeback_state
+ WHERE target_system = 'joineryflow'
+"""
 STALE_SNAPSHOT_SQL = """
-SELECT r.id, m.source_id, r.applied_at
+SELECT r.id, m.source_id
   FROM material_change_request r
   JOIN material m ON m.material_uid = r.material_uid
  WHERE r.status = 'applied'
@@ -110,23 +118,35 @@ def build_plan(args: argparse.Namespace) -> tuple[dict, list, Rules]:
     return report, drafts, rules
 
 
-def stale_snapshot_conflicts(conn, exported_at: str) -> list[tuple]:
-    """Applied write-backs that happened after the snapshot was exported."""
+def snapshot_conflict(conn, exported_at: str) -> dict:
+    """The stale-snapshot verdict, driven by a watermark that outlives retention."""
     with conn.cursor() as cur:
+        # The etl CI job loads no writeback.sql, so the table may be absent.
+        cur.execute("SELECT to_regclass('material_writeback_state')")
+        catalog = cur.fetchone()
+        has_watermark = bool(catalog and catalog[0])
+        wm = None
+        if has_watermark:
+            cur.execute(WATERMARK_SQL, {"exported_at": exported_at})
+            wm = cur.fetchone()
         cur.execute(STALE_SNAPSHOT_SQL, {"exported_at": exported_at})
-        return cur.fetchall()
+        rows = cur.fetchall() or []
+    return {"stale": bool(wm and wm[2]) or bool(rows),
+            "watermark": wm, "applied_rows": rows}
 
 
-def _stale_message(exported_at: str, conflicts: list[tuple]) -> str:
-    ids = ", ".join(str(row[0]) for row in conflicts[:5])
-    more = "" if len(conflicts) <= 5 else f" (+{len(conflicts) - 5} more)"
-    first = conflicts[0][1]
-    return (
-        f"snapshot exported_at {exported_at} predates {len(conflicts)} applied "
-        f"write-back request(s) [{ids}{more}]; the first row is {first}. "
-        "Re-export the snapshot first: an older snapshot would overwrite a change "
-        "that was already applied upstream."
-    )
+def _stale_message(exported_at: str, verdict: dict) -> str:
+    wm, rows = verdict["watermark"], verdict["applied_rows"]
+    parts = [f"snapshot exported_at {exported_at} predates an upstream write"]
+    if wm and wm[2]:
+        parts.append(f" (watermark {wm[0]} from request {wm[1]})")
+    if rows:
+        ids = ", ".join(str(row[0]) for row in rows[:5])
+        more = "" if len(rows) <= 5 else f" (+{len(rows) - 5} more)"
+        parts.append(f"; still-applied request(s) [{ids}{more}] first row {rows[0][1]}")
+    parts.append(". Re-export the snapshot first: an older snapshot would overwrite "
+                 "a change that was already applied upstream.")
+    return "".join(parts)
 
 
 def execute(dsn: str, drafts: list, rules: Rules, *, connect=None,
@@ -140,9 +160,9 @@ def execute(dsn: str, drafts: list, rules: Rules, *, connect=None,
     conn = connect(dsn)
     try:
         if exported_at:
-            conflicts = stale_snapshot_conflicts(conn, exported_at)
-            if conflicts:
-                raise StaleSnapshotError(_stale_message(exported_at, conflicts))
+            verdict = snapshot_conflict(conn, exported_at)
+            if verdict["stale"]:
+                raise StaleSnapshotError(_stale_message(exported_at, verdict))
         stats = apply_drafts(conn, drafts, mapping)
         conn.commit()
         return stats
