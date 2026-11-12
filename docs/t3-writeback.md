@@ -154,8 +154,13 @@ or `source_*` keys.
 
 ## 5. Data model: `schema/writeback.sql`
 
-New file, loaded after `schema/merge.sql` and before `schema/seed.sql` in the `api` job, and
+New file, loaded after `schema/merge.sql` **and after** `schema/seed.sql` in the `api` job, and
 after `schema/seed.sql` in the new `writeback` job. Additive only, mirroring T2's D8.
+
+Implementation note (step 4): this sentence originally said "before seed.sql", which is wrong.
+`material_writeback_catalog.category_code` references `material_category`, whose rows
+`seed.sql` inserts; loading this file first fails on that foreign key. Both jobs now load
+`seed.sql` before `writeback.sql`.
 
 ```sql
 ALTER TABLE material_change_request
@@ -231,6 +236,15 @@ writing `applied`; if it changed, the request becomes `failed` with `error = 'st
 if the upstream already answered 2xx. That case is surfaced in the report as
 `outcome = 'applied_unverified'` and needs human attention - it is the one place where the two
 systems can legitimately diverge.
+
+Implementation note (step 2): `claim()` and `settle()` keep the five states and use `claimed_at`
+as the in-flight marker. A claim writes no event row, so a happy path emits exactly three events
+(insert, approve, apply) as acceptance criterion 2 requires; `settle()` writes the third one.
+Both functions take a `p_lease` parameter defaulting to five minutes, which lets the contract
+tests exercise expiry without a real wait. `settle()` refuses a caller that no longer owns a live
+lease, and `retry()` is the explicit human `failed -> approved` transition that refuses
+`error = 'uncertain_outcome'`. `claim()` also takes an optional `p_only_id` so the CLI's
+`--request-id` can claim exactly one request without Python filtering or releasing a batch.
 
 ---
 

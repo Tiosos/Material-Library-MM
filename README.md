@@ -20,11 +20,13 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 │   ├── material.sql            canonical DDL (PostgreSQL, with weighted tsvector + pg_trgm)
 │   ├── search.sql              search / facets / suggest / paged payload functions
 │   ├── api.sql                 read-only payload functions (detail, family, changes, export, measures)
+│   ├── merge.sql               duplicate scan / preview / merge / ignore (T2)
+│   ├── writeback.sql           approval state machine + write-back mapping projections (T3)
 │   └── material.schema.json    UMR exchange-format JSON Schema (contract)
-├── api/                        read-only HTTP API (FastAPI, T1)
+├── api/                        read-only HTTP API (FastAPI, T1) plus five review routes (T3)
 ├── eval/                       golden search cases + deterministic evaluation fixture
 ├── scripts/eval_search.py      search evaluation runner (MRR@10, hit@1, zero-result, level accuracy)
-├── tests/                      HTTP smoke tests (pytest + TestClient)
+├── tests/                      HTTP smoke tests, ETL and write-back integration tests (pytest)
 ├── mapping/
 │   └── joineryflow.yaml        executable v2 rules: 9 catalog tables → UMR (ETL step 1)
 ├── fixtures/
@@ -33,9 +35,13 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 ├── scripts/check_joineryflow_mapping.py  static mapping v2 validator
 ├── scripts/import_joineryflow.py    snapshot import CLI (step 3)
 ├── scripts/etl_contract.sql         post-import SQL assertions (step 4)
+├── scripts/apply_change_requests.py dry-run-first write-back worker (T3 step 3)
+├── scripts/writeback_contract.sql   SQL assertions for the T3 state machine (step 4)
 ├── ingest/joineryflow.py            pure snapshot reader and draft builder (step 2)
 ├── docs/etl-joineryflow.md          ETL design (final)
 ├── docs/etl-joineryflow-progress.md ETL implementation log and verification
+├── docs/t3-writeback.md             T3 write-back design (final)
+├── docs/t3-progress.md              T3 implementation log and verification
 └── proto/                       ★ runnable prototype (zero dependencies, to validate the search feel)
     ├── build_db.py             generate the sample library (100 rows, real brands and field structure)
     ├── search.py               tiered graceful-degradation search implementation
@@ -160,8 +166,10 @@ python -m pytest -q tests                                        # HTTP contract
 ```
 
 The four ETL integration cases in `tests/test_etl.py` skip unless `ML_ETL_DSN` points at a fresh
-database that has imported the joineryflow snapshot; the CI `etl` job supplies it. On the CI
-`api` recipe the suite reports `159 passed, 4 skipped`.
+database that has imported the joineryflow snapshot; the ten write-back integration cases in
+`tests/test_writeback.py` skip unless `ML_WRITEBACK_DSN` is set. The dedicated `etl` and
+`writeback` CI jobs supply those DSNs. On the CI `api` recipe the suite reports
+`178 passed, 14 skipped`.
 
 Design and decisions: [`docs/api-v1.md`](docs/api-v1.md) (endpoints, SQL additions, instrumentation, evaluation thresholds). Implementation log with verification for every step: [`docs/t1-progress.md`](docs/t1-progress.md).
 
@@ -271,6 +279,56 @@ and the three numbers that differ from the design prose:
 
 ---
 
+## Write-back executor (T3)
+
+Approved changes can be written back to joineryflow, but **only through an explicit worker**. The
+HTTP API can file, list, inspect, approve and reject a `material_change_request`; it never sends a
+PATCH and there is no `/apply` route. CI never egresses to the source system either:
+`tests/test_writeback.py` starts a stdlib `http.server` on 127.0.0.1 with an ephemeral port and a
+dummy token.
+
+```bash
+# 1) Load the state machine after seed.sql (it references material_category rows)
+psql -q -v ON_ERROR_STOP=1 -d ml -f schema/writeback.sql
+
+# 2) Review routes (FastAPI; X-Actor names the caller)
+#    POST /v1/change-requests, GET /v1/change-requests,
+#    GET /v1/change-requests/{id}, POST .../approve, POST .../reject
+
+# 3) Dry-run is the default: zero writes, zero events, zero HTTP calls
+python scripts/apply_change_requests.py --dsn "$ML_WRITEBACK_DSN" --dry-run --json -
+
+# 4) A real PATCH needs explicit configuration (missing settings exit 2 before any DB write)
+#    Use the local fake server's URL in tests and the real base URL in production.
+set ML_JF_BASE_URL=http://127.0.0.1:PORT
+set ML_JF_TOKEN=...
+python scripts/apply_change_requests.py --dsn "$ML_WRITEBACK_DSN" --apply --json report.json
+
+# 5) Assert the state machine on a fresh database; no upstream credentials needed
+set ML_WRITEBACK_DSN=postgresql://postgres:postgres@127.0.0.1:5432/ml_writeback
+psql -q -v ON_ERROR_STOP=1 -d ml_writeback -f scripts/writeback_contract.sql
+python -m pytest -q tests/test_writeback.py --noconftest
+```
+
+All five statuses are owned by SQL: `submit`, `decide`, `claim`, `settle` and `retry`. A claim
+uses `FOR UPDATE SKIP LOCKED` with a five-minute lease; `before` and the field-level `base`
+fingerprint are computed server-side; a stale approval is refused at approve and becomes
+`failed / applied_unverified` at apply. A 5xx or timeout becomes `failed / uncertain_outcome` and
+is never retried automatically. `Idempotency-Key: mlcr-{id}` is sent but not relied upon, and the
+token is never printed or written to a report.
+
+Measured on a fresh PostgreSQL 16 database: `scripts/writeback_contract.sql` green with zero
+residual rows, `tests/test_writeback.py` 18/18 with `ML_WRITEBACK_DSN`,
+`tests/test_writeback_api.py` 11/11 in the `api` job, and the full suite
+`178 passed, 14 skipped` on the CI `api` recipe. The dedicated `writeback` CI job rebuilds this
+from scratch on every PR with its own `ml_writeback` database; no `ML_JF_*` credential is set
+there.
+
+Design (final): [`docs/t3-writeback.md`](docs/t3-writeback.md). Verification log and decisions:
+[`docs/t3-progress.md`](docs/t3-progress.md).
+
+---
+
 ## Changing the prototype data
 
 Edit the material pool at the top of `proto/build_db.py` (`BOARDS` / `HARDWARE` / `EDGING` / `GLASS` / `TIMBER` / `BENCHTOP` / `APPLIANCE` / `CUSTOM` / `HIRE` / `CONSUMABLE`), then re-run `python3 build_db.py`.
@@ -293,9 +351,9 @@ Edit the material pool at the top of `proto/build_db.py` (`BOARDS` / `HARDWARE` 
 - [x] **Read API v1b (T1b)**: families collapse to their best hit with `variant_count`/`variants` (`expand=variants` returns the records), and `format=json` exports the versioned envelope (`{schema_version, exported_at, count, records}`) validated by `schema/export.schema.json`
 - [x] **MCP server (B8)**: seven read-only tools plus a `materials://{uid}` resource over the read API, stdio by default and streamable HTTP on request, with the API's errors passed through verbatim
 - [x] **Real-data ETL (snapshot-first)**: committed 18-row joineryflow snapshot, executable mapping v2, pure reader/draft builder, idempotent import CLI, SQL contract, integration tests and a dedicated `etl` CI job (PRs #9-#13), verified end to end on PostgreSQL 16
-- [ ] write-back executor (the request table is ready, the PATCH executor is not done)
+- [x] **Write-back executor (T3)**: SQL-owned approval state machine with a five-minute lease and `FOR UPDATE SKIP LOCKED`, dry-run-first PATCH worker with a fake upstream in CI, five HTTP review routes, SQL contract and a dedicated `writeback` CI job
 
-**Next step: the write-back executor** — `material_change_request` and its approval state machine are in place, but the PATCH executor that applies an approved diff to joineryflow is not built. The real-data ETL no longer sits in front of it: it imports the committed snapshot, never connects to the source database, and is verified in CI. T1b closed the two gaps the read API used to advertise: families collapse by default (`expand=variants` returns the records) and `format=json` exports the versioned envelope validated by `schema/export.schema.json`. `docs/t2-merge.md` §9 explains recovery without an `unmerge()`.
+**Next step: operational hardening, not another structural gap.** The model layer now covers design, search, supplier imports, duplicate merge, MCP, real-data ETL and approval-based write-back. What remains depends on the live source system: incremental sync needs joineryflow's `updated_at` and real credentials, while `Idempotency-Key` support, the exact workspace guard, request retention and worker scheduling are open questions recorded in [`docs/t3-writeback.md`](docs/t3-writeback.md) §16 and [`docs/t3-progress.md`](docs/t3-progress.md). ETIM/eCl@ss codes and EPD collection stay reserved slots until real supplier classification data arrives. T1b closed the two gaps the read API used to advertise: families collapse by default (`expand=variants` returns the records) and `format=json` exports the versioned envelope validated by `schema/export.schema.json`. `docs/t2-merge.md` §9 explains recovery without an `unmerge()`.
 
 ---
 

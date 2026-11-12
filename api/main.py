@@ -797,3 +797,201 @@ def duplicate_ignore(
         },
     )
     return _duplicate_result(report)
+
+
+# ---------------------------------------------------------------------------
+# Write-back change requests (T3, docs/t3-writeback.md section 10)
+# ---------------------------------------------------------------------------
+# Five review routes and deliberately no apply route (D1): a network write is
+# the CLI worker's job, never something that holds a response open. SQL owns
+# every transition. These routes validate shape, map {ok, code} outcomes into
+# the T1 error shape and return the dry-run plan. Caller mistakes raised by SQL
+# as SQLSTATE 22023 already become 400 through invalid_parameter_handler.
+
+class ChangeRequestSubmit(BaseModel):
+    material_uid: str = Field(min_length=4, max_length=64)
+    diffs: list[dict[str, Any]] = Field(min_length=1)
+    reason: str | None = Field(default=None, max_length=500)
+    target_system: str | None = Field(default=None, max_length=32)
+
+
+class ChangeRequestDecision(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
+
+
+# The submit edge treats an unknown uid as a 400 bad_request, while the decide
+# edge treats an unknown request id as a 404 (docs section 10). Every other
+# business outcome is a 409 conflict, because the row is in a terminal or stale
+# state rather than malformed input.
+_SUBMIT_FAILURES = {
+    "not_found": (400, "bad_request", "material not found"),
+    "conflict": (409, "conflict", "material cannot accept a change request"),
+    "forbidden_path": (400, "bad_request", "diff path is not allowed"),
+    "no_change": (400, "bad_request", "the submitted value equals the live value"),
+    "open_request": (409, "conflict", "an open request already covers this path"),
+}
+_DECISION_FAILURES = {
+    "not_found": (404, "not_found", "change request not found"),
+    "already_decided": (409, "conflict", "the request was already decided"),
+    "self_approval": (409, "conflict", "the submitter cannot approve their own request"),
+    "stale_base": (409, "conflict", "the approval no longer matches the live material"),
+}
+
+
+def _writeback_result(report: dict[str, Any], failures: dict[str, tuple[int, str, str]]) -> dict[str, Any]:
+    """Return the SQL report, or the ApiError that matches its code."""
+    if report.get("ok"):
+        return report
+    status, error_code, message = failures.get(
+        report.get("code"), (400, "bad_request", "change request refused")
+    )
+    detail = {k: v for k, v in report.items() if k not in {"ok", "code"}}
+    raise ApiError(status, error_code, message, detail)
+
+
+@app.post(
+    "/v1/change-requests",
+    tags=["writeback"],
+    status_code=201,
+    dependencies=[Depends(require_token)],
+)
+def create_change_request(
+    body: ChangeRequestSubmit,
+    x_actor: str | None = Header(default=None, alias="X-Actor"),
+    conn: psycopg.Connection = Depends(db.connection),
+) -> dict[str, Any]:
+    """File a diff request; `before` and `base` are computed by SQL, never by the caller."""
+    report = db.query_value(
+        conn,
+        """
+        SELECT material_change_request_submit(
+            %(uid)s::text, %(diffs)s::jsonb, %(reason)s::text,
+            %(actor)s::text, %(target)s::text
+        )
+        """,
+        {
+            "uid": body.material_uid,
+            "diffs": json.dumps(body.diffs),
+            "reason": body.reason,
+            "actor": actor_from(x_actor),
+            "target": body.target_system,
+        },
+    )
+    _writeback_result(report, _SUBMIT_FAILURES)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "id": report["id"],
+        "status": report["status"],
+        "material_uid": report["material_uid"],
+        "diffs": report["diffs"],
+        "base": report["base"],
+    }
+
+
+@app.get("/v1/change-requests", tags=["writeback"], dependencies=[Depends(require_token)])
+def list_change_requests(
+    status: str = Query(
+        default="actionable",
+        pattern="^(actionable|pending|approved|rejected|applied|failed|all)$",
+    ),
+    limit: int = Query(default=20, ge=1, le=100),
+    cursor: str | None = Query(default=None),
+    conn: psycopg.Connection = Depends(db.connection),
+) -> dict[str, Any]:
+    """The review list: actionable (pending + approved + failed) by default."""
+    offset = decode_cursor(cursor)
+    payload = db.query_one(
+        conn,
+        "SELECT material_change_request_queue(%(status)s, %(limit)s, %(offset)s) AS payload",
+        {"status": status, "limit": limit, "offset": offset},
+    )["payload"]
+    total = int(payload["total"])
+    rows = payload["rows"]
+    next_offset = offset + len(rows)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": payload["status"],
+        "total": total,
+        "offset": offset,
+        "limit": int(payload["limit"]),
+        "rows": rows,
+        "next_cursor": encode_cursor(next_offset) if next_offset < total else None,
+    }
+
+
+@app.get(
+    "/v1/change-requests/{request_id}",
+    tags=["writeback"],
+    dependencies=[Depends(require_token)],
+)
+def change_request_detail(
+    request_id: int,
+    conn: psycopg.Connection = Depends(db.connection),
+) -> dict[str, Any]:
+    """Full request plus its PATCH preview; no writes and no Authorization header."""
+    row = db.query_value(
+        conn,
+        "SELECT to_jsonb(r) FROM material_change_request r WHERE id = %(id)s",
+        {"id": request_id},
+    )
+    if row is None:
+        raise ApiError(404, "not_found", "change request not found", {"id": request_id})
+    plan = db.query_value(
+        conn, "SELECT material_change_request_plan(%(id)s)", {"id": request_id}
+    )
+    return {**row, "plan": plan, "schema_version": SCHEMA_VERSION}
+
+
+def _decide_change_request(
+    request_id: int,
+    decision: str,
+    body: ChangeRequestDecision | None,
+    x_actor: str | None,
+    conn: psycopg.Connection,
+) -> dict[str, Any]:
+    report = db.query_value(
+        conn,
+        """
+        SELECT material_change_request_decide(
+            %(id)s, %(decision)s::text, %(reason)s::text, %(actor)s::text
+        )
+        """,
+        {
+            "id": request_id,
+            "decision": decision,
+            "reason": body.reason if body else None,
+            "actor": actor_from(x_actor),
+        },
+    )
+    return {**_writeback_result(report, _DECISION_FAILURES),
+            "schema_version": SCHEMA_VERSION}
+
+
+@app.post(
+    "/v1/change-requests/{request_id}/approve",
+    tags=["writeback"],
+    dependencies=[Depends(require_token)],
+)
+def approve_change_request(
+    request_id: int,
+    body: ChangeRequestDecision | None = None,
+    x_actor: str | None = Header(default=None, alias="X-Actor"),
+    conn: psycopg.Connection = Depends(db.connection),
+) -> dict[str, Any]:
+    """Approve a pending request; a different actor and a matching base are required."""
+    return _decide_change_request(request_id, "approve", body, x_actor, conn)
+
+
+@app.post(
+    "/v1/change-requests/{request_id}/reject",
+    tags=["writeback"],
+    dependencies=[Depends(require_token)],
+)
+def reject_change_request(
+    request_id: int,
+    body: ChangeRequestDecision | None = None,
+    x_actor: str | None = Header(default=None, alias="X-Actor"),
+    conn: psycopg.Connection = Depends(db.connection),
+) -> dict[str, Any]:
+    """Reject a pending request; rejecting stale data is safe, so base is not re-checked."""
+    return _decide_change_request(request_id, "reject", body, x_actor, conn)
