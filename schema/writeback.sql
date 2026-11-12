@@ -13,6 +13,12 @@
 -- human retry. Together they close the state machine in docs/t3-writeback.md
 -- section 6; the executor in step 3 only transports the resulting plans.
 --
+-- T3 x T2 consistency (docs section 6.1): every approval transition and the
+-- plan re-check material.status, so a merge that supersedes a row turns its
+-- in-flight requests into material_inactive instead of patching a tombstone.
+-- The other half of the rule lives in material_merge_preview(), which refuses
+-- to merge either side of a pair while a pending or approved request is open.
+--
 -- Conventions copied from schema/merge.sql: caller mistakes raise SQLSTATE
 -- 22023 (the HTTP edge maps them to 400 bad_request); business outcomes come
 -- back as {ok, code} so the edge can map them to 404/409 without parsing
@@ -317,6 +323,12 @@ COMMENT ON FUNCTION material_change_request_submit(text, jsonb, text, text, text
 -- only accepted while the diffed fields still match the base fingerprint:
 -- approve on a stale base returns {ok:false, code:'stale_base'} (409 at the
 -- edge). Rejection skips the staleness check; rejecting stale data is safe.
+--
+-- T3 x T2: approval also requires a live material. A merge (T2) can supersede
+-- a row after the request was filed, and the tombstone keeps its old field
+-- values, so the base check alone would still pass. Approving there would send
+-- a PATCH to an upstream record another human just declared a duplicate, so
+-- the transition returns material_inactive instead (docs section 6.1).
 CREATE OR REPLACE FUNCTION material_change_request_decide(
     p_id       bigint,
     p_decision text,
@@ -325,10 +337,11 @@ CREATE OR REPLACE FUNCTION material_change_request_decide(
 ) RETURNS jsonb
 LANGUAGE plpgsql AS $$
 DECLARE
-    v_row     material_change_request%ROWTYPE;
-    v_actor   text;
-    v_status  text;
-    v_current jsonb;
+    v_row       material_change_request%ROWTYPE;
+    v_actor     text;
+    v_status    text;
+    v_current   jsonb;
+    v_matstatus text;
 BEGIN
     IF p_decision NOT IN ('approve', 'reject') THEN
         RAISE EXCEPTION 'decision must be approve or reject (got %)', p_decision
@@ -356,6 +369,15 @@ BEGIN
 
     v_status := CASE p_decision WHEN 'approve' THEN 'approved' ELSE 'rejected' END;
     IF p_decision = 'approve' THEN
+        -- the FK guarantees the material row exists; a merge or an archive may
+        -- still have moved it out of 'active' since submit (docs 6.1)
+        SELECT m.status INTO v_matstatus
+          FROM material m WHERE m.material_uid = v_row.material_uid;
+        IF v_matstatus IN ('archived', 'superseded') THEN
+            RETURN jsonb_build_object('ok', false, 'code', 'material_inactive', 'id', p_id,
+                                      'material_uid', v_row.material_uid,
+                                      'material_status', v_matstatus);
+        END IF;
         SELECT coalesce(jsonb_agg(d ->> 'path' ORDER BY ord), '[]'::jsonb)
           INTO v_current
           FROM jsonb_array_elements(v_row.diffs) WITH ORDINALITY AS t(d, ord);
@@ -415,7 +437,19 @@ BEGIN
         RETURN jsonb_build_object('ok', false, 'code', 'not_found', 'id', p_id);
     END IF;
     SELECT * INTO v_mat FROM material WHERE material_uid = v_row.material_uid;
-    IF NOT FOUND OR v_mat.source_system <> 'joineryflow'
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'invalid_target',
+                                  'id', p_id, 'source_id', NULL);
+    END IF;
+    -- T3 x T2: no plan for a tombstone. This is the guard the executor relies
+    -- on: --apply turns a non-ok plan into settle('failed', error=code) before
+    -- any HTTP call, so a merged-away material can never be patched upstream.
+    IF v_mat.status IN ('archived', 'superseded') THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'material_inactive',
+                                  'id', p_id, 'material_uid', v_mat.material_uid,
+                                  'material_status', v_mat.status);
+    END IF;
+    IF v_mat.source_system <> 'joineryflow'
        OR v_mat.source_id !~ '^[a-z_]+:[0-9]+$' THEN
         RETURN jsonb_build_object('ok', false, 'code', 'invalid_target',
                                   'id', p_id, 'source_id', v_mat.source_id);
@@ -621,6 +655,11 @@ COMMENT ON FUNCTION material_change_request_claim(integer, text, interval, bigin
 -- moved after approval the request becomes failed with error 'stale_base' even
 -- when the upstream already answered 2xx; the report calls that outcome
 -- 'applied_unverified' because the two systems may legitimately diverge.
+--
+-- T3 x T2: applied also re-checks material.status, for the merge that lands
+-- between plan() and this call. The 2xx may well be real, but it landed on a
+-- row T2 has just superseded, so it is recorded as failed / material_inactive
+-- and reported the same way as stale_base - a human decides (docs 6.1).
 CREATE OR REPLACE FUNCTION material_change_request_settle(
     p_id          bigint,
     p_outcome     text,
@@ -631,14 +670,15 @@ CREATE OR REPLACE FUNCTION material_change_request_settle(
 ) RETURNS jsonb
 LANGUAGE plpgsql AS $$
 DECLARE
-    v_row     material_change_request%ROWTYPE;
-    v_actor   text;
-    v_status  text := 'failed';
-    v_error   text;
-    v_outcome text;
-    v_paths   jsonb;
-    v_current jsonb;
-    v_stale   boolean := false;
+    v_row        material_change_request%ROWTYPE;
+    v_actor      text;
+    v_status     text := 'failed';
+    v_error      text;
+    v_outcome    text;
+    v_paths      jsonb;
+    v_current    jsonb;
+    v_matstatus  text;
+    v_unverified boolean := false;
 BEGIN
     IF p_outcome IS NULL OR p_outcome NOT IN ('applied', 'failed', 'unknown') THEN
         RAISE EXCEPTION 'outcome must be applied, failed or unknown'
@@ -686,9 +726,18 @@ BEGIN
           INTO v_paths
           FROM jsonb_array_elements(v_row.diffs) WITH ORDINALITY AS t(d, ord);
         v_current := ml_writeback_current_values(v_row.material_uid, v_paths);
+        SELECT m.status INTO v_matstatus
+          FROM material m WHERE m.material_uid = v_row.material_uid;
         IF v_current IS DISTINCT FROM (v_row.base -> 'values') THEN
-            v_stale   := true;
+            v_unverified := true;
             v_error   := 'stale_base';
+            v_outcome := 'applied_unverified';
+        ELSIF v_matstatus IN ('archived', 'superseded') THEN
+            -- a merge landed while the PATCH was in flight: the upstream write
+            -- may well have succeeded, but it landed on a record T2 has just
+            -- declared a duplicate. Report it like stale_base: a human decides.
+            v_unverified := true;
+            v_error   := 'material_inactive';
             v_outcome := 'applied_unverified';
         ELSE
             v_status := 'applied';
@@ -719,18 +768,20 @@ BEGIN
                                'actor', v_actor, 'reason', p_error,
                                'outcome', v_outcome,
                                'status_code', p_status_code,
-                               'stale_base', v_stale),
+                               'unverified', v_unverified,
+                               'error', v_error,
+                               'material_status', v_matstatus),
             v_actor);
 
     RETURN jsonb_build_object('ok', true, 'code', v_status,
                               'outcome', v_outcome, 'id', p_id,
                               'status', v_status, 'error', v_error,
                               'last_status', p_status_code,
-                              'applied_unverified', v_stale);
+                              'applied_unverified', v_unverified);
 END $$;
 
 COMMENT ON FUNCTION material_change_request_settle(bigint, text, integer, text, text, interval) IS
-    'Settle a claimed request: applied, failed or unknown; re-checks base before applied and writes one event.';
+    'Settle a claimed request: applied, failed or unknown; re-checks base and material status before applied and writes one event.';
 
 -- ---------------------------------------------------------------------------
 -- material_change_request_retry - explicit human retry of a known failure
@@ -747,10 +798,11 @@ CREATE OR REPLACE FUNCTION material_change_request_retry(
 ) RETURNS jsonb
 LANGUAGE plpgsql AS $$
 DECLARE
-    v_row     material_change_request%ROWTYPE;
-    v_actor   text;
-    v_paths   jsonb;
-    v_current jsonb;
+    v_row       material_change_request%ROWTYPE;
+    v_actor     text;
+    v_paths     jsonb;
+    v_current   jsonb;
+    v_matstatus text;
 BEGIN
     IF length(coalesce(p_reason, '')) > 500 THEN
         RAISE EXCEPTION 'reason must be at most 500 characters' USING ERRCODE = '22023';
@@ -775,6 +827,15 @@ BEGIN
         RETURN jsonb_build_object('ok', false, 'code', 'self_approval',
                                   'id', p_id, 'requested_by', v_row.requested_by,
                                   'decided_by', v_row.decided_by);
+    END IF;
+    -- retry is an approval transition too, so it carries the same T3 x T2
+    -- guard: a retried request must not be approved onto a tombstone
+    SELECT m.status INTO v_matstatus
+      FROM material m WHERE m.material_uid = v_row.material_uid;
+    IF v_matstatus IN ('archived', 'superseded') THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'material_inactive', 'id', p_id,
+                                  'material_uid', v_row.material_uid,
+                                  'material_status', v_matstatus);
     END IF;
 
     SELECT coalesce(jsonb_agg(d ->> 'path' ORDER BY ord), '[]'::jsonb)

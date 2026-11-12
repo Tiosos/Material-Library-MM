@@ -463,6 +463,7 @@ DECLARE
     v_plan     jsonb;
     v_blockers jsonb := '[]'::jsonb;
     v_pair     jsonb := NULL;
+    v_open     jsonb := NULL;
 BEGIN
     SELECT * INTO a FROM material WHERE material_uid = v_a;
     IF NOT FOUND THEN
@@ -493,6 +494,18 @@ BEGIN
        AND (CASE WHEN v_keep = v_a THEN b.superseded_by ELSE a.superseded_by END) <> v_keep THEN
         v_blockers := v_blockers || jsonb_build_array('already_superseded');
     END IF;
+    -- T3 x T2 (docs/t3-writeback.md section 6.1): an in-flight write-back
+    -- request on either side blocks the merge. Re-pointing the request at the
+    -- keeper would change the upstream record its approver saw, and letting it
+    -- stand would PATCH a row this merge is about to declare a duplicate.
+    -- Deciding the request first is the only safe order.
+    SELECT jsonb_agg(r.id ORDER BY r.id) INTO v_open
+      FROM material_change_request r
+     WHERE r.material_uid IN (v_a, v_b)
+       AND r.status IN ('pending', 'approved');
+    IF v_open IS NOT NULL THEN
+        v_blockers := v_blockers || jsonb_build_array('open_change_request');
+    END IF;
 
     v_plan := material_merge_plan(v_keep, v_other);
 
@@ -505,11 +518,12 @@ BEGIN
         'suggestion', v_sugg,
         'pair',       v_pair,
         'blockers',   v_blockers,
+        'blocking_requests', coalesce(v_open, '[]'::jsonb),
         'can_merge',  jsonb_array_length(v_blockers) = 0);
 END $$;
 
 COMMENT ON FUNCTION material_merge_preview(text, text, text) IS
-    'Read-only merge preview: plan, warnings, keeper suggestion and blockers for one pair.';
+    'Read-only merge preview: plan, warnings, keeper suggestion and blockers for one pair (open write-back requests included).';
 
 -- ---------------------------------------------------------------------------
 -- material_duplicate_queue - the review list, one call per page

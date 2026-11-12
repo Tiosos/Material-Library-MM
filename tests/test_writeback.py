@@ -231,18 +231,21 @@ def wb_conn(wb_dsn):
 @pytest.fixture
 def clean_db(wb_conn):
     with wb_conn.cursor() as cur:
-        cur.execute("SELECT material_uid, unit_cost FROM material")
+        cur.execute("SELECT material_uid, unit_cost, status, superseded_by FROM material")
         before = cur.fetchall()
         cur.execute("DELETE FROM material_event WHERE entity='material_change_request'")
         cur.execute("DELETE FROM material_change_request")
     yield wb_conn
+    # T3 x T2 tests supersede a row to prove the guards; put it back so the next
+    # test and the duplicate scan see the imported catalogue again.
     with wb_conn.cursor() as cur:
-        cur.execute("SELECT material_uid, unit_cost FROM material")
-        after = dict(cur.fetchall())
-        for uid, value in before:
-            if after.get(uid) != value:
-                cur.execute("UPDATE material SET unit_cost=%s WHERE material_uid=%s",
-                            (value, uid))
+        cur.execute("SELECT material_uid, unit_cost, status, superseded_by FROM material")
+        after = {row[0]: row[1:] for row in cur.fetchall()}
+        for uid, value, status, superseded_by in before:
+            if after.get(uid) != (value, status, superseded_by):
+                cur.execute(
+                    "UPDATE material SET unit_cost=%s, status=%s, superseded_by=%s "
+                    "WHERE material_uid=%s", (value, status, superseded_by, uid))
 
 
 def one_uid(conn, index=0) -> str:
@@ -251,6 +254,30 @@ def one_uid(conn, index=0) -> str:
             "SELECT material_uid FROM material WHERE source_system='joineryflow' "
             "ORDER BY source_id LIMIT 1 OFFSET %s", (index,))
         return cur.fetchone()[0]
+
+
+def supersede(conn, uid: str, by_uid: str | None = None) -> None:
+    """The state T2's material_merge leaves behind: a tombstone pointing home."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE material SET status='superseded', superseded_by=%s "
+            "WHERE material_uid=%s", (by_uid, uid))
+
+
+def same_category_pair(conn) -> tuple[str, str]:
+    """Two live joineryflow rows a merge preview can consider together."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT category_code, material_uid FROM material "
+            "WHERE status='active' AND source_system='joineryflow' "
+            "ORDER BY category_code, source_id")
+        by_category: dict[str, list[str]] = {}
+        for category, uid in cur.fetchall():
+            by_category.setdefault(category, []).append(uid)
+    for uids in by_category.values():
+        if len(uids) >= 2:
+            return uids[0], uids[1]
+    raise AssertionError("the snapshot has no category with two live rows")
 
 
 def make_request(conn, uid: str, after: float, *, approve: bool = True) -> int:
@@ -368,7 +395,8 @@ def test_second_apply_sends_nothing(clean_db, upstream, wb_dsn):
 
 def test_4xx_is_a_known_failure(clean_db, upstream, wb_dsn):
     upstream.status, upstream.message = 400, "bad request"
-    rid = make_request(clean_db, one_uid(clean_db, 0), 905.0)
+    uid = one_uid(clean_db, 0)
+    rid = make_request(clean_db, uid, 905.0)
     proc = run_cli(upstream, wb_dsn, "--apply", "--request-id", str(rid))
     assert proc.returncode == 1, proc.stderr
     rep = json.loads(proc.stdout)
@@ -472,3 +500,74 @@ def test_two_concurrent_workers_patch_each_request_once(clean_db, upstream, wb_d
     keys = [rec["headers"].get("Idempotency-Key") for rec in upstream.records]
     assert sorted(keys) == sorted(f"mlcr-{rid}" for rid in rids), keys
     assert all(state(clean_db, rid)["status"] == "applied" for rid in rids)
+
+
+# ---------------------------------------------------------------------------
+# T3 x T2: a merge and an in-flight request cannot both be true
+# ---------------------------------------------------------------------------
+
+def test_approving_a_merged_away_material_is_refused(clean_db):
+    """The tombstone keeps its field values, so the base check alone would pass."""
+    uid = one_uid(clean_db, 0)
+    rid = make_request(clean_db, uid, 911.0, approve=False)
+    supersede(clean_db, uid, one_uid(clean_db, 1))
+
+    with clean_db.cursor() as cur:
+        cur.execute("SELECT material_change_request_decide(%s, 'approve', NULL, 'bob')",
+                    (rid,))
+        result = cur.fetchone()[0]
+    assert result["ok"] is False, result
+    assert result["code"] == "material_inactive"
+    assert result["material_status"] == "superseded"
+    assert state(clean_db, rid)["status"] == "pending"
+
+
+def test_apply_refuses_a_merged_away_material_without_an_http_call(clean_db, upstream, wb_dsn):
+    """The plan is the guard the executor trusts: no plan, no PATCH."""
+    uid = one_uid(clean_db, 0)
+    rid = make_request(clean_db, uid, 912.0)          # approved before the merge
+    supersede(clean_db, uid, one_uid(clean_db, 1))
+
+    proc = run_cli(upstream, wb_dsn, "--apply", "--request-id", str(rid))
+    assert proc.returncode == 1, proc.stderr
+    rep = json.loads(proc.stdout)
+    assert rep["applied"] == 0 and rep["failed"] == 1 and rep["unknown"] == 0
+    assert rep["rows"][0]["error"] == "material_inactive"
+    assert upstream.records == []
+
+    st = state(clean_db, rid)
+    assert st["status"] == "failed" and st["error"] == "material_inactive"
+    assert st["last_status"] is None and st["applied_at"] is None
+    assert count_events(clean_db, rid) == 3           # insert, approve, settle
+
+
+def test_merge_is_blocked_while_a_request_is_open(clean_db):
+    a, b = same_category_pair(clean_db)
+    with clean_db.cursor() as cur:
+        cur.execute("SELECT material_merge_preview(%s, %s)", (a, b))
+        before = cur.fetchone()[0]
+    assert before is not None
+    assert "open_change_request" not in before["blockers"]
+    assert before["blocking_requests"] == []
+
+    rid = make_request(clean_db, a, 913.0, approve=False)
+    with clean_db.cursor() as cur:
+        cur.execute("SELECT material_merge_preview(%s, %s)", (a, b))
+        blocked = cur.fetchone()[0]
+        cur.execute("SELECT material_merge(%s, %s, %s, 'test', true, 'tester')",
+                    (a, b, b))
+        merge = cur.fetchone()[0]
+    assert "open_change_request" in blocked["blockers"]
+    assert blocked["blocking_requests"] == [rid]
+    assert blocked["can_merge"] is False
+    assert merge["ok"] is False and merge["code"] == "conflict"
+    assert "open_change_request" in merge["blockers"]
+
+    with clean_db.cursor() as cur:
+        cur.execute("SELECT material_change_request_decide(%s, 'reject', NULL, 'bob')",
+                    (rid,))
+        assert cur.fetchone()[0]["code"] == "rejected"
+        cur.execute("SELECT material_merge_preview(%s, %s)", (a, b))
+        after = cur.fetchone()[0]
+    assert "open_change_request" not in after["blockers"]
+    assert after["blocking_requests"] == []

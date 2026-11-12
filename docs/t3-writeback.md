@@ -223,11 +223,11 @@ pending --approve--> approved --claim--> approved (claimed) --settle(applied)-->
 | From | To | Guard |
 | --- | --- | --- |
 | (new) | `pending` | uid exists, `status` not archived/superseded, `target_system='joineryflow'`, every path allowed, `diffs` non-empty, `base.values` computed server-side |
-| `pending` | `approved` | `decided_by <> requested_by` in v1; `base` still matches; no other open request for the same uid + path |
-| `pending` | `rejected` | `decided_by` set, reason optional (T2 D10) |
-| `approved` | `applied` | only from `settle()` after a 2xx, and only if the row is still claimed by this worker |
-| `approved` | `failed` | stale base, invalid target, 4xx, 5xx, timeout or connection error |
-| `failed` | `approved` | explicit `--retry N` with a new actor; only when `outcome` is known-failed, never `unknown` |
+| `pending` | `approved` | `decided_by <> requested_by` in v1; the material is still `active` (not archived, not merged away); `base` still matches; no other open request for the same uid + path |
+| `pending` | `rejected` | `decided_by` set, reason optional (T2 D10); a tombstone may still be rejected, which is how a queue is cleared |
+| `approved` | `applied` | only from `settle()` after a 2xx, only if the row is still claimed by this worker, and only if the material is still `active` |
+| `approved` | `failed` | stale base, invalid target, material archived or merged away, 4xx, 5xx, timeout or connection error |
+| `failed` | `approved` | explicit `--retry N` with a new actor; only when `outcome` is known-failed, never `unknown`; material still `active` |
 | `rejected`, `applied` | any | terminal; 409 `conflict` |
 
 `material_change_request_decide()` re-checks `base` and returns `{"ok": false, "code":
@@ -236,6 +236,49 @@ writing `applied`; if it changed, the request becomes `failed` with `error = 'st
 if the upstream already answered 2xx. That case is surfaced in the report as
 `outcome = 'applied_unverified'` and needs human attention - it is the one place where the two
 systems can legitimately diverge.
+
+### 6.1 T3 x T2: a merge and an in-flight request cannot both be true
+
+T2 and T3 meet at `material_uid`, and the meeting was unguarded. `material_merge()` supersedes the
+loser instead of deleting it (T2 D4: a tombstone keeps old links resolving), and that tombstone
+**keeps its field values**. T3's approval fingerprint is field-level, so a merge that
+lands after `submit()` changes no value the fingerprint looks at: `decide()` would approve,
+`plan()` would build a PATCH, and the executor would write to an upstream row another human just
+declared a duplicate. `submit()` refuses a tombstone, but only at submit time.
+
+Neither obvious repair is acceptable. **Re-pointing** an open request at the keeper changes
+`{mid}`, which is derived from `source_id`, so the approval would silently apply to a different
+upstream record than the one the approver saw. **Auto-failing** the requests inside
+`material_merge()` adds a `pending -> failed` edge to the five-state machine, which is exactly
+what D13 keeps out of `schema/material.sql`.
+
+So the rule is split between the two modules, and every piece of it is enforced in SQL:
+
+| # | Where | Guard | Result |
+| --- | --- | --- | --- |
+| 1 | `material_merge_preview()` (T2) | a `pending` or `approved` request on **either** side of the pair | blocker `open_change_request`, `blocking_requests: [id, ...]`, so `material_merge()` returns 409 `conflict` |
+| 2 | `material_change_request_decide()` | `approve` on a material whose `status` is `archived` or `superseded` | `{ok:false, code:'material_inactive', material_status}` -> 409 |
+| 3 | `material_change_request_plan()` | same status check, before the target is resolved | `{ok:false, code:'material_inactive'}`; `--apply` turns a non-ok plan into `settle('failed', error='material_inactive')` **before** any HTTP call |
+| 4 | `material_change_request_settle()` and `retry()` | the same check again | a 2xx that landed on a row merged away mid-flight is `failed / material_inactive` and reported as `applied_unverified`; `retry()` refuses it |
+
+The merge blocker is the policy; guards 2-4 are defence in depth for the race the blocker cannot
+cover (a merge that commits between two of the worker's short transactions) and for rows that were
+superseded before this rule existed.
+
+Four consequences worth stating:
+
+- **`claim()` is deliberately not a guard.** Skipping a tombstone there would leave an `approved`
+  row that no worker ever touches and no human ever sees. Claiming it and letting `plan()` refuse
+  ends it as `failed / material_inactive`, which is visible in the review queue.
+- **`reject()` still works on a tombstone.** Clearing a queue must not require reviving the row;
+  rejecting stale data is always safe.
+- **The blocker is symmetric.** A request on the keeper blocks the merge too: the merge rewrites
+  keeper fields from the plan, so it can invalidate the very approval that is in flight.
+- **A blocked merge has one exit.** Decide the request - reject it, or approve and apply it - then
+  merge. `blocking_requests` names the ids, so the operator does not have to search the queue.
+
+The guard lives in the status column, not in the fingerprint, so the field-level `base` design is
+untouched: a no-op re-import still cannot make an approval stale.
 
 Implementation note (step 2): `claim()` and `settle()` keep the five states and use `claimed_at`
 as the in-flight marker. A claim writes no event row, so a happy path emits exactly three events
@@ -324,7 +367,8 @@ python scripts/apply_change_requests.py --dsn ... [--dry-run | --apply]
   token is never printed, never written to the JSON report and never logged.
 - Claim: `SELECT ... WHERE status='approved' AND (claimed_at IS NULL OR claimed_at < now() -
   interval '5 minutes') ORDER BY requested_at FOR UPDATE SKIP LOCKED LIMIT p_limit`, then commit.
-- For each claimed row: build the plan; on a 2xx call `settle('applied')`; on a 4xx call
+- For each claimed row: build the plan; a plan that refuses (`invalid_target`, `material_inactive`)
+  settles `failed` with that code and sends nothing; on a 2xx call `settle('applied')`; on a 4xx call
   `settle('failed', error=upstream message)`; on 5xx, timeout or connection error call
   `settle('unknown', error='uncertain_outcome')` and record `last_status` when there is one.
   There is **no automatic retry** and no second PATCH for the same request in one run.
@@ -368,16 +412,20 @@ worker does not need FastAPI or httpx.
   [../scripts/etl_contract.sql](../scripts/etl_contract.sql). Asserts the additive columns,
   every legal transition, the illegality of `pending -> applied`, `base` staleness, the allowlist
   (including the demo `unit_cost` diff being accepted while `archived_at` is rejected), the
-  `Idempotency-Key` being unique, and one `material_event` per transition.
+  `Idempotency-Key` being unique, one `material_event` per transition, and the T3 x T2 guards of
+  section 6.1 (merge blocker, decide, plan, settle, retry).
 - `tests/test_writeback.py`: pure unit cases for path translation and target resolution run
   without a database; integration cases skip unless `ML_WRITEBACK_DSN` is set, exactly as
   `tests/test_etl.py` skips without `ML_ETL_DSN`. The fake upstream is a stdlib `http.server`
   started by a pytest fixture on 127.0.0.1 with an ephemeral port; it records method, path,
   headers and body. Cases: dry-run is a no-op, happy path, 400 / 409 / 500 / timeout, stale
-  approval, concurrent claim (two workers, one PATCH per request), and forbidden paths.
+  approval, concurrent claim (two workers, one PATCH per request), forbidden paths, a merge
+  blocked by an open request, and a request whose material was merged away (approve refused,
+  zero PATCHes).
 - New CI job `writeback` with its own fresh `POSTGRES_DB=ml_writeback` and
   `ML_WRITEBACK_DSN`. Steps: install `pyyaml`, `psycopg[binary]`, `pytest`; load
-  `material.sql, search.sql, seed.sql, writeback.sql`; import the committed snapshot with
+  `material.sql, search.sql, merge.sql, seed.sql, writeback.sql` (merge.sql is needed by the
+  T3 x T2 assertions of section 6.1); import the committed snapshot with
   [../scripts/import_joineryflow.py](../scripts/import_joineryflow.py) so real `source_id`
   values exist; `psql -f scripts/writeback_contract.sql`; `pytest -q tests/test_writeback.py
   --noconftest`. No `ML_JF_*` credential is set in CI.
@@ -412,6 +460,11 @@ worker does not need FastAPI or httpx.
    unchanged. The JSONL byte contract stays `i/lf w/lf attr/-text`, 15733 bytes, 0 CRLF.
 9. Docs: README Current status gets a T3 line, [docs/data-model-v2.md](data-model-v2.md)
    section 6 moves T3 to Done, and `docs/t3-progress.md` records per-step verification.
+10. A material superseded by a merge can be neither approved, planned, applied nor retried:
+    `decide` returns 409 `material_inactive`, `plan` returns the same code, `--apply` sends zero
+    PATCHes and ends the request as `failed / material_inactive`, and a merge is refused with the
+    blocker `open_change_request` while a `pending` or `approved` request names either side of the
+    pair (section 6.1).
 
 ---
 
@@ -450,6 +503,7 @@ and EPD collection, changes to search ranking, and any change to the ETL snapsho
 | 3 | `scripts/apply_change_requests.py` plus the fake adapter and `tests/test_writeback.py` | dry-run no-op, happy path, 4xx/5xx/timeout and stale cases pass locally |
 | 4 | HTTP review routes, `scripts/writeback_contract.sql`, new `writeback` CI job | five CI jobs green; full pytest green |
 | 5 | Docs: README status, `data-model-v2.md` section 6, `docs/t3-progress.md` | `check_english.py` clean, relative links intact, PR opened |
+| 6 | T3 x T2 consistency (section 6.1): merge blocker, status guards at decide / plan / settle / retry, contract assertions and integration cases | contract green on both CI load orders, 21/21 write-back tests, full suite green |
 
 Effort: about two to three days at the T1/T2/ETL pace; most of it is the state machine, the
 outcome handling and making the CI simulation honest.
@@ -476,6 +530,7 @@ outcome handling and making the CI simulation honest.
 | D14 | Integration tests skip unless `ML_WRITEBACK_DSN` is set | the `api` job's databases are not prepared for write-back; same pattern as `test_etl.py` |
 | D15 | `Idempotency-Key` is sent but never relied on | upstream support is unconfirmed; behaviour must be correct without it |
 | D16 | T2 merge still bypasses `material_change_request` | T2 D7: that table models cross-system approvals, not internal master-data maintenance |
+| D17 | A merge is blocked by an open request on either side; T3 re-checks `material.status` at decide, plan, settle and retry | a tombstone keeps its field values, so the base fingerprint cannot see a merge; re-pointing a request would change the upstream record its approver saw, and auto-failing it inside merge would add a sixth transition (section 6.1) |
 
 ---
 
