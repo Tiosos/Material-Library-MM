@@ -52,6 +52,8 @@ DECLARE
     v_rev      integer;
     v_null     bigint;
     v_null_uid text;
+    v_verify   bigint;
+    v_differs  bigint;
     v_adv      integer;
     v_adv_start integer;
     v_wm_id    bigint;
@@ -97,8 +99,8 @@ BEGIN
              WHERE source_system = 'joineryflow' AND unit_cost IS NOT NULL
              ORDER BY source_id LIMIT 10
            ) t;
-    IF coalesce(array_length(v_uids, 1), 0) < 9 THEN
-        RAISE EXCEPTION 'the snapshot does not provide nine priced joineryflow rows';
+    IF coalesce(array_length(v_uids, 1), 0) < 10 THEN
+        RAISE EXCEPTION 'the snapshot does not provide ten priced joineryflow rows';
     END IF;
     SELECT material_uid INTO v_hardware FROM material
      WHERE category_code = 'hardware' AND source_system = 'joineryflow'
@@ -443,11 +445,162 @@ BEGIN
         RAISE EXCEPTION 'pruning terminal requests removed the watermark';
     END IF;
 
+    -- 15. verify settles a write whose outcome was unknown (docs 6.4) --------
+    -- A 503 leaves the request failed / uncertain_outcome and the master row
+    -- untouched. Only a GET can tell whether the PATCH landed, so the worker
+    -- supplies a verdict and SQL still owns every transition.
+    SELECT material_change_request_submit(
+               v_uids[8], '[{"path":"unit_cost","after":321}]'::jsonb,
+               NULL, 'requester') INTO r;
+    v_verify := (r->>'id')::bigint;
+    PERFORM material_change_request_decide(v_verify, 'approve', NULL, 'reviewer');
+    PERFORM material_change_request_claim(10, 'worker', interval '5 minutes', v_verify);
+    PERFORM material_change_request_settle(v_verify, 'unknown', 503, 'gateway', 'worker');
+    SELECT status, error INTO v_status, v_src
+      FROM material_change_request WHERE id = v_verify;
+    IF v_status <> 'failed' OR v_src <> 'uncertain_outcome' THEN
+        RAISE EXCEPTION 'a 503 did not leave the request uncertain (%/%)', v_status, v_src;
+    END IF;
+
+    -- a non-candidate is refused before any GET is spent on it: a rejected
+    -- request and a pending one
+    SELECT material_change_request_submit(
+               v_uids[10], '[{"path":"unit_cost","after":2}]'::jsonb,
+               NULL, 'requester') INTO r;
+    v_rejected := (r->>'id')::bigint;
+    PERFORM material_change_request_decide(v_rejected, 'reject', NULL, 'reviewer');
+    SELECT material_change_request_verify_plan(v_rejected) INTO r;
+    IF (r->>'ok')::boolean OR r->>'code' <> 'not_candidate' THEN
+        RAISE EXCEPTION 'verify_plan accepted a rejected request: %', r;
+    END IF;
+    SELECT material_change_request_submit(
+               v_uids[9], '[{"path":"unit_cost","after":654}]'::jsonb,
+               NULL, 'requester') INTO r;
+    v_pending := (r->>'id')::bigint;
+    SELECT material_change_request_verify_plan(v_pending) INTO r;
+    IF (r->>'ok')::boolean OR r->>'code' <> 'not_candidate' THEN
+        RAISE EXCEPTION 'verify_plan accepted a pending request: %', r;
+    END IF;
+
+    -- the plan names the GET and the flat upstream values it has to show
+    SELECT material_change_request_verify_plan(v_verify) INTO r;
+    IF NOT (r->>'ok')::boolean OR coalesce(r->>'url', '') = ''
+       OR r->'expected' <> '{"unit_cost": 321}'::jsonb THEN
+        RAISE EXCEPTION 'verify_plan is wrong for an uncertain request: %', r;
+    END IF;
+
+    -- an unknown verdict is rejected outright
+    BEGIN
+        PERFORM material_change_request_verify(v_verify, 'maybe', 'auditor', false);
+        RAISE EXCEPTION 'verify accepted an unknown verdict';
+    EXCEPTION WHEN invalid_parameter_value THEN
+        NULL;
+    END;
+
+    -- read-only by default: the verdict is reported, nothing moves
+    SELECT advances INTO v_adv_start FROM material_writeback_state
+     WHERE target_system = 'joineryflow';
+    SELECT count(*) INTO v_events FROM material_event
+     WHERE entity = 'material_change_request'
+       AND (payload->>'request_id')::bigint = v_verify;
+    SELECT material_change_request_verify(
+               v_verify, 'upstream_matches', 'auditor', false) INTO r;
+    IF r->>'code' <> 'verification_only' OR r->>'would' <> 'applied' THEN
+        RAISE EXCEPTION 'verify without resolve did not stay read-only: %', r;
+    END IF;
+    -- an unreachable upstream is never read as "not applied", even with resolve
+    SELECT material_change_request_verify(
+               v_verify, 'unreachable', 'auditor', true) INTO r;
+    IF r->>'code' <> 'verification_only' THEN
+        RAISE EXCEPTION 'an unreachable verdict changed the request: %', r;
+    END IF;
+    SELECT status, error INTO v_status, v_src
+      FROM material_change_request WHERE id = v_verify;
+    IF v_status <> 'failed' OR v_src <> 'uncertain_outcome' THEN
+        RAISE EXCEPTION 'a read-only verify moved the request to %/%', v_status, v_src;
+    END IF;
+    SELECT count(*) INTO v_count FROM material_event
+     WHERE entity = 'material_change_request'
+       AND (payload->>'request_id')::bigint = v_verify;
+    IF v_count <> v_events THEN
+        RAISE EXCEPTION 'a read-only verify wrote % event(s)', v_count - v_events;
+    END IF;
+    IF (SELECT advances FROM material_writeback_state
+         WHERE target_system = 'joineryflow') IS DISTINCT FROM v_adv_start THEN
+        RAISE EXCEPTION 'a read-only verify advanced the upstream watermark';
+    END IF;
+
+    -- a confirmed match resolves it: the master row catches up, the watermark
+    -- advances and exactly one event is written
+    SELECT material_change_request_verify(
+               v_verify, 'upstream_matches', 'auditor', true) INTO r;
+    IF r->>'code' <> 'applied' THEN
+        RAISE EXCEPTION 'a confirmed match was not applied: %', r;
+    END IF;
+    SELECT status, error, applied_at INTO v_status, v_src, v_applied
+      FROM material_change_request WHERE id = v_verify;
+    IF v_status <> 'applied' OR v_src IS NOT NULL OR v_applied IS NULL THEN
+        RAISE EXCEPTION 'verify applied left the row at %/%', v_status, v_src;
+    END IF;
+    SELECT unit_cost INTO v_cost FROM material WHERE material_uid = v_uids[8];
+    IF v_cost IS DISTINCT FROM 321::numeric THEN
+        RAISE EXCEPTION 'a verified write did not reach the master row (unit_cost=%)', v_cost;
+    END IF;
+    IF (SELECT advances FROM material_writeback_state
+         WHERE target_system = 'joineryflow') <> v_adv_start + 1 THEN
+        RAISE EXCEPTION 'a verified write did not advance the upstream watermark';
+    END IF;
+    SELECT count(*) INTO v_count FROM material_event
+     WHERE entity = 'material_change_request'
+       AND (payload->>'request_id')::bigint = v_verify;
+    IF v_count <> v_events + 1 THEN
+        RAISE EXCEPTION 'verify applied wrote % events, expected 1', v_count - v_events;
+    END IF;
+    -- a resolved request is no longer a candidate
+    SELECT material_change_request_verify_plan(v_verify) INTO r;
+    IF (r->>'ok')::boolean OR r->>'code' <> 'not_candidate' THEN
+        RAISE EXCEPTION 'verify_plan accepted a verified request: %', r;
+    END IF;
+
+    -- a confirmed miss is a known failure, not a success: the master row and
+    -- the watermark stay put, and a human may now retry it
+    SELECT material_change_request_submit(
+               v_uids[10], '[{"path":"unit_cost","after":987}]'::jsonb,
+               NULL, 'requester') INTO r;
+    v_differs := (r->>'id')::bigint;
+    PERFORM material_change_request_decide(v_differs, 'approve', NULL, 'reviewer');
+    PERFORM material_change_request_claim(10, 'worker', interval '5 minutes', v_differs);
+    PERFORM material_change_request_settle(v_differs, 'unknown', 502, 'gateway', 'worker');
+    SELECT unit_cost INTO v_cost FROM material WHERE material_uid = v_uids[10];
+    SELECT material_change_request_verify(
+               v_differs, 'upstream_differs', 'auditor', true) INTO r;
+    IF r->>'code' <> 'verified_not_applied' THEN
+        RAISE EXCEPTION 'a mismatch was not recorded as such: %', r;
+    END IF;
+    SELECT status, error INTO v_status, v_src
+      FROM material_change_request WHERE id = v_differs;
+    IF v_status <> 'failed' OR v_src <> 'verified_not_applied' THEN
+        RAISE EXCEPTION 'a mismatch left the row at %/%', v_status, v_src;
+    END IF;
+    IF (SELECT unit_cost FROM material WHERE material_uid = v_uids[10])
+       IS DISTINCT FROM v_cost THEN
+        RAISE EXCEPTION 'a mismatch wrote the master row anyway';
+    END IF;
+    IF (SELECT advances FROM material_writeback_state
+         WHERE target_system = 'joineryflow') <> v_adv_start + 1 THEN
+        RAISE EXCEPTION 'a mismatch advanced the upstream watermark';
+    END IF;
+    SELECT material_change_request_retry(v_differs, 'carol', 'verified absent upstream') INTO r;
+    IF r->>'code' <> 'approved' THEN
+        RAISE EXCEPTION 'a verified miss could not be retried: %', r;
+    END IF;
+
     RAISE NOTICE 'writeback contract OK: 9 endpoints, 7 fields, 6 additive columns, '
                  'submit/decide/claim/settle/retry transitions, 1 event per transition, '
                  'T3 x T2 guards (merge blocker, decide, plan, settle, retry), '
                  'applied writes the master record and cannot be filed twice, '
-                 'the upstream watermark survives request retention';
+                 'the upstream watermark survives request retention, '
+                 'verify stays read-only unless resolved and never guesses';
 END $$;
 
 ROLLBACK;

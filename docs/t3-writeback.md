@@ -188,7 +188,14 @@ one would require editing the CHECK in `schema/material.sql`.
 | `material_change_request_claim(p_limit, p_actor, p_lease)` | `setof`/`jsonb` batch | `claimed_at/by`, `attempts + 1`, `idempotency_key` |
 | `material_change_request_plan(p_id)` | `jsonb` | none (pure, used by dry-run and `GET`) |
 | `material_change_request_settle(p_id, p_outcome, p_status_code, p_error, p_actor)` | `jsonb` | status, `applied_at`, `error`, `last_status`, clears claim, the master row for `applied`, the upstream watermark, one event |
+| `material_change_request_verify_plan(p_id)` | `jsonb` | none (pure: the GET URL and the flat upstream values to compare) |
+| `material_change_request_verify(p_id, p_verdict, p_actor, p_resolve)` | `jsonb` | none unless `p_resolve`: then the master row, the watermark and one event for a confirmed match |
 | `material_change_request_queue(p_status, p_limit, p_cursor)` | `jsonb` | none |
+
+Two private helpers keep the local write in one place: `ml_writeback_apply_diffs(uid, diffs)`
+writes only the diffed paths into `material`, and `ml_writeback_note_write(target, id)` advances
+the watermark. `settle()` and `verify()` both call them, so a verified write cannot behave
+differently from a settled one.
 
 `base` is `{ "rev": <material.rev at submit>, "values": { "<path>": <live value> } }`. It is
 field-level on purpose: step 4 of the ETL measured that a no-op re-import bumps `sync_seq` on 11
@@ -348,9 +355,8 @@ rather than "the local row was written" is the whole point.
 
 A 4xx does not advance it. A 5xx or timeout (`uncertain_outcome`) also does not: it is genuinely
 unknown whether the write landed, but advancing a monotonic watermark on a transient 503 would
-permanently refuse every snapshot exported before that moment. That case belongs with the
-`--verify` question in section 16, where a human GET decides it; the conservative alternative is
-recorded there.
+permanently refuse every snapshot exported before that moment. That case is left to `--verify`
+(section 6.4): once a GET confirms the write did land, the watermark is advanced at that point.
 
 `scripts/import_joineryflow.py` now compares `snapshot.exported_at` with the watermark. Request ids
 and `source_id` are best-effort detail in the error message - useful when the rows still exist,
@@ -373,6 +379,51 @@ tests exercise expiry without a real wait. `settle()` refuses a caller that no l
 lease, and `retry()` is the explicit human `failed -> approved` transition that refuses
 `error = 'uncertain_outcome'`. `claim()` also takes an optional `p_only_id` so the CLI's
 `--request-id` can claim exactly one request without Python filtering or releasing a batch.
+
+### 6.4 T3 x T3: `--verify` settles an unknown outcome
+
+Five states have a way out except one. `failed / uncertain_outcome` - a 5xx or a timeout - cannot
+be advanced by `--retry` (D10: a retry after an uncertain PATCH can duplicate a real write), and
+the three `applied_unverified` branches (stale base, tombstone, failed local write) have no
+transition at all. Before this step the only tool was a human reading the joineryflow UI.
+
+The missing piece was a read. `--verify` adds one, and keeps the same division of labour as
+`--apply`: Python performs the HTTP call and supplies a *verdict*, SQL owns every state transition
+(principle 1).
+
+**The plan is pure.** `material_change_request_verify_plan(id)` returns the GET URL and
+`expected` - the flat upstream column names mapped from the request's diffs via
+`material_writeback_field`, with `attributes.<key>` paths passed through as `<key>`. It refuses a
+request that is not a candidate with `not_candidate`, so a GET is never spent on a request that is
+already terminal or still pending.
+
+**The comparison is strict in one direction.** `verification_verdict()` returns one of three
+values:
+
+| Verdict | When | Effect with `--resolve` |
+|---|---|---|
+| `upstream_matches` | every expected column is present and equal | `failed -> applied`: the master row takes the diffed values, the watermark advances, one event |
+| `upstream_differs` | every expected column is present, at least one differs | stays `failed`, `error` becomes `verified_not_applied`, so `--retry` now accepts it |
+| `unreachable` | non-2xx, unparseable body, or **any expected column missing** | nothing changes, with or without `--resolve` |
+
+The missing-column rule is the load-bearing one. We do not know joineryflow's read shape yet, so a
+field name in the adapter may be wrong. Treating "column absent" as "the upstream did not take the
+change" would silently downgrade real writes to failures and invite a duplicate PATCH. "I could not
+read it" is the honest answer, and it is the only one that cannot corrupt state.
+
+**Read-only by default.** `--verify N` writes nothing: no request row changes, no event, no
+watermark. `--resolve` is the explicit switch, mirroring `--apply` and `prune_change_requests.py`.
+The contract asserts the read-only path leaves zero events and an unchanged watermark, so the
+default cannot drift.
+
+**What it closes.** A confirmed match resolves the `uncertain_outcome` case *and* the 5xx watermark
+question from section 6.3: the GET is the evidence that the write landed, so `verify()` advances
+the watermark at that point instead of guessing at settle time. A confirmed miss turns an
+unanswerable state into an ordinary known failure, which the existing `--retry` path already
+handles.
+
+`verified_not_applied` is a new `error` value on `failed`, not a new state: the five-state CHECK is
+untouched (D13), and `retry()` accepts it because the outcome is now known.
 
 ---
 
@@ -444,6 +495,7 @@ what `--apply` sends, the same "preview is the contract" rule as T2 section 3.
 ```
 python scripts/apply_change_requests.py --dsn ... [--dry-run | --apply]
        [--limit 100] [--request-id N | --retry N] [--actor NAME] [--json out.json]
+python scripts/apply_change_requests.py --dsn ... --verify N [--resolve]
 ```
 
 - `--dry-run` is the default and makes **zero writes** (section 3): it selects claimable rows,
@@ -465,10 +517,16 @@ python scripts/apply_change_requests.py --dsn ... [--dry-run | --apply]
 - A second `--apply` over an already-applied database reports `applied = 0` and sends no HTTP.
   Re-running is safe by construction: `applied` and `rejected` are terminal, and `failed` needs
   an explicit `--retry`.
+- `--verify N` reads one request through the same `JoineryflowClient` (one `GET`, same bearer
+  token, same timeout, no body) and reports the verdict from section 6.4. It is read-only unless
+  `--resolve` is given, refuses to combine with `--apply` or `--dry-run` so it can never be reached
+  from a command a reader would take as offline, and `--resolve` without `--verify` exits 2. A
+  request that is not a candidate is reported as `skipped` with `not_candidate` and no HTTP call is
+  made. The token is never written to the report.
 
 The HTTP call happens outside any open transaction (section 3, principle 5). A worker that dies
-mid-flight leaves `claimed_at` set; a later worker reclaims it after the five-minute lease and
-must first `GET` the upstream record before deciding - this is documented, not automated, in v1.
+mid-flight leaves `claimed_at` set; a later worker reclaims it after the five-minute lease, and
+`--verify` is now the tool that settles what that dead worker actually wrote upstream.
 
 ---
 
@@ -503,17 +561,25 @@ worker does not need FastAPI or httpx.
   section 6.1 (merge blocker, decide, plan, settle, retry), plus section 6.2: an applied write is
   in the master row, `rev` moved, the same diff returns `no_change`, and `after: null` clears a
   field. Section 6.3 adds the watermark: exactly four 2xx settles advance it, failed and unknown
-  outcomes do not, and deleting terminal request rows leaves it intact.
+  outcomes do not, and deleting terminal request rows leaves it intact. Section 6.4 adds
+  `verify`: a non-candidate is refused before any GET, an unknown verdict raises, the read-only
+  path writes zero events and leaves the watermark alone, an `unreachable` verdict changes nothing
+  even with `p_resolve`, a confirmed match applies the diff and advances the watermark by exactly
+  one, and a confirmed miss records `verified_not_applied` without touching the master row.
 - `tests/test_writeback.py`: pure unit cases for path translation and target resolution run
   without a database; integration cases skip unless `ML_WRITEBACK_DSN` is set, exactly as
   `tests/test_etl.py` skips without `ML_ETL_DSN`. The fake upstream is a stdlib `http.server`
   started by a pytest fixture on 127.0.0.1 with an ephemeral port; it records method, path,
-  headers and body. Cases: dry-run is a no-op, happy path, 400 / 409 / 500 / timeout, stale
+  headers and body for `PATCH` and path and headers for `GET`, and a test sets the exact body the
+  `GET` returns. Cases: dry-run is a no-op, happy path, 400 / 409 / 500 / timeout, stale
   approval, concurrent claim (two workers, one PATCH per request), forbidden paths, a merge
   blocked by an open request, a request whose material was merged away (approve refused,
   zero PATCHes), the master row taking the value, the importer refusing a stale snapshot
   after an apply, the watermark surviving a retention prune, the prune CLI's dry-run no-op,
-  and a fresher snapshot passing the guarded comparison.
+  a fresher snapshot passing the guarded comparison, and section 6.4: the verdict rules
+  (missing column is `unreachable`), read-only `--verify`, `--resolve` applying a match,
+  a mismatch becoming `verified_not_applied` and then retryable, a missing column changing
+  nothing, a non-candidate costing no GET, a stale-base 2xx being resolved, and the CLI guards.
 - New CI job `writeback` with its own fresh `POSTGRES_DB=ml_writeback` and
   `ML_WRITEBACK_DSN`. Steps: install `pyyaml`, `psycopg[binary]`, `pytest`; load
   `material.sql, search.sql, merge.sql, seed.sql, writeback.sql` (merge.sql is needed by the
@@ -565,6 +631,12 @@ worker does not need FastAPI or httpx.
     failed and unknown outcomes do not, and after the terminal request rows are pruned the importer
     still refuses the old snapshot. The prune CLI is a no-op without `--apply`, deletes only
     `applied` and `rejected`, and leaves the watermark and the audit trail alone.
+13. An unknown outcome can be settled by evidence, not by a guess (section 6.4): `--verify N`
+    reports `upstream_matches`, `upstream_differs` or `unreachable` and writes nothing; only
+    `--resolve` with `upstream_matches` turns the request into `applied`, writes the diffed values
+    and advances the watermark; `upstream_differs` records `verified_not_applied` and leaves the
+    master row untouched; a missing column is `unreachable` and changes nothing even with
+    `--resolve`; a request that is not a candidate costs no HTTP call.
 
 ---
 
@@ -606,6 +678,7 @@ and EPD collection, changes to search ranking, and any change to the ETL snapsho
 | 6 | T3 x T2 consistency (section 6.1): merge blocker, status guards at decide / plan / settle / retry, contract assertions and integration cases | contract green on both CI load orders, 21/21 write-back tests, full suite green |
 | 7 | T3 x T3 loop (section 6.2): `settle()` writes the diff home, submit validates storable values, JSON null clears, the importer refuses a stale snapshot | contract green, 22/22 write-back tests, full suite green, an old snapshot is refused after an apply |
 | 8 | Retention and the watermark (section 6.3): `material_writeback_state`, the watermark-based import guard, the prune CLI, contract assertions and integration cases | contract green, 25/25 write-back tests, full suite green, a stale snapshot stays refused after terminal rows are pruned |
+| 9 | `--verify` (section 6.4): `verify_plan()`, `verify()`, the shared local-write helpers, `JoineryflowClient.get()`, the `--verify` / `--resolve` modes, contract assertions and integration cases | contract green, 33/33 write-back tests, full suite green, a 5xx request is resolved by a GET and a missing column changes nothing |
 
 Effort: about two to three days at the T1/T2/ETL pace; most of it is the state machine, the
 outcome handling and making the CI simulation honest.
@@ -636,6 +709,7 @@ outcome handling and making the CI simulation honest.
 | D18 | `settle('applied')` writes the diff into `material` in the same transaction | the library is the source of truth (section 0); without it every read stays stale until the next snapshot, `base` compares local-to-local, and the same diff can be filed and PATCHed twice (section 6.2) |
 | D19 | An import whose snapshot predates an applied request is a hard error | the importer copies source values over the master row, so an old snapshot silently reverts a confirmed write; re-exporting is cheap, losing an applied change is not |
 | D20 | Every 2xx advances a dedicated upstream-write watermark; the importer judges staleness against it, not against live request rows | D19's guard would silently stop working as soon as retention prunes `applied` rows; the watermark is about the upstream write, so `applied_unverified` 2xx responses count too (section 6.3) |
+| D21 | `--verify` reads the upstream row and lets SQL resolve the request; a missing column is `unreachable`, never a mismatch | `failed / uncertain_outcome` and the three `applied_unverified` branches had no transition at all, so a human had to read the upstream UI; a missing column means the adapter's field name may be wrong, and reading that as "not applied" would invite a duplicate PATCH (section 6.4) |
 
 ---
 
@@ -651,13 +725,19 @@ outcome handling and making the CI simulation honest.
 4. Does the upstream accept a partial PATCH body, or does it require the full row? A full-row
    body would be riskier and would need a `GET` before each PATCH; this is deliberately out of
    v1.
-5. Who schedules the worker and `scripts/prune_change_requests.py` is an operations decision.
+5. What exactly does `GET /catalog/{slug}/{mid}` return - the flat upstream column names of
+   `write_back.fields`, or a nested document / aliases? This no longer blocks the work (D21): the
+   adapter maps expected values to flat column names, and a column it cannot find is reported as
+   `unreachable` rather than a mismatch, so a wrong guess can never downgrade a real write. It does
+   bound how often `--verify` can auto-resolve on day one. `ML_JF_*` credentials with read scope
+   are also still assumed, not confirmed.
+6. Who schedules the worker and `scripts/prune_change_requests.py` is an operations decision.
    What retention may delete is no longer open (D20): dry-run by default, 90 days, only `applied`
    and `rejected`, and never the watermark or the audit trail (section 6.3).
-6. Who resolves `applied_unverified` - a stale base, a material merged away mid-flight, or a local
-   write that failed? v1 leaves all three to a human. A `--verify` pass that GETs the upstream row
-   and compares it with the local one is the natural next step, but it needs the upstream's read
-   shape and a token with read scope, so it is deliberately not in this round. It should also
-   settle the one conservative choice in section 6.3: a 5xx or timeout does **not** advance the
-   watermark, so an `uncertain_outcome` that actually wrote upstream is covered only by human
-   adjudication until that pass exists.
+7. ~~Who resolves `applied_unverified`?~~ Closed by D21. `scripts/apply_change_requests.py
+   --verify N` GETs the upstream row, compares the diffed fields and reports
+   `upstream_matches` / `upstream_differs` / `unreachable`; `--resolve` lets SQL act on the verdict.
+   This also settles the conservative choice in section 6.3: a 5xx or timeout still does not advance
+   the watermark at settle time, but a later confirmed match does, so an `uncertain_outcome` that
+   really wrote upstream no longer needs human adjudication forever. What remains is the read shape
+   (question 5) and a token with read scope.

@@ -6,12 +6,17 @@ Design: docs/t3-writeback.md sections 3, 8 and 9.
     python scripts/apply_change_requests.py --dsn "$ML_WRITEBACK_DSN" --dry-run --json -
     python scripts/apply_change_requests.py --dsn "$ML_WRITEBACK_DSN" --apply
     python scripts/apply_change_requests.py --dsn "$ML_WRITEBACK_DSN" --retry 12
+    python scripts/apply_change_requests.py --dsn "$ML_WRITEBACK_DSN" --verify 12
+    python scripts/apply_change_requests.py --dsn "$ML_WRITEBACK_DSN" --verify 12 --resolve
 
 Dry-run is the default and is a true no-op: zero writes to
 material_change_request, zero material_event rows and zero HTTP calls. It still
 reports the exact URL, headers and body that --apply would send. --apply needs
 ML_JF_BASE_URL and ML_JF_TOKEN; a missing setting exits 2 before the database
-is opened. The executor sends one PATCH per claimed request and settles every
+is opened. --verify GETs one unverifiable request and reports whether the
+upstream shows the approved values; it is read-only unless --resolve is given,
+and a missing upstream column is reported as unreachable, never as a mismatch.
+The executor sends one PATCH per claimed request and settles every
 outcome through SQL; it never decides a state transition itself (D4).
 
 CI never egresses to joineryflow: tests point ML_JF_BASE_URL at a stdlib
@@ -95,17 +100,19 @@ def resolve_workspace(mapping_path: Path | None = None) -> str:
 
 
 def build_config(args: argparse.Namespace) -> Config:
-    mode = "retry" if args.retry else ("apply" if args.apply else "dry-run")
+    mode = ("retry" if args.retry else
+            "verify" if args.verify else
+            "apply" if args.apply else "dry-run")
     workspace = resolve_workspace()
-    if mode != "apply":
+    if mode not in ("apply", "verify"):
         return Config(mode=mode, workspace=workspace)
 
     base_url = os.environ.get("ML_JF_BASE_URL", "").strip()
     token = os.environ.get("ML_JF_TOKEN", "").strip()
     if not base_url:
-        raise ConfigError("--apply requires ML_JF_BASE_URL; no live endpoint is assumed")
+        raise ConfigError(f"--{mode} requires ML_JF_BASE_URL; no live endpoint is assumed")
     if not token:
-        raise ConfigError("--apply requires ML_JF_TOKEN")
+        raise ConfigError(f"--{mode} requires ML_JF_TOKEN")
     raw_timeout = os.environ.get("ML_JF_TIMEOUT", "").strip()
     try:
         timeout = float(raw_timeout) if raw_timeout else DEFAULT_TIMEOUT
@@ -122,7 +129,7 @@ def build_config(args: argparse.Namespace) -> Config:
 # ---------------------------------------------------------------------------
 
 class JoineryflowClient:
-    """A thin urllib PATCH. Transport errors are surfaced as TransportError."""
+    """Thin urllib PATCH and GET. Transport errors surface as TransportError."""
 
     def __init__(self, base_url: str, token: str, timeout: float):
         self.base_url = base_url.rstrip("/")
@@ -137,6 +144,21 @@ class JoineryflowClient:
             data=json.dumps(body, sort_keys=True).encode("utf-8"),
             headers=outgoing,
             method="PATCH",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                return resp.status, resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read().decode("utf-8", "replace")
+        except OSError as exc:
+            raise TransportError(str(exc)) from exc
+
+    def get(self, path: str) -> tuple[int | None, str]:
+        """Read the upstream row for --verify; the same auth, no body."""
+        req = urllib.request.Request(
+            self.base_url + path,
+            headers={"Authorization": "Bearer " + self.token},
+            method="GET",
         )
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
@@ -179,6 +201,10 @@ def make_parser() -> argparse.ArgumentParser:
                         help="restrict the batch to one request id")
     single.add_argument("--retry", type=int, default=None, metavar="N",
                         help="explicitly retry one known-failed request id")
+    single.add_argument("--verify", type=int, default=None, metavar="N",
+                        help="GET one unverifiable request and report the comparison")
+    ap.add_argument("--resolve", action="store_true",
+                    help="with --verify, let SQL resolve the request after a confirmed match")
     ap.add_argument("--limit", type=int, default=100,
                     help="maximum batch size (default 100)")
     ap.add_argument("--actor", default=None,
@@ -313,11 +339,85 @@ def apply_batch(cur, cfg: Config, args, report: dict, client) -> None:
         })
 
 
+def same_value(left, right) -> bool:
+    """Compare an upstream JSON value with the diff's `after` value."""
+    if isinstance(left, bool) or isinstance(right, bool):
+        return left == right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return float(left) == float(right)
+    if isinstance(left, (list, dict)) or isinstance(right, (list, dict)):
+        return (json.dumps(left, sort_keys=True, default=str)
+                == json.dumps(right, sort_keys=True, default=str))
+    return left == right
+
+
+def verification_verdict(expected: dict, text: str, status: int | None) -> str:
+    """Strict: a missing column means we do not know, never 'not applied'."""
+    if status is None or not 200 <= status < 300:
+        return "unreachable"
+    try:
+        payload = json.loads(text)
+    except (ValueError, TypeError):
+        return "unreachable"
+    if not isinstance(payload, dict) or any(key not in payload for key in expected):
+        return "unreachable"
+    for key, want in expected.items():
+        if not same_value(payload[key], want):
+            return "upstream_differs"
+    return "upstream_matches"
+
+
+def verify_request(cur, cfg: Config, args, report: dict, client) -> None:
+    """GET one unverifiable request, then let SQL decide (docs 6.4)."""
+    rid = args.verify
+    plan = _one(cur, "SELECT material_change_request_verify_plan(%s)", (rid,))
+    report["checked"] = 1
+    if not plan.get("ok"):
+        # Not a candidate (already terminal, wrong target, ...): nothing to
+        # verify and no HTTP call, so this is a skip rather than a failure.
+        report["skipped"] += 1
+        report["rows"].append({
+            "id": rid, "status": "skipped", "url": None, "http_status": None,
+            "error": plan.get("code"), "outcome": None, "verdict": None,
+            "resolved": False,
+        })
+        return
+
+    try:
+        status, text = client.get(plan["url"])
+    except TransportError:
+        status, text, verdict = None, "", "unreachable"
+    else:
+        verdict = verification_verdict(plan["expected"], text, status)
+
+    result = _one(
+        cur,
+        "SELECT material_change_request_verify(%s, %s, %s, %s)",
+        (rid, verdict, report["actor"], args.resolve),
+    )
+    if not result.get("ok"):
+        # A conflict means the row moved between plan and verify (someone else
+        # resolved it); that is a skip, not a failure of this run.
+        if result.get("code") == "conflict":
+            report["skipped"] += 1
+        else:
+            report["failed"] += 1
+    if result.get("code") == "applied":
+        report["applied"] += 1
+    report["rows"].append({
+        "id": rid, "status": result.get("status", "unchanged"),
+        "url": plan["url"], "http_status": status,
+        "error": None if result.get("ok") else result.get("code"),
+        "outcome": result.get("code"), "verdict": verdict,
+        "resolved": bool(args.resolve),
+    })
+
+
 def run(args: argparse.Namespace, cfg: Config, dsn: str, *,
         connect=None, client=None) -> tuple[dict, int]:
     actor = args.actor or os.environ.get("ML_JF_ACTOR", "").strip() or DEFAULT_ACTOR
     report = _blank_report(cfg, actor)
-    if cfg.mode == "apply" and client is None:
+    if cfg.mode in ("apply", "verify") and client is None:
         client = JoineryflowClient(cfg.base_url, cfg.token, cfg.timeout)
 
     conn = connect(dsn) if connect is not None else _new_connection(dsn)
@@ -339,6 +439,8 @@ def run(args: argparse.Namespace, cfg: Config, dsn: str, *,
                 })
             elif cfg.mode == "dry-run":
                 dry_run(cur, cfg, args, report)
+            elif cfg.mode == "verify":
+                verify_request(cur, cfg, args, report, client)
             else:
                 apply_batch(cur, cfg, args, report, client)
     finally:
@@ -364,9 +466,10 @@ def emit(report: dict, args: argparse.Namespace) -> None:
           f"applied={report['applied']} failed={report['failed']} "
           f"unknown={report['unknown']} skipped={report['skipped']}")
     for row in report["rows"]:
+        verdict = f" verdict={row['verdict']}" if "verdict" in row else ""
         print(f"  - id={row['id']} status={row['status']} url={row['url']} "
               f"http={row['http_status']} outcome={row['outcome']} "
-              f"error={row['error']}")
+              f"error={row['error']}{verdict}")
     if args.json_out:
         print(f"report -> {args.json_out}")
 
@@ -378,6 +481,15 @@ def main(argv: list[str] | None = None, *, connect=None, client=None) -> int:
         return USAGE
     if args.retry and args.apply:
         print("error: --retry cannot be combined with --apply", file=sys.stderr)
+        return USAGE
+    if args.resolve and args.verify is None:
+        print("error: --resolve requires --verify N", file=sys.stderr)
+        return USAGE
+    if args.verify is not None and (args.apply or args.dry_run):
+        # --verify makes a real GET, so it must not be reachable from a command
+        # a reader would take as read-only.
+        print("error: --verify cannot be combined with --apply or --dry-run",
+              file=sys.stderr)
         return USAGE
     try:
         cfg = build_config(args)

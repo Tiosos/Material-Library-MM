@@ -21,6 +21,7 @@ Status legend: `[ ]` planned, `[~]` in progress, `[x]` done and verified, `[!]` 
 | 6 | T3 x T2 consistency: merge blocker plus the decide / plan / settle / retry status guards, contract assertions and integration cases (design 6.1) | [x] | Contract green on a fresh PostgreSQL 16 database (both load orders), `tests/test_writeback.py` 21/21 with `ML_WRITEBACK_DSN`, `tests/test_writeback_api.py` 12/12, full suite `179 passed, 17 skipped`, api and merge contracts still green; see "Follow-up 1" |
 | 7 | T3 x T3 loop: `settle()` writes the diff into `material`, submit validates storable values, JSON null clears a field, the importer refuses a stale snapshot (design 6.2, D18/D19) | [x] | Contract green with the new assertions; `tests/test_writeback.py` 22/22; full suite `179 passed, 18 skipped`; api and merge contracts green on a rebuilt database; see "Follow-up 2" |
 | 8 | Retention and the watermark (design 6.3, D20): `material_writeback_state`, a watermark-driven import guard, `scripts/prune_change_requests.py` | [x] | Contract green with section 14; `tests/test_writeback.py` 25/25; full suite `179 passed, 21 skipped`; api / merge / etl contracts green; see "Follow-up 3" |
+| 9 | `--verify` (design 6.4, D21): `verify_plan()` / `verify()`, shared local-write helpers, `JoineryflowClient.get()`, `--verify` / `--resolve`, contract section 15 | [x] | Contract green with section 15, re-runnable with zero residual rows; `tests/test_writeback.py` 33/33; full suite `180 passed, 28 skipped`; api / merge / etl contracts and static checks green; see "Follow-up 4" |
 
 Steps 0-1 were merged in **PR #15** (merge commit `cbf1b5f`, 2026-11-11T22:01:22Z). Steps 2-5
 were implemented and verified on top of that commit and are delivered together in **PR #16**.
@@ -293,8 +294,8 @@ D20).
 `last_request_id` and an `advances` counter. `settle()` advances it on **any 2xx**, including all
 three `applied_unverified` branches (stale base, superseded material, local write failed), because
 the PATCH answered 2xx before the local row was refused - the upstream may have taken the change.
-A 4xx and an `unknown` outcome do not advance it; the 5xx / timeout case is deliberately left to
-the `--verify` question (section 16), because a monotonic watermark on a transient 503 would
+A 4xx and an `unknown` outcome do not advance it; the 5xx / timeout case was left to the
+`--verify` pass (now design 6.4), because a monotonic watermark on a transient 503 would
 permanently refuse every older snapshot.
 
 `scripts/import_joineryflow.py` now compares `snapshot.exported_at` with the watermark. Request ids
@@ -317,6 +318,66 @@ Verification on a fresh PostgreSQL 16 database:
 * Full suite `179 passed, 21 skipped, 200 subtests`; `api_contract.sql`, `merge_contract.sql` and
   `etl_contract.sql` green on rebuilt databases; the ETL path still imports twice
   (`18 new` then `0 new / 18 updated`).
+* `check_english.py`, `compileall`, `check_mappings.py` x3, `check_joineryflow_mapping.py` and the
+  93 static unit tests clean; JSONL byte contract untouched.
+
+## Follow-up 4: `--verify`, settling a write nobody could see
+
+Follow-up 3 left one state with no way out. `failed / uncertain_outcome` (a 5xx or timeout) is
+refused by `--retry`, and the three `applied_unverified` branches (stale base, superseded
+material, local write failed) had no transition at all. The only tool was a human opening the
+joineryflow UI. This follow-up adds the missing read (design 6.4, D21).
+
+The split is the same as `--apply`: Python performs the HTTP call and supplies a **verdict**; SQL
+owns every transition. `material_change_request_verify_plan(id)` is pure and returns the GET URL
+plus `expected` - the flat upstream column names mapped from the request's diffs through
+`material_writeback_field`, with `attributes.<key>` passed through as `<key>`. It refuses a
+request that is not a candidate with `not_candidate`, so no GET is spent on a terminal or pending
+row.
+
+`material_change_request_verify(id, verdict, actor, resolve)` accepts three verdicts:
+
+* `upstream_matches` - every expected column present and equal. With `--resolve` the request
+  becomes `applied`, the master row takes the diffed values, the watermark advances and exactly
+  one event is written.
+* `upstream_differs` - every expected column present, at least one different. The request stays
+  `failed` with `error = 'verified_not_applied'`, which `--retry` accepts, because the outcome is
+  now known rather than uncertain.
+* `unreachable` - non-2xx, unparseable body, **or any expected column missing**. Nothing changes,
+  with or without `--resolve`.
+
+The missing-column rule is the load-bearing one. We still do not know joineryflow's read shape, so
+a field name in the adapter may be wrong; reading "column absent" as "the upstream did not take
+the change" would downgrade real writes to failures and invite a duplicate PATCH.
+
+Two local-write helpers were extracted so `settle()` and `verify()` cannot drift:
+`ml_writeback_apply_diffs(uid, diffs)` writes only the diffed paths, and
+`ml_writeback_note_write(target, id)` advances the watermark. `settle()` now calls both, which is
+a pure refactor of Follow-up 3 behaviour - the contract still counts exactly four 2xx advances.
+
+`scripts/apply_change_requests.py` gained `--verify N` and `--resolve`. `--verify` is read-only:
+zero request writes, zero events, no watermark move, asserted by the contract. It refuses to
+combine with `--apply` or `--dry-run`, so a command that reads as offline can never make a live
+GET, and `--resolve` without `--verify` exits 2. The fake upstream grew `do_GET` and a separate
+`gets` log, so `PATCH` assertions are untouched and CI still never egresses.
+
+Verification on a fresh PostgreSQL 16 database:
+
+* `scripts/writeback_contract.sql` section 15 asserts: a rejected and a pending request are
+  `not_candidate`; the plan returns the GET URL and `expected = {"unit_cost": 321}`; an unknown
+  verdict raises `22023`; the read-only path writes zero events and leaves the watermark alone;
+  `unreachable` changes nothing even with `p_resolve`; a confirmed match applies the diff, bumps
+  the watermark by exactly one and writes exactly one event; a resolved request stops being a
+  candidate; a mismatch records `verified_not_applied`, leaves the master row and watermark
+  untouched, and can then be retried. The contract still runs twice with zero residual rows.
+* `tests/test_writeback.py` 33/33 with `ML_WRITEBACK_DSN`, including: read-only `--verify`
+  (one GET, no PATCH, no events, watermark untouched), `--resolve` applying a match, a mismatch
+  becoming `verified_not_applied` and then retryable, a missing column changing nothing, a
+  non-candidate costing no GET, a stale-base 2xx being resolved, and both CLI guards.
+* Full suite `180 passed, 28 skipped, 200 subtests`; `api_contract.sql`, `merge_contract.sql` and
+  `etl_contract.sql` green on rebuilt databases; the ETL path still imports twice
+  (`18 new` then `0 new / 18 updated`). The one new case that is not skipped without
+  `ML_WRITEBACK_DSN` is the pure verdict-rule check, which is why the passing count moved too.
 * `check_english.py`, `compileall`, `check_mappings.py` x3, `check_joineryflow_mapping.py` and the
   93 static unit tests clean; JSONL byte contract untouched.
 
@@ -359,19 +420,24 @@ writes the diff into `material`, `submit()` rejects values the master row cannot
 clears a field, and the importer refuses a snapshot that predates an applied request. Counts are
 now 22/22 write-back tests and `179 passed, 18 skipped`.
 
-Two items are deliberately left open and recorded in design section 16: who resolves
-`applied_unverified` (a `--verify` GET pass is the natural next step, but it needs the upstream's
-read shape), and who schedules the worker and the prune CLI. The retention *policy* is no longer
-open: D20 fixed what may be deleted and made the snapshot guard independent of those rows.
+Two items were deliberately left open and recorded in design section 16: who resolves
+`applied_unverified` and who schedules the worker and the prune CLI. The retention *policy* is no
+longer open: D20 fixed what may be deleted and made the snapshot guard independent of those rows.
 
 Follow-up 3 (design 6.3, D20) is implemented and verified: every 2xx advances the upstream-write
 watermark, the importer judges staleness against it, and the prune CLI is a dry-run-by-default
-operation that cannot touch the watermark or the audit trail. Counts are now 25/25 write-back
+operation that cannot touch the watermark or the audit trail. Counts were then 25/25 write-back
 tests and `179 passed, 21 skipped`.
+
+Follow-up 4 (design 6.4, D21) closes the last open item: `--verify` GETs the upstream row,
+compares the diffed fields and reports `upstream_matches` / `upstream_differs` / `unreachable`;
+`--resolve` lets SQL act on it. A missing column is `unreachable`, never a mismatch, so an
+unknown read shape cannot downgrade a real write. Counts are now 33/33 write-back tests.
 
 Still open for the project as a whole, and deliberately out of scope for T3: whether joineryflow
 honours `Idempotency-Key` (until confirmed, no retry depends on it), the exact form of the
-workspace guard, whether the upstream accepts a partial PATCH body, who schedules the worker and
-the retention job, live incremental sync (which needs an `updated_at` column and real
-credentials), ETIM/eCl@ss real-code mapping and EPD collection.
+workspace guard, whether the upstream accepts a partial PATCH body, the exact `GET` response shape
+and a read-scoped token, who schedules the worker and the retention job, live incremental sync
+(which needs an `updated_at` column and real credentials), ETIM/eCl@ss real-code mapping and EPD
+collection.
 See `docs/t3-writeback.md` section 16 and the non-goals in section 13.

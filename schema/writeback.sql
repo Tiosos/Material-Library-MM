@@ -155,6 +155,96 @@ COMMENT ON FUNCTION ml_writeback_current_values(text, jsonb) IS
     'Live values of the given write-back paths; the field-level approval fingerprint.';
 
 -- ---------------------------------------------------------------------------
+-- ml_writeback_apply_diffs - write approved values into the master row
+-- ---------------------------------------------------------------------------
+-- Shared by settle() (a confirmed 2xx) and verify() (a GET that confirmed the
+-- upstream took the change). Only the diffed paths are written, so a verified
+-- request cannot clobber fields another reviewer changed in the meantime.
+CREATE OR REPLACE FUNCTION ml_writeback_apply_diffs(p_uid text, p_diffs jsonb)
+RETURNS void
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_diff       jsonb;
+    v_path       text;
+    v_after      jsonb;
+    v_col        text;
+    v_attrs      jsonb;
+    v_attrs_done boolean := false;
+    v_sets       text[] := '{}';
+BEGIN
+    SELECT coalesce(m.attributes, '{}'::jsonb) INTO v_attrs
+      FROM material m WHERE m.material_uid = p_uid;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'material % not found', p_uid;
+    END IF;
+
+    FOR v_diff IN SELECT * FROM jsonb_array_elements(p_diffs) LOOP
+        v_path  := v_diff ->> 'path';
+        -- JSON null means "clear this field"
+        v_after := CASE WHEN jsonb_typeof(v_diff -> 'after') = 'null'
+                        THEN NULL ELSE v_diff -> 'after' END;
+        IF v_path LIKE 'attributes.%' THEN
+            v_attrs := jsonb_set(
+                v_attrs,
+                ARRAY[regexp_replace(v_path, '^attributes\.', '')],
+                coalesce(v_after, 'null'::jsonb), true);
+            v_attrs_done := true;
+        ELSE
+            SELECT f.material_column INTO v_col
+              FROM material_writeback_field f WHERE f.umr_path = v_path;
+            IF v_col IS NULL THEN
+                RAISE EXCEPTION 'no material column for path %', v_path;
+            END IF;
+            IF v_col = 'synonyms' THEN
+                v_sets := v_sets || CASE WHEN v_after IS NULL
+                    THEN 'synonyms = ''{}''::text[]'
+                    ELSE format('synonyms = ARRAY(SELECT jsonb_array_elements_text(%L::jsonb))',
+                                v_after)
+                    END;
+            ELSIF v_col = 'unit_cost' THEN
+                v_sets := v_sets || format('unit_cost = %s::numeric',
+                                           quote_nullable(v_after #>> '{}'));
+            ELSIF v_col = 'lead_time_days' THEN
+                v_sets := v_sets || format('lead_time_days = %s::integer',
+                                           quote_nullable(v_after #>> '{}'));
+            ELSE
+                v_sets := v_sets || format('%I = %L', v_col, v_after #>> '{}');
+            END IF;
+        END IF;
+    END LOOP;
+    IF v_attrs_done THEN
+        v_sets := v_sets || format('attributes = %L::jsonb', v_attrs);
+    END IF;
+    IF cardinality(v_sets) > 0 THEN
+        EXECUTE 'UPDATE material SET ' || array_to_string(v_sets, ', ')
+             || ' WHERE material_uid = $1' USING p_uid;
+    END IF;
+END $$;
+
+COMMENT ON FUNCTION ml_writeback_apply_diffs(text, jsonb) IS
+    'Write the approved diff values into material; shared by settle and verify.';
+
+-- ---------------------------------------------------------------------------
+-- ml_writeback_note_write - advance the upstream-write watermark
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION ml_writeback_note_write(p_target text, p_id bigint)
+RETURNS void
+LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO material_writeback_state AS s
+           (target_system, last_upstream_write_at, last_request_id)
+    VALUES (p_target, now(), p_id)
+    ON CONFLICT (target_system) DO UPDATE
+       SET last_upstream_write_at = greatest(s.last_upstream_write_at,
+                                             EXCLUDED.last_upstream_write_at),
+           last_request_id = EXCLUDED.last_request_id,
+           advances       = s.advances + 1;
+END $$;
+
+COMMENT ON FUNCTION ml_writeback_note_write(text, bigint) IS
+    'Record that a 2xx (or a verified upstream write) happened, so a stale snapshot stays refused.';
+
+-- ---------------------------------------------------------------------------
 -- material_change_request_submit - file a diff request, before computed here
 -- ---------------------------------------------------------------------------
 -- The caller sends only {path, after}; `before` is always read from the live
@@ -724,13 +814,6 @@ DECLARE
     v_matstatus  text;
     v_unverified boolean := false;
     v_upstream   boolean := false;
-    v_diff       jsonb;
-    v_path       text;
-    v_after      jsonb;
-    v_col        text;
-    v_attrs      jsonb;
-    v_attrs_done boolean := false;
-    v_sets       text[] := '{}';
 BEGIN
     IF p_outcome IS NULL OR p_outcome NOT IN ('applied', 'failed', 'unknown') THEN
         RAISE EXCEPTION 'outcome must be applied, failed or unknown'
@@ -778,7 +861,7 @@ BEGIN
           INTO v_paths
           FROM jsonb_array_elements(v_row.diffs) WITH ORDINALITY AS t(d, ord);
         v_current := ml_writeback_current_values(v_row.material_uid, v_paths);
-        SELECT m.status, m.attributes INTO v_matstatus, v_attrs
+        SELECT m.status INTO v_matstatus
           FROM material m WHERE m.material_uid = v_row.material_uid;
         IF v_current IS DISTINCT FROM (v_row.base -> 'values') THEN
             v_unverified := true;
@@ -800,48 +883,7 @@ BEGIN
             -- A local write that fails must not lose the 2xx: it degrades to
             -- applied_unverified instead of raising after the PATCH landed.
             BEGIN
-                v_attrs := coalesce(v_attrs, '{}'::jsonb);
-                FOR v_diff IN SELECT * FROM jsonb_array_elements(v_row.diffs) LOOP
-                    v_path  := v_diff ->> 'path';
-                    v_after := CASE WHEN jsonb_typeof(v_diff -> 'after') = 'null'
-                                    THEN NULL ELSE v_diff -> 'after' END;
-                    IF v_path LIKE 'attributes.%' THEN
-                        v_attrs := jsonb_set(
-                            v_attrs,
-                            ARRAY[regexp_replace(v_path, '^attributes\.', '')],
-                            coalesce(v_after, 'null'::jsonb), true);
-                        v_attrs_done := true;
-                    ELSE
-                        SELECT f.material_column INTO v_col
-                          FROM material_writeback_field f WHERE f.umr_path = v_path;
-                        IF v_col IS NULL THEN
-                            RAISE EXCEPTION 'no material column for path %', v_path;
-                        END IF;
-                        IF v_col = 'synonyms' THEN
-                            -- synonyms is NOT NULL: a null after means "clear"
-                            v_sets := v_sets || CASE WHEN v_after IS NULL
-                                THEN 'synonyms = ''{}''::text[]'
-                                ELSE format('synonyms = ARRAY(SELECT jsonb_array_elements_text(%L::jsonb))',
-                                            v_after)
-                                END;
-                        ELSIF v_col = 'unit_cost' THEN
-                            v_sets := v_sets || format('unit_cost = %s::numeric',
-                                                       quote_nullable(v_after #>> '{}'));
-                        ELSIF v_col = 'lead_time_days' THEN
-                            v_sets := v_sets || format('lead_time_days = %s::integer',
-                                                       quote_nullable(v_after #>> '{}'));
-                        ELSE
-                            v_sets := v_sets || format('%I = %L', v_col, v_after #>> '{}');
-                        END IF;
-                    END IF;
-                END LOOP;
-                IF v_attrs_done THEN
-                    v_sets := v_sets || format('attributes = %L::jsonb', v_attrs);
-                END IF;
-                IF cardinality(v_sets) > 0 THEN
-                    EXECUTE 'UPDATE material SET ' || array_to_string(v_sets, ', ')
-                         || ' WHERE material_uid = $1' USING v_row.material_uid;
-                END IF;
+                PERFORM ml_writeback_apply_diffs(v_row.material_uid, v_row.diffs);
             EXCEPTION WHEN others THEN
                 v_status     := 'failed';
                 v_error      := 'local_write_failed';
@@ -862,14 +904,7 @@ BEGIN
                   AND (p_status_code IS NULL
                        OR (p_status_code >= 200 AND p_status_code < 300));
     IF v_upstream THEN
-        INSERT INTO material_writeback_state AS s
-               (target_system, last_upstream_write_at, last_request_id)
-        VALUES (v_row.target_system, now(), p_id)
-        ON CONFLICT (target_system) DO UPDATE
-           SET last_upstream_write_at = greatest(s.last_upstream_write_at,
-                                                 EXCLUDED.last_upstream_write_at),
-               last_request_id = EXCLUDED.last_request_id,
-               advances       = s.advances + 1;
+        PERFORM ml_writeback_note_write(v_row.target_system, p_id);
     END IF;
 
     PERFORM set_config('ml.actor', v_actor, true);
@@ -1000,3 +1035,169 @@ END $$;
 
 COMMENT ON FUNCTION material_change_request_retry(bigint, text, text) IS
     'Explicit human retry of a known-failed request; refuses uncertain outcomes and stale bases.';
+
+-- ---------------------------------------------------------------------------
+-- material_change_request_verify_plan - what a GET has to confirm (docs 6.4)
+-- ---------------------------------------------------------------------------
+-- Pure. Unlike plan() this deliberately does not refuse a superseded material:
+-- a request whose upstream row was merged away is exactly one of the cases a
+-- human needs to verify. `expected` is the flat upstream column -> after map.
+CREATE OR REPLACE FUNCTION material_change_request_verify_plan(p_id bigint)
+RETURNS jsonb
+LANGUAGE plpgsql STABLE AS $$
+DECLARE
+    v_row      material_change_request%ROWTYPE;
+    v_mat      material%ROWTYPE;
+    v_cat      material_writeback_catalog%ROWTYPE;
+    v_expected jsonb;
+BEGIN
+    SELECT * INTO v_row FROM material_change_request WHERE id = p_id;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'not_found', 'id', p_id);
+    END IF;
+    -- Only the states verify() can act on are worth a GET; anything else is a
+    -- caller mistake, so report it instead of spending a request on it.
+    IF v_row.status <> 'failed' OR v_row.error NOT IN
+       ('uncertain_outcome', 'stale_base', 'material_inactive',
+        'local_write_failed', 'verified_not_applied') THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'not_candidate',
+                                  'id', p_id, 'status', v_row.status,
+                                  'error', v_row.error);
+    END IF;
+    SELECT * INTO v_mat FROM material WHERE material_uid = v_row.material_uid;
+    IF NOT FOUND OR v_mat.source_system <> 'joineryflow'
+       OR v_mat.source_id !~ '^[a-z_]+:[0-9]+$' THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'invalid_target',
+                                  'id', p_id, 'source_id', v_mat.source_id);
+    END IF;
+    SELECT * INTO v_cat FROM material_writeback_catalog
+     WHERE table_name = split_part(v_mat.source_id, ':', 1);
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'invalid_target',
+                                  'id', p_id, 'source_id', v_mat.source_id);
+    END IF;
+
+    SELECT coalesce(jsonb_object_agg(x.up, x.aft ORDER BY x.up), '{}'::jsonb)
+      INTO v_expected
+      FROM (
+            SELECT CASE WHEN d ->> 'path' LIKE 'attributes.%'
+                        THEN regexp_replace(d ->> 'path', '^attributes\.', '')
+                        ELSE f.upstream_column
+                   END AS up,
+                   d -> 'after' AS aft
+              FROM jsonb_array_elements(v_row.diffs) d
+              LEFT JOIN material_writeback_field f ON f.umr_path = d ->> 'path'
+           ) x
+     WHERE x.up IS NOT NULL;
+
+    RETURN jsonb_build_object('ok', true, 'code', 'verify_plan', 'id', p_id,
+                              'status', v_row.status, 'error', v_row.error,
+                              'url', v_cat.endpoint || '/' || split_part(v_mat.source_id, ':', 2),
+                              'expected', v_expected, 'diffs', v_row.diffs);
+END $$;
+
+COMMENT ON FUNCTION material_change_request_verify_plan(bigint) IS
+    'Pure GET preview for verification: URL and flat upstream-column values the upstream must show.';
+
+-- ---------------------------------------------------------------------------
+-- material_change_request_verify - resolve an unverifiable failure (docs 6.4)
+-- ---------------------------------------------------------------------------
+-- Only failed requests whose outcome is genuinely unknown are candidates:
+-- uncertain_outcome (5xx / timeout), stale_base, material_inactive and
+-- local_write_failed (the applied_unverified 2xx cases), plus verified_not_applied
+-- so a later GET can re-check. SQL owns every transition; Python only supplies
+-- the verdict from a GET and decides whether to pass p_resolve = true.
+--
+-- p_resolve = false (the CLI default) is a true no-op: zero writes, zero events.
+-- unreachable is never treated as "not applied": a missing upstream column means
+-- we do not know, so nothing changes. That is the guard against a wrong field
+-- name silently turning a real write into a failed request.
+CREATE OR REPLACE FUNCTION material_change_request_verify(
+    p_id      bigint,
+    p_verdict text,
+    p_actor   text DEFAULT NULL,
+    p_resolve boolean DEFAULT false
+) RETURNS jsonb
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_row     material_change_request%ROWTYPE;
+    v_actor   text;
+    v_outcome text;
+    v_paths   jsonb;
+    v_current jsonb;
+BEGIN
+    IF p_verdict IS NULL OR p_verdict NOT IN
+       ('upstream_matches', 'upstream_differs', 'unreachable') THEN
+        RAISE EXCEPTION 'verdict must be upstream_matches, upstream_differs or unreachable'
+            USING ERRCODE = '22023';
+    END IF;
+    v_actor := coalesce(nullif(btrim(p_actor), ''),
+                        nullif(current_setting('ml.actor', true), ''),
+                        'anonymous');
+
+    SELECT * INTO v_row FROM material_change_request WHERE id = p_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'not_found', 'id', p_id);
+    END IF;
+    IF v_row.status <> 'failed' OR v_row.error NOT IN
+       ('uncertain_outcome', 'stale_base', 'material_inactive',
+        'local_write_failed', 'verified_not_applied') THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'conflict', 'id', p_id,
+                                  'status', v_row.status, 'error', v_row.error);
+    END IF;
+
+    IF NOT p_resolve OR p_verdict = 'unreachable' THEN
+        RETURN jsonb_build_object('ok', true, 'code', 'verification_only',
+                                  'id', p_id, 'verdict', p_verdict,
+                                  'status', v_row.status, 'error', v_row.error,
+                                  'would', CASE p_verdict
+                                      WHEN 'upstream_matches' THEN 'applied'
+                                      WHEN 'upstream_differs' THEN 'verified_not_applied'
+                                      ELSE 'unchanged' END);
+    END IF;
+
+    PERFORM set_config('ml.actor', v_actor, true);
+    PERFORM set_config('ml.source', 'writeback', true);
+
+    IF p_verdict = 'upstream_differs' THEN
+        UPDATE material_change_request SET error = 'verified_not_applied'
+         WHERE id = p_id;
+        v_outcome := 'verified_not_applied';
+        INSERT INTO material_event (material_uid, entity, op, payload, actor)
+        VALUES (v_row.material_uid, 'material_change_request', 'update',
+                jsonb_build_object('request_id', p_id,
+                                   'from', 'failed', 'to', 'failed',
+                                   'actor', v_actor, 'verdict', p_verdict,
+                                   'outcome', v_outcome), v_actor);
+        RETURN jsonb_build_object('ok', true, 'code', v_outcome, 'id', p_id,
+                                  'status', 'failed', 'error', v_outcome,
+                                  'verdict', p_verdict);
+    END IF;
+
+    -- upstream_matches: the GET confirmed the write, so the master row and the
+    -- watermark must catch up. A tombstone is still the row this request names.
+    BEGIN
+        PERFORM ml_writeback_apply_diffs(v_row.material_uid, v_row.diffs);
+    EXCEPTION WHEN others THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'local_write_failed',
+                                  'id', p_id, 'verdict', p_verdict);
+    END;
+    PERFORM ml_writeback_note_write(v_row.target_system, p_id);
+    UPDATE material_change_request
+       SET status = 'applied', applied_at = now(), error = NULL,
+           claimed_at = NULL, claimed_by = NULL
+     WHERE id = p_id;
+    v_outcome := 'verified_applied';
+    INSERT INTO material_event (material_uid, entity, op, payload, actor)
+    VALUES (v_row.material_uid, 'material_change_request', 'update',
+            jsonb_build_object('request_id', p_id,
+                               'from', 'failed', 'to', 'applied',
+                               'actor', v_actor, 'verdict', p_verdict,
+                               'outcome', v_outcome), v_actor);
+    RETURN jsonb_build_object('ok', true, 'code', 'applied', 'id', p_id,
+                              'status', 'applied', 'outcome', v_outcome,
+                              'verdict', p_verdict, 'error', NULL);
+END $$;
+
+COMMENT ON FUNCTION material_change_request_verify(bigint, text, text, boolean) IS
+    'Resolve a failed request whose upstream outcome was unknown; read-only unless p_resolve is true.';
