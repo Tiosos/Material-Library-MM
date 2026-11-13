@@ -166,6 +166,7 @@ LANGUAGE plpgsql AS $$
 DECLARE
     v_diff       jsonb;
     v_path       text;
+    v_key        text;
     v_after      jsonb;
     v_col        text;
     v_attrs      jsonb;
@@ -184,10 +185,16 @@ BEGIN
         v_after := CASE WHEN jsonb_typeof(v_diff -> 'after') = 'null'
                         THEN NULL ELSE v_diff -> 'after' END;
         IF v_path LIKE 'attributes.%' THEN
-            v_attrs := jsonb_set(
-                v_attrs,
-                ARRAY[regexp_replace(v_path, '^attributes\.', '')],
-                coalesce(v_after, 'null'::jsonb), true);
+            v_key := regexp_replace(v_path, '^attributes\.', '');
+            -- Clearing an attribute drops the key instead of storing a JSON
+            -- null: `attributes ? key` stays meaningful and the fingerprint
+            -- treats both the same, because `->` returns SQL NULL either way
+            -- (docs section 7).
+            IF v_after IS NULL THEN
+                v_attrs := v_attrs - v_key;
+            ELSE
+                v_attrs := jsonb_set(v_attrs, ARRAY[v_key], v_after, true);
+            END IF;
             v_attrs_done := true;
         ELSE
             SELECT f.material_column INTO v_col

@@ -170,7 +170,7 @@ The four ETL integration cases in `tests/test_etl.py` skip unless `ML_ETL_DSN` p
 database that has imported the joineryflow snapshot; the seventeen write-back integration cases in
 `tests/test_writeback.py` skip unless `ML_WRITEBACK_DSN` is set. The dedicated `etl` and
 `writeback` CI jobs supply those DSNs. On the CI `api` recipe the suite reports
-`180 passed, 28 skipped`.
+`180 passed, 32 skipped`.
 
 Design and decisions: [`docs/api-v1.md`](docs/api-v1.md) (endpoints, SQL additions, instrumentation, evaluation thresholds). Implementation log with verification for every step: [`docs/t1-progress.md`](docs/t1-progress.md).
 
@@ -343,10 +343,15 @@ writes the diffed values and advances the watermark; a confirmed miss records
 `verified_not_applied` and becomes retryable; a column the adapter cannot find is `unreachable`
 and changes nothing, so a wrong field name can never downgrade a real write.
 
+Every allowed path is now covered by the contract, not just `unit_cost`: the seven fields (including
+`synonyms` as a `text[]`), the `attributes.<key>` namespace, the four places that derive an upstream
+column name asserted against each other, and the tombstone rule - a confirmed write on a merged-away
+row lands on the tombstone, never on the survivor.
+
 Measured on a fresh PostgreSQL 16 database: `scripts/writeback_contract.sql` green with zero
-residual rows, `tests/test_writeback.py` 33/33 with `ML_WRITEBACK_DSN`,
+residual rows, `tests/test_writeback.py` 37/37 with `ML_WRITEBACK_DSN`,
 `tests/test_writeback_api.py` 12/12 in the `api` job, and the full suite
-`180 passed, 28 skipped` on the CI `api` recipe. The dedicated `writeback` CI job rebuilds this
+`180 passed, 32 skipped` on the CI `api` recipe. The dedicated `writeback` CI job rebuilds this
 from scratch on every PR with its own `ml_writeback` database; no `ML_JF_*` credential is set
 there.
 

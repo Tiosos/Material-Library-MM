@@ -425,6 +425,14 @@ handles.
 `verified_not_applied` is a new `error` value on `failed`, not a new state: the five-state CHECK is
 untouched (D13), and `retry()` accepts it because the outcome is now known.
 
+**A tombstone is still the row the request names.** `verify()` deliberately does not re-check
+`material.status`, unlike `plan()` and `settle()`, because "the material was merged away mid-flight"
+is one of the cases a human needs to verify. When the GET confirms the write, the diffed values go
+into the tombstone - the row that mirrors that upstream record - and not into the survivor, which
+T2's merge already copied at merge time. That keeps tombstone and upstream consistent and leaves
+the survivor's own history alone. It is a deliberate choice rather than an oversight, so it is
+asserted rather than left to the next reader to "fix".
+
 ---
 
 ## 7. The diff contract
@@ -459,6 +467,21 @@ Rejected, with the offending path named in the error: `archived_at`, `status`, `
 `identifier.*`, `quote*`, and any unknown or unlisted path. Rejection happens at submit, so a
 forbidden value can never reach the executor. The SQL contract asserts that no PATCH body in the
 fake upstream's log contains a forbidden key.
+
+**Every row of that table is exercised, not just `unit_cost`.** Section 16 of
+`scripts/writeback_contract.sql` writes the five fields that had no positive assertion (`name`,
+`unit`, `lead_time_days`, `product_url`, `synonyms`) in one diff, checks the PATCH body is exactly
+the five upstream columns, and asserts that `material_change_request_verify_plan()` expects the
+same five keys - the four places that derive an upstream column name independently
+(`ml_writeback_current_values`, `ml_writeback_apply_diffs`, `plan()`, `verify_plan()`) are only
+useful while they agree. `synonyms` gets its own case because it is the one path that builds a
+`text[]`; clearing it must yield `{}` and never NULL.
+
+**Clearing an attribute drops the key.** `attributes.colour: null` removes `colour` from
+`material.attributes` instead of storing `{"colour": null}`. The fingerprint cannot tell the
+difference - `attributes -> 'colour'` is SQL NULL either way, so `no_change` still fires - but
+`attributes ? 'colour'` stays meaningful, and a reader never sees a key whose value is a JSON
+null (D22).
 
 ---
 
@@ -566,6 +589,11 @@ worker does not need FastAPI or httpx.
   path writes zero events and leaves the watermark alone, an `unreachable` verdict changes nothing
   even with `p_resolve`, a confirmed match applies the diff and advances the watermark by exactly
   one, and a confirmed miss records `verified_not_applied` without touching the master row.
+  Section 16 adds the field coverage of section 7: one diff carrying the five fields that had no
+  positive assertion, the PATCH body compared as a whole object, `verify_plan().expected` asserted
+  equal to that body, `synonyms` cleared to `{}`, and `attributes.colour` written, preserved and
+  dropped. Section 17 asserts that a confirmed write on a tombstone lands on the tombstone and
+  leaves the survivor alone.
 - `tests/test_writeback.py`: pure unit cases for path translation and target resolution run
   without a database; integration cases skip unless `ML_WRITEBACK_DSN` is set, exactly as
   `tests/test_etl.py` skips without `ML_ETL_DSN`. The fake upstream is a stdlib `http.server`
@@ -579,7 +607,10 @@ worker does not need FastAPI or httpx.
   a fresher snapshot passing the guarded comparison, and section 6.4: the verdict rules
   (missing column is `unreachable`), read-only `--verify`, `--resolve` applying a match,
   a mismatch becoming `verified_not_applied` and then retryable, a missing column changing
-  nothing, a non-candidate costing no GET, a stale-base 2xx being resolved, and the CLI guards.
+  nothing, a non-candidate costing no GET, a stale-base 2xx being resolved, and the CLI guards;
+  plus the section 7 coverage: an attribute write reaching `material.attributes` with the bare
+  column in the PATCH body, clearing an attribute dropping the key, `--verify` resolving an
+  attribute, and a five-field diff landing as one PATCH.
 - New CI job `writeback` with its own fresh `POSTGRES_DB=ml_writeback` and
   `ML_WRITEBACK_DSN`. Steps: install `pyyaml`, `psycopg[binary]`, `pytest`; load
   `material.sql, search.sql, merge.sql, seed.sql, writeback.sql` (merge.sql is needed by the
@@ -637,6 +668,12 @@ worker does not need FastAPI or httpx.
     and advances the watermark; `upstream_differs` records `verified_not_applied` and leaves the
     master row untouched; a missing column is `unreachable` and changes nothing even with
     `--resolve`; a request that is not a candidate costs no HTTP call.
+14. Every allowed path actually lands (section 7): a single diff carrying `name`, `unit`,
+    `lead_time_days`, `product_url` and `synonyms` produces exactly those five upstream columns in
+    the PATCH body, reaches the master row (including `synonyms` as a `text[]`), moves `rev`, and
+    makes the same diff return `no_change`. `verify_plan()` expects the same keys the PATCH sends.
+    `attributes.<key>` lands in `material.attributes` without clobbering an unrelated key, and
+    clearing it removes the key rather than storing a JSON null.
 
 ---
 
@@ -679,6 +716,7 @@ and EPD collection, changes to search ranking, and any change to the ETL snapsho
 | 7 | T3 x T3 loop (section 6.2): `settle()` writes the diff home, submit validates storable values, JSON null clears, the importer refuses a stale snapshot | contract green, 22/22 write-back tests, full suite green, an old snapshot is refused after an apply |
 | 8 | Retention and the watermark (section 6.3): `material_writeback_state`, the watermark-based import guard, the prune CLI, contract assertions and integration cases | contract green, 25/25 write-back tests, full suite green, a stale snapshot stays refused after terminal rows are pruned |
 | 9 | `--verify` (section 6.4): `verify_plan()`, `verify()`, the shared local-write helpers, `JoineryflowClient.get()`, the `--verify` / `--resolve` modes, contract assertions and integration cases | contract green, 33/33 write-back tests, full suite green, a 5xx request is resolved by a GET and a missing column changes nothing |
+| 10 | Field coverage (section 7): contract sections 16 and 17 for the five fields with no positive assertion, the `plan`/`verify_plan` key agreement, the attributes namespace and the tombstone decision | contract green, 37/37 write-back tests, full suite green, every allowed path is written and asserted at least once |
 
 Effort: about two to three days at the T1/T2/ETL pace; most of it is the state machine, the
 outcome handling and making the CI simulation honest.
@@ -710,6 +748,7 @@ outcome handling and making the CI simulation honest.
 | D19 | An import whose snapshot predates an applied request is a hard error | the importer copies source values over the master row, so an old snapshot silently reverts a confirmed write; re-exporting is cheap, losing an applied change is not |
 | D20 | Every 2xx advances a dedicated upstream-write watermark; the importer judges staleness against it, not against live request rows | D19's guard would silently stop working as soon as retention prunes `applied` rows; the watermark is about the upstream write, so `applied_unverified` 2xx responses count too (section 6.3) |
 | D21 | `--verify` reads the upstream row and lets SQL resolve the request; a missing column is `unreachable`, never a mismatch | `failed / uncertain_outcome` and the three `applied_unverified` branches had no transition at all, so a human had to read the upstream UI; a missing column means the adapter's field name may be wrong, and reading that as "not applied" would invite a duplicate PATCH (section 6.4) |
+| D22 | Clearing an attribute drops the key instead of storing a JSON null | `attributes -> key` is SQL NULL either way, so the fingerprint and `no_change` are unaffected; dropping keeps `attributes ? key` honest, and nobody reads a key whose value is JSON null (section 7) |
 
 ---
 

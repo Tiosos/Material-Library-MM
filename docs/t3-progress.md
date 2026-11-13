@@ -22,6 +22,7 @@ Status legend: `[ ]` planned, `[~]` in progress, `[x]` done and verified, `[!]` 
 | 7 | T3 x T3 loop: `settle()` writes the diff into `material`, submit validates storable values, JSON null clears a field, the importer refuses a stale snapshot (design 6.2, D18/D19) | [x] | Contract green with the new assertions; `tests/test_writeback.py` 22/22; full suite `179 passed, 18 skipped`; api and merge contracts green on a rebuilt database; see "Follow-up 2" |
 | 8 | Retention and the watermark (design 6.3, D20): `material_writeback_state`, a watermark-driven import guard, `scripts/prune_change_requests.py` | [x] | Contract green with section 14; `tests/test_writeback.py` 25/25; full suite `179 passed, 21 skipped`; api / merge / etl contracts green; see "Follow-up 3" |
 | 9 | `--verify` (design 6.4, D21): `verify_plan()` / `verify()`, shared local-write helpers, `JoineryflowClient.get()`, `--verify` / `--resolve`, contract section 15 | [x] | Contract green with section 15, re-runnable with zero residual rows; `tests/test_writeback.py` 33/33; full suite `180 passed, 28 skipped`; api / merge / etl contracts and static checks green; see "Follow-up 4" |
+| 10 | Field coverage (design 7, D22): contract sections 16 and 17, the `plan` / `verify_plan` key agreement, the attributes namespace and the tombstone decision | [x] | Contract green with sections 16-17, re-runnable with zero residual rows and no tombstone left behind; `tests/test_writeback.py` 37/37 twice in a row; full suite, api / merge / etl contracts and static checks green; see "Follow-up 5" |
 
 Steps 0-1 were merged in **PR #15** (merge commit `cbf1b5f`, 2026-11-11T22:01:22Z). Steps 2-5
 were implemented and verified on top of that commit and are delivered together in **PR #16**.
@@ -381,6 +382,59 @@ Verification on a fresh PostgreSQL 16 database:
 * `check_english.py`, `compileall`, `check_mappings.py` x3, `check_joineryflow_mapping.py` and the
   93 static unit tests clean; JSONL byte contract untouched.
 
+## Follow-up 5: the paths that shipped without a test
+
+T3 was "done" with two of the seven writable fields positively asserted. `scripts/writeback_contract.sql`
+proved `unit_cost` reached the master row and `product_type` could be cleared; `name`, `unit`,
+`lead_time_days`, `product_url` and `synonyms` had never been written by a test, and the
+`attributes.<key>` namespace had exactly one assertion - a *rejection*. The code was correct, which
+I checked by hand before writing anything, but nothing would have caught it if it stopped being
+correct.
+
+Two things made this worth a follow-up rather than a note:
+
+* `synonyms` is the only path that has to build a `text[]` instead of a scalar, and a clear has to
+  produce `{}` because the column is `NOT NULL`. A break there is silent.
+* Four places derive the upstream column name independently - `ml_writeback_current_values`,
+  `ml_writeback_apply_diffs`, `plan()` and `verify_plan()` - each with its own
+  `regexp_replace(path, '^attributes\.', '')` or `material_writeback_field` lookup. They agree
+  today. Nothing said they had to.
+
+Contract section 16 fixes both: one diff carries the five unasserted fields, the PATCH body is
+compared as a whole object, and `verify_plan().expected` is asserted **equal to that body** - which
+is the invariant that ties the four call sites together, since both are "the same diff, translated
+the same way". `synonyms` is then cleared and must be `{}`, and `attributes.colour` is written,
+checked against a pre-existing key it must not clobber, cleared, and re-submitted to prove
+`no_change`.
+
+Section 17 records the tombstone decision from design 6.4: `verify()` deliberately skips the
+`material.status` re-check, so a confirmed write on a merged-away row lands **on the tombstone** and
+the survivor keeps its own value. That is now asserted rather than left as an accident someone
+would later "fix".
+
+One behaviour changed: clearing an attribute now drops the key instead of storing
+`{"colour": null}` (D22). The fingerprint cannot tell the difference - `attributes -> 'colour'` is
+SQL NULL either way - so `no_change` and the stale check are unaffected; `attributes ? 'colour'`
+just stops lying.
+
+Verification on a fresh PostgreSQL 16 database:
+
+* `scripts/writeback_contract.sql` green with sections 16 and 17, run twice, zero residual rows and
+  no tombstone left behind.
+* `tests/test_writeback.py` 37/37, run twice in a row on the same database to prove the fixture
+  restores what the new cases write.
+* Full suite, api / merge / etl contracts and the static checks re-run on rebuilt databases.
+
+Two real problems surfaced while doing it, both in the test harness rather than the product:
+
+* The `clean_db` fixture only restored `unit_cost`, `status` and `superseded_by`, so the new
+  attribute and five-field cases leaked into whatever ran next. It now snapshots every column a
+  write-back can touch and restores them all.
+* That restore then failed with `psycopg.ProgrammingError`: psycopg does not adapt a Python `dict`
+  to `jsonb` on its own, so `attributes` has to be sent as JSON text with an explicit `::jsonb`
+  cast. The first run of the new fixture left rows `superseded`, which is why the second run
+  failed - a reminder that a broken teardown is worse than a broken test.
+
 ## Constraints carried into implementation
 
 * SQL owns transitions, Python owns transport (design principle 1). Satisfied: all five
@@ -432,7 +486,12 @@ tests and `179 passed, 21 skipped`.
 Follow-up 4 (design 6.4, D21) closes the last open item: `--verify` GETs the upstream row,
 compares the diffed fields and reports `upstream_matches` / `upstream_differs` / `unreachable`;
 `--resolve` lets SQL act on it. A missing column is `unreachable`, never a mismatch, so an
-unknown read shape cannot downgrade a real write. Counts are now 33/33 write-back tests.
+unknown read shape cannot downgrade a real write. Counts were then 33/33 write-back tests.
+
+Follow-up 5 (design 7, D22) closes the coverage gap that followed: every allowed path is now
+written by a test at least once, the four places that derive an upstream column name are pinned to
+each other, and the tombstone decision is asserted instead of implied. Counts are now 37/37
+write-back tests.
 
 Still open for the project as a whole, and deliberately out of scope for T3: whether joineryflow
 honours `Idempotency-Key` (until confirmed, no retry depends on it), the exact form of the

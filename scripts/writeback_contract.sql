@@ -54,6 +54,19 @@ DECLARE
     v_null_uid text;
     v_verify   bigint;
     v_differs  bigint;
+    v_fields   bigint;
+    v_attr_id  bigint;
+    v_attr_uid text;
+    v_attr_before jsonb;
+    v_body     jsonb;
+    v_expected jsonb;
+    v_attrs    jsonb;
+    v_syn      text[];
+    v_rev_before integer;
+    v_tomb     text;
+    v_surv     text;
+    v_cost_before numeric;
+    v_mat      material%ROWTYPE;
     v_adv      integer;
     v_adv_start integer;
     v_wm_id    bigint;
@@ -595,12 +608,215 @@ BEGIN
         RAISE EXCEPTION 'a verified miss could not be retried: %', r;
     END IF;
 
+    -- 16. every writable field lands, not just unit_cost (docs section 7) ----
+    -- The allowlist has seven fields plus an attributes namespace, but only
+    -- unit_cost and product_type were ever asserted. synonyms is the riskiest:
+    -- it is the one path that has to build a text[] instead of a scalar, and a
+    -- break there would ship silently.
+    SELECT material_uid, rev INTO v_uid, v_rev_before FROM material
+     WHERE source_system = 'joineryflow' AND unit_cost IS NOT NULL
+     ORDER BY source_id OFFSET 10 LIMIT 1;
+    IF v_uid IS NULL THEN
+        RAISE EXCEPTION 'the snapshot does not provide an eleventh priced row';
+    END IF;
+
+    SELECT material_change_request_submit(v_uid,
+               '[{"path":"name","after":"Renamed by the contract"},
+                 {"path":"unit","after":"box"},
+                 {"path":"lead_time_days","after":7},
+                 {"path":"product_url","after":"https://example.test/contract"},
+                 {"path":"synonyms","after":["hinge 110","soft close"]}]'::jsonb,
+               NULL, 'requester') INTO r;
+    IF NOT (r->>'ok')::boolean THEN
+        RAISE EXCEPTION 'five allowed fields were refused at submit: %', r;
+    END IF;
+    v_fields := (r->>'id')::bigint;
+
+    -- the PATCH body is the inverse translation and nothing else: upstream
+    -- column names, no UMR path leaking through
+    SELECT material_change_request_plan(v_fields, 'hartwood-joinery') -> 'body'
+      INTO v_body;
+    IF v_body IS DISTINCT FROM
+       '{"description": "Renamed by the contract", "um": "box",
+         "default_lead_time_days": 7,
+         "product_website": "https://example.test/contract",
+         "synonyms": ["hinge 110", "soft close"]}'::jsonb THEN
+        RAISE EXCEPTION 'the plan body is wrong: %', v_body;
+    END IF;
+
+    -- Settle it as an unknown outcome so verify_plan is allowed to answer, then
+    -- assert --verify looks for exactly the keys the PATCH sent. Four places
+    -- derive those keys independently (current values, apply, plan, verify
+    -- plan); this is the assertion that keeps them in step.
+    PERFORM material_change_request_decide(v_fields, 'approve', NULL, 'reviewer');
+    PERFORM material_change_request_claim(10, 'worker', interval '5 minutes', v_fields);
+    PERFORM material_change_request_settle(v_fields, 'unknown', 503, 'gateway', 'worker');
+    SELECT material_change_request_verify_plan(v_fields) -> 'expected' INTO v_expected;
+    IF v_expected IS DISTINCT FROM v_body THEN
+        RAISE EXCEPTION 'verify_plan expects % but the PATCH sends %', v_expected, v_body;
+    END IF;
+
+    SELECT material_change_request_verify(
+               v_fields, 'upstream_matches', 'auditor', true) INTO r;
+    IF r->>'code' <> 'applied' THEN
+        RAISE EXCEPTION 'a confirmed multi-field write was not applied: %', r;
+    END IF;
+    SELECT * INTO v_mat FROM material WHERE material_uid = v_uid;
+    IF v_mat.name <> 'Renamed by the contract'
+       OR v_mat.unit <> 'box'
+       OR v_mat.lead_time_days <> 7
+       OR v_mat.product_url <> 'https://example.test/contract'
+       OR v_mat.synonyms IS DISTINCT FROM ARRAY['hinge 110', 'soft close'] THEN
+        RAISE EXCEPTION 'a confirmed field did not land: name=%, unit=%, lead=%, '
+                        'url=%, synonyms=%', v_mat.name, v_mat.unit,
+                        v_mat.lead_time_days, v_mat.product_url, v_mat.synonyms;
+    END IF;
+    IF v_mat.rev <= v_rev_before THEN
+        RAISE EXCEPTION 'a five-field write did not bump rev (% -> %)',
+            v_rev_before, v_mat.rev;
+    END IF;
+    -- the fingerprint has to see the new value, or the same diff could be
+    -- filed and patched a second time
+    SELECT material_change_request_submit(
+               v_uid, '[{"path":"name","after":"Renamed by the contract"}]'::jsonb,
+               NULL, 'requester') INTO r;
+    IF r->>'code' <> 'no_change' THEN
+        RAISE EXCEPTION 'an applied field could be filed again: %', r;
+    END IF;
+
+    -- synonyms is NOT NULL, so a clear must be an empty array and never NULL
+    SELECT material_change_request_submit(
+               v_uid, '[{"path":"synonyms","after":null}]'::jsonb,
+               NULL, 'requester') INTO r;
+    IF NOT (r->>'ok')::boolean THEN
+        RAISE EXCEPTION 'clearing synonyms was refused: %', r;
+    END IF;
+    v_id := (r->>'id')::bigint;
+    PERFORM material_change_request_decide(v_id, 'approve', NULL, 'reviewer');
+    PERFORM material_change_request_claim(10, 'worker', interval '5 minutes', v_id);
+    PERFORM material_change_request_settle(v_id, 'applied', 200, NULL, 'worker');
+    SELECT synonyms INTO v_syn FROM material WHERE material_uid = v_uid;
+    IF v_syn IS NULL OR v_syn <> '{}'::text[] THEN
+        RAISE EXCEPTION 'clearing synonyms did not produce an empty array: %', v_syn;
+    END IF;
+
+    -- attributes.<key>: the write lands in the JSON object, the PATCH body uses
+    -- the bare column name, and an unrelated key is left alone
+    SELECT material_uid, coalesce(attributes, '{}'::jsonb)
+      INTO v_attr_uid, v_attr_before
+      FROM material
+     WHERE source_system = 'joineryflow' AND source_id LIKE 'board_materials:%'
+       AND category_code = 'board'
+     ORDER BY source_id LIMIT 1;
+    IF v_attr_uid IS NULL THEN
+        RAISE EXCEPTION 'the snapshot has no board_materials row for the attribute test';
+    END IF;
+
+    SELECT material_change_request_submit(
+               v_attr_uid, '[{"path":"attributes.colour","after":"Red"}]'::jsonb,
+               NULL, 'requester') INTO r;
+    IF NOT (r->>'ok')::boolean THEN
+        RAISE EXCEPTION 'an allowlisted attribute was refused: %', r;
+    END IF;
+    v_attr_id := (r->>'id')::bigint;
+    SELECT material_change_request_plan(v_attr_id, 'hartwood-joinery') -> 'body'
+      INTO v_body;
+    IF v_body IS DISTINCT FROM '{"colour": "Red"}'::jsonb THEN
+        RAISE EXCEPTION 'an attribute was not flattened for the PATCH: %', v_body;
+    END IF;
+    PERFORM material_change_request_decide(v_attr_id, 'approve', NULL, 'reviewer');
+    PERFORM material_change_request_claim(10, 'worker', interval '5 minutes', v_attr_id);
+    PERFORM material_change_request_settle(v_attr_id, 'applied', 200, NULL, 'worker');
+    SELECT attributes INTO v_attrs FROM material WHERE material_uid = v_attr_uid;
+    IF v_attrs ->> 'colour' <> 'Red' THEN
+        RAISE EXCEPTION 'an applied attribute did not land: %', v_attrs;
+    END IF;
+    IF NOT (v_attrs @> v_attr_before) THEN
+        RAISE EXCEPTION 'applying an attribute clobbered another key: % -> %',
+            v_attr_before, v_attrs;
+    END IF;
+
+    -- clearing an attribute drops the key instead of storing a JSON null, so
+    -- `attributes ? key` keeps meaning "this attribute is set"
+    SELECT material_change_request_submit(
+               v_attr_uid, '[{"path":"attributes.colour","after":null}]'::jsonb,
+               NULL, 'requester') INTO r;
+    IF NOT (r->>'ok')::boolean THEN
+        RAISE EXCEPTION 'clearing an attribute was refused: %', r;
+    END IF;
+    v_attr_id := (r->>'id')::bigint;
+    PERFORM material_change_request_decide(v_attr_id, 'approve', NULL, 'reviewer');
+    PERFORM material_change_request_claim(10, 'worker', interval '5 minutes', v_attr_id);
+    PERFORM material_change_request_settle(v_attr_id, 'applied', 200, NULL, 'worker');
+    SELECT attributes INTO v_attrs FROM material WHERE material_uid = v_attr_uid;
+    IF v_attrs ? 'colour' THEN
+        RAISE EXCEPTION 'clearing an attribute left the key behind: %', v_attrs;
+    END IF;
+    SELECT material_change_request_submit(
+               v_attr_uid, '[{"path":"attributes.colour","after":null}]'::jsonb,
+               NULL, 'requester') INTO r;
+    IF r->>'code' <> 'no_change' THEN
+        RAISE EXCEPTION 'a cleared attribute could be filed again: %', r;
+    END IF;
+
+    -- 17. verify writes to the tombstone, not to the survivor (docs 6.4) -----
+    -- verify() deliberately skips the material.status re-check: "the row was
+    -- merged away mid-flight" is one of the cases a human has to resolve. The
+    -- confirmed value therefore lands on the tombstone - the row that mirrors
+    -- that upstream record - and the survivor keeps its own value.
+    SELECT material_uid INTO v_tomb FROM material
+     WHERE source_system = 'joineryflow' AND unit_cost IS NOT NULL
+     ORDER BY source_id OFFSET 11 LIMIT 1;
+    IF v_tomb IS NULL THEN
+        RAISE EXCEPTION 'the snapshot does not provide a twelfth priced row';
+    END IF;
+    v_surv := v_uids[1];
+    SELECT unit_cost INTO v_cost_before FROM material WHERE material_uid = v_surv;
+
+    SELECT material_change_request_submit(
+               v_tomb, '[{"path":"unit_cost","after":4242}]'::jsonb,
+               NULL, 'requester') INTO r;
+    IF NOT (r->>'ok')::boolean THEN
+        RAISE EXCEPTION 'could not file the tombstone request: %', r;
+    END IF;
+    v_id := (r->>'id')::bigint;
+    PERFORM material_change_request_decide(v_id, 'approve', NULL, 'reviewer');
+    PERFORM material_change_request_claim(10, 'worker', interval '5 minutes', v_id);
+    UPDATE material SET status = 'superseded', superseded_by = v_surv
+     WHERE material_uid = v_tomb;
+    SELECT material_change_request_settle(v_id, 'applied', 200, NULL, 'worker') INTO r;
+    IF r->>'outcome' <> 'applied_unverified' OR r->>'error' <> 'material_inactive' THEN
+        RAISE EXCEPTION 'a 2xx on a tombstone was not recorded as unverified: %', r;
+    END IF;
+
+    -- the plan still refuses it, which is what --apply turns into a failed row
+    SELECT material_change_request_plan(v_id) INTO r;
+    IF (r->>'ok')::boolean OR r->>'code' <> 'material_inactive' THEN
+        RAISE EXCEPTION 'the plan built a PATCH for a tombstone: %', r;
+    END IF;
+    -- but verify is allowed to look, and to act on what it finds
+    SELECT material_change_request_verify(
+               v_id, 'upstream_matches', 'auditor', true) INTO r;
+    IF r->>'code' <> 'applied' THEN
+        RAISE EXCEPTION 'a confirmed tombstone write was not resolved: %', r;
+    END IF;
+    SELECT unit_cost INTO v_cost FROM material WHERE material_uid = v_tomb;
+    IF v_cost IS DISTINCT FROM 4242::numeric THEN
+        RAISE EXCEPTION 'a resolved tombstone write did not land (unit_cost=%)', v_cost;
+    END IF;
+    IF (SELECT unit_cost FROM material WHERE material_uid = v_surv)
+       IS DISTINCT FROM v_cost_before THEN
+        RAISE EXCEPTION 'resolving a tombstone write changed the survivor';
+    END IF;
+
     RAISE NOTICE 'writeback contract OK: 9 endpoints, 7 fields, 6 additive columns, '
                  'submit/decide/claim/settle/retry transitions, 1 event per transition, '
                  'T3 x T2 guards (merge blocker, decide, plan, settle, retry), '
                  'applied writes the master record and cannot be filed twice, '
                  'the upstream watermark survives request retention, '
-                 'verify stays read-only unless resolved and never guesses';
+                 'verify stays read-only unless resolved and never guesses, '
+                 'all seven fields and the attributes namespace reach the master row, '
+                 'a confirmed write on a tombstone lands there and not on the survivor';
 END $$;
 
 ROLLBACK;
