@@ -88,6 +88,23 @@ class _Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass  # the client timed out; its outcome is deliberately unknown
 
+    def do_GET(self):
+        owner = self.server.owner
+        owner.gets.append({"path": self.path, "headers": dict(self.headers)})
+        if owner.get_delay:
+            time.sleep(owner.get_delay)
+        body = owner.get_body
+        raw = body if isinstance(body, str) else json.dumps(body)
+        payload = raw.encode("utf-8")
+        try:
+            self.send_response(owner.get_status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     def log_message(self, *args):
         pass
 
@@ -95,9 +112,15 @@ class _Handler(BaseHTTPRequestHandler):
 class FakeUpstream:
     def __init__(self):
         self.records: list[dict] = []
+        self.gets: list[dict] = []
         self.status = 200
         self.delay = 0.0
         self.message = "ok"
+        # --verify reads through the same server; a test sets get_body to the
+        # row it wants the worker to see.
+        self.get_status = 200
+        self.get_body: object = {}
+        self.get_delay = 0.0
 
     def start(self):
         class _Server(ThreadingHTTPServer):
@@ -195,7 +218,7 @@ def test_no_hardcoded_live_upstream_in_the_worker():
     assert "Authorization" in src
     assert not re.search(r"https?://(?!127\.0\.0\.1)", src)
     assert "dry-run" in src
-    assert "--apply requires ML_JF_BASE_URL" in src
+    assert "requires ML_JF_BASE_URL" in src
 
 
 def test_client_sends_an_authorized_patch_to_the_local_fake(worker, upstream):
@@ -307,6 +330,18 @@ def make_request(conn, uid: str, after: float, *, approve: bool = True) -> int:
             cur.execute("SELECT material_change_request_decide(%s, 'approve', NULL, 'bob')",
                         (rid,))
             assert cur.fetchone()[0]["ok"] is True
+    return rid
+
+
+def unknown_request(conn, upstream, dsn, uid: str, after: float) -> int:
+    """A request whose PATCH answered 5xx: the state only a GET can settle."""
+    rid = make_request(conn, uid, after)
+    upstream.status = 503
+    proc = run_cli(upstream, dsn, "--apply", "--request-id", str(rid))
+    assert proc.returncode == 1, proc.stderr
+    upstream.status = 200
+    upstream.records.clear()
+    assert state(conn, rid)["error"] == "uncertain_outcome"
     return rid
 
 
@@ -720,3 +755,159 @@ def test_a_fresher_snapshot_passes_the_watermark(clean_db, upstream, wb_dsn, imp
         old = json.loads(fh.readline())["exported_at"]
     assert importer.snapshot_conflict(clean_db, old)["stale"] is True
     assert importer.snapshot_conflict(clean_db, "2099-01-01T00:00:00Z")["stale"] is False
+
+
+# ---------------------------------------------------------------------------
+# --verify: a GET that settles a write whose outcome was unknown (docs 6.4)
+# ---------------------------------------------------------------------------
+
+def test_verification_verdict_is_strict_about_missing_columns(worker):
+    verdict = worker.verification_verdict
+    expected = {"unit_cost": 903.0}
+    assert verdict(expected, '{"unit_cost": 903}', 200) == "upstream_matches"
+    assert verdict(expected, '{"unit_cost": 904}', 200) == "upstream_differs"
+    # A missing column is "we do not know", never "the upstream did not take it":
+    # a wrong field name must not turn a real write into a failed request.
+    assert verdict(expected, '{"um": "pc"}', 200) == "unreachable"
+    assert verdict(expected, '{"unit_cost": null}', 200) == "upstream_differs"
+    assert verdict(expected, 'not json', 200) == "unreachable"
+    assert verdict(expected, '{"unit_cost": 903}', 503) == "unreachable"
+    assert verdict(expected, "", None) == "unreachable"
+    assert worker.same_value(903.0, 903) is True
+    assert worker.same_value(None, None) is True
+    assert worker.same_value("pc", "pc") is True
+
+
+def test_verify_is_read_only_by_default(clean_db, upstream, wb_dsn):
+    uid = one_uid(clean_db, 0)
+    rid = unknown_request(clean_db, upstream, wb_dsn, uid, 920.0)
+    before_cost = float(live_cost(clean_db, uid))
+    before_events = count_events(clean_db)
+    before_wm = watermark(clean_db)
+    upstream.get_body = {"unit_cost": 920.0, "um": "pc"}
+
+    proc = run_cli(upstream, wb_dsn, "--verify", str(rid))
+    assert proc.returncode == 0, proc.stderr
+    rep = json.loads(proc.stdout)
+    assert rep["mode"] == "verify" and rep["checked"] == 1
+    row = rep["rows"][0]
+    assert row["verdict"] == "upstream_matches"
+    assert row["outcome"] == "verification_only"
+    assert row["url"].startswith("/catalog/")
+    assert row["resolved"] is False
+
+    # exactly one GET, no PATCH, and the token is still sent but not reported
+    assert len(upstream.gets) == 1
+    assert upstream.gets[0]["path"] == row["url"]
+    assert upstream.gets[0]["headers"]["Authorization"] == "Bearer fake-token"
+    assert upstream.records == []
+
+    st = state(clean_db, rid)
+    assert st["status"] == "failed" and st["error"] == "uncertain_outcome"
+    assert st["claimed_at"] is None
+    assert float(live_cost(clean_db, uid)) == before_cost
+    assert count_events(clean_db) == before_events
+    assert watermark(clean_db) == before_wm
+
+
+def test_verify_resolve_marks_it_applied(clean_db, upstream, wb_dsn):
+    uid = one_uid(clean_db, 0)
+    rid = unknown_request(clean_db, upstream, wb_dsn, uid, 921.0)
+    before_events = count_events(clean_db, rid)
+    upstream.get_body = {"unit_cost": 921.0}
+
+    proc = run_cli(upstream, wb_dsn, "--verify", str(rid), "--resolve")
+    assert proc.returncode == 0, proc.stderr
+    rep = json.loads(proc.stdout)
+    assert rep["applied"] == 1 and rep["rows"][0]["outcome"] == "applied"
+    assert rep["rows"][0]["verdict"] == "upstream_matches"
+
+    st = state(clean_db, rid)
+    assert st["status"] == "applied" and st["error"] is None
+    assert st["applied_at"] is not None and st["claimed_at"] is None
+    assert float(live_cost(clean_db, uid)) == 921.0
+    assert watermark(clean_db)["request_id"] == rid
+    assert watermark(clean_db)["advances"] == 1
+    assert count_events(clean_db, rid) == before_events + 1
+
+
+def test_verify_reports_a_mismatch_and_never_claims_success(clean_db, upstream, wb_dsn):
+    uid = one_uid(clean_db, 0)
+    rid = unknown_request(clean_db, upstream, wb_dsn, uid, 922.0)
+    before_cost = float(live_cost(clean_db, uid))
+    before_wm = watermark(clean_db)
+    upstream.get_body = {"unit_cost": 1.0}
+
+    proc = run_cli(upstream, wb_dsn, "--verify", str(rid), "--resolve")
+    assert proc.returncode == 0, proc.stderr
+    rep = json.loads(proc.stdout)
+    assert rep["rows"][0]["verdict"] == "upstream_differs"
+    assert rep["rows"][0]["outcome"] == "verified_not_applied"
+
+    st = state(clean_db, rid)
+    assert st["status"] == "failed" and st["error"] == "verified_not_applied"
+    assert float(live_cost(clean_db, uid)) == before_cost
+    assert watermark(clean_db) == before_wm
+
+    # a confirmed miss is now a known failure, so a human may retry it
+    retry = run_cli(upstream, wb_dsn, "--retry", str(rid), "--actor", "carol")
+    assert retry.returncode == 0, retry.stderr
+    assert json.loads(retry.stdout)["rows"][0]["outcome"] == "approved"
+
+
+def test_verify_never_reads_a_missing_column_as_not_applied(clean_db, upstream, wb_dsn):
+    uid = one_uid(clean_db, 0)
+    rid = unknown_request(clean_db, upstream, wb_dsn, uid, 923.0)
+    before_cost = float(live_cost(clean_db, uid))
+    upstream.get_body = {"um": "pc"}          # the field name we guessed is absent
+
+    proc = run_cli(upstream, wb_dsn, "--verify", str(rid), "--resolve")
+    assert proc.returncode == 0, proc.stderr
+    rep = json.loads(proc.stdout)
+    assert rep["rows"][0]["verdict"] == "unreachable"
+    assert rep["rows"][0]["outcome"] == "verification_only"
+    st = state(clean_db, rid)
+    assert st["status"] == "failed" and st["error"] == "uncertain_outcome"
+    assert float(live_cost(clean_db, uid)) == before_cost
+    assert watermark(clean_db) is None
+
+
+def test_verify_refuses_a_request_it_cannot_act_on(clean_db, upstream, wb_dsn):
+    pending = make_request(clean_db, one_uid(clean_db, 0), 924.0, approve=False)
+    proc = run_cli(upstream, wb_dsn, "--verify", str(pending))
+    assert proc.returncode == 0, proc.stderr
+    rep = json.loads(proc.stdout)
+    assert rep["skipped"] == 1 and rep["failed"] == 0
+    assert rep["rows"][0]["error"] == "not_candidate"
+    assert upstream.gets == []                # no request was spent on it
+    assert state(clean_db, pending)["status"] == "pending"
+
+
+def test_verify_resolves_a_stale_base_2xx(clean_db, upstream, wb_dsn):
+    """The 2xx cases are the reason the watermark tracks 2xx, not local writes."""
+    uid = one_uid(clean_db, 0)
+    rid = make_request(clean_db, uid, 925.0)
+    with clean_db.cursor() as cur:
+        cur.execute("UPDATE material SET unit_cost = 777 WHERE material_uid=%s", (uid,))
+    assert run_cli(upstream, wb_dsn, "--apply", "--request-id", str(rid)).returncode == 1
+    assert state(clean_db, rid)["error"] == "stale_base"
+    assert watermark(clean_db)["advances"] == 1     # the 2xx already advanced it
+    upstream.records.clear()
+
+    upstream.get_body = {"unit_cost": 925.0}
+    proc = run_cli(upstream, wb_dsn, "--verify", str(rid), "--resolve")
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["rows"][0]["outcome"] == "applied"
+    assert state(clean_db, rid)["status"] == "applied"
+    assert float(live_cost(clean_db, uid)) == 925.0
+    assert watermark(clean_db)["advances"] == 2
+    assert upstream.records == []                    # resolved without a PATCH
+
+
+def test_verify_mode_guards(clean_db, upstream, wb_dsn):
+    both = run_cli(upstream, wb_dsn, "--verify", "1", "--apply")
+    assert both.returncode == 2
+    assert "--verify cannot be combined" in both.stderr
+    alone = run_cli(upstream, wb_dsn, "--resolve")
+    assert alone.returncode == 2
+    assert "--resolve requires --verify" in alone.stderr
