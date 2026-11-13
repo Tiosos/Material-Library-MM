@@ -263,10 +263,27 @@ def wb_conn(wb_dsn):
         yield conn
 
 
+# Every column a write-back can touch. The fixture restores them all, because a
+# test that applies a five-field diff would otherwise leak into the next one.
+WB_COLUMNS = ("name", "unit", "unit_cost", "lead_time_days", "product_url",
+              "synonyms", "product_type", "attributes", "status", "superseded_by")
+JSON_COLUMNS = {"attributes"}
+
+
+def _restore_values(row: tuple) -> list:
+    """psycopg does not adapt a dict to jsonb on its own; send JSON text."""
+    values = list(row[1:])
+    for index, column in enumerate(WB_COLUMNS):
+        if column in JSON_COLUMNS and values[index] is not None:
+            values[index] = json.dumps(values[index])
+    return values
+
+
 @pytest.fixture
 def clean_db(wb_conn):
+    cols = ", ".join(WB_COLUMNS)
     with wb_conn.cursor() as cur:
-        cur.execute("SELECT material_uid, unit_cost, status, superseded_by FROM material")
+        cur.execute(f"SELECT material_uid, {cols} FROM material")
         before = cur.fetchall()
         cur.execute("DELETE FROM material_event WHERE entity='material_change_request'")
         cur.execute("DELETE FROM material_change_request")
@@ -274,16 +291,18 @@ def clean_db(wb_conn):
         # prove it survives pruning, but must not leak into the next test.
         cur.execute("DELETE FROM material_writeback_state")
     yield wb_conn
-    # T3 x T2 tests supersede a row to prove the guards; put it back so the next
-    # test and the duplicate scan see the imported catalogue again.
+    # T3 x T2 tests supersede a row to prove the guards, and the write-back cases
+    # change real field values; put both back so the next test and the duplicate
+    # scan see the imported catalogue again.
+    sets = ", ".join(f"{column} = %s" + ("::jsonb" if column in JSON_COLUMNS else "")
+                     for column in WB_COLUMNS)
     with wb_conn.cursor() as cur:
-        cur.execute("SELECT material_uid, unit_cost, status, superseded_by FROM material")
+        cur.execute(f"SELECT material_uid, {cols} FROM material")
         after = {row[0]: row[1:] for row in cur.fetchall()}
-        for uid, value, status, superseded_by in before:
-            if after.get(uid) != (value, status, superseded_by):
-                cur.execute(
-                    "UPDATE material SET unit_cost=%s, status=%s, superseded_by=%s "
-                    "WHERE material_uid=%s", (value, status, superseded_by, uid))
+        for row in before:
+            if after.get(row[0]) != row[1:]:
+                cur.execute(f"UPDATE material SET {sets} WHERE material_uid = %s",
+                            (*_restore_values(row), row[0]))
 
 
 def one_uid(conn, index=0) -> str:
@@ -292,6 +311,21 @@ def one_uid(conn, index=0) -> str:
             "SELECT material_uid FROM material WHERE source_system='joineryflow' "
             "ORDER BY source_id LIMIT 1 OFFSET %s", (index,))
         return cur.fetchone()[0]
+
+
+def board_uid(conn) -> str:
+    """A board_materials row: its attribute allowlist includes colour."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT material_uid FROM material WHERE source_system='joineryflow' "
+            "AND source_id LIKE 'board_materials:%' ORDER BY source_id LIMIT 1")
+        return cur.fetchone()[0]
+
+
+def attributes_of(conn, uid: str) -> dict:
+    with conn.cursor() as cur:
+        cur.execute("SELECT attributes FROM material WHERE material_uid=%s", (uid,))
+        return cur.fetchone()[0] or {}
 
 
 def supersede(conn, uid: str, by_uid: str | None = None) -> None:
@@ -319,10 +353,16 @@ def same_category_pair(conn) -> tuple[str, str]:
 
 
 def make_request(conn, uid: str, after: float, *, approve: bool = True) -> int:
-    diffs = json.dumps([{"path": "unit_cost", "after": after}])
+    return make_diff_request(conn, uid, [{"path": "unit_cost", "after": after}],
+                             approve=approve)
+
+
+def make_diff_request(conn, uid: str, diffs: list[dict], *,
+                      approve: bool = True) -> int:
+    diffs_json = json.dumps(diffs)
     with conn.cursor() as cur:
         cur.execute("SELECT material_change_request_submit(%s, %s, NULL, 'alice')",
-                    (uid, diffs))
+                    (uid, diffs_json))
         result = cur.fetchone()[0]
         assert result["ok"] is True, result
         rid = result["id"]
@@ -333,9 +373,11 @@ def make_request(conn, uid: str, after: float, *, approve: bool = True) -> int:
     return rid
 
 
-def unknown_request(conn, upstream, dsn, uid: str, after: float) -> int:
+def unknown_request(conn, upstream, dsn, uid: str, after: float | None = None, *,
+                    diffs: list[dict] | None = None) -> int:
     """A request whose PATCH answered 5xx: the state only a GET can settle."""
-    rid = make_request(conn, uid, after)
+    rid = (make_diff_request(conn, uid, diffs) if diffs is not None
+           else make_request(conn, uid, after))
     upstream.status = 503
     proc = run_cli(upstream, dsn, "--apply", "--request-id", str(rid))
     assert proc.returncode == 1, proc.stderr
@@ -911,3 +953,96 @@ def test_verify_mode_guards(clean_db, upstream, wb_dsn):
     alone = run_cli(upstream, wb_dsn, "--resolve")
     assert alone.returncode == 2
     assert "--resolve requires --verify" in alone.stderr
+
+
+# ---------------------------------------------------------------------------
+# The attributes namespace and the fields only the contract used to cover
+# ---------------------------------------------------------------------------
+
+def test_an_attribute_write_reaches_the_master_row(clean_db, upstream, wb_dsn):
+    uid = board_uid(clean_db)
+    before = attributes_of(clean_db, uid)
+    rid = make_diff_request(clean_db, uid,
+                            [{"path": "attributes.colour", "after": "Red"}])
+
+    proc = run_cli(upstream, wb_dsn, "--apply", "--request-id", str(rid))
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout)["applied"] == 1
+
+    # the PATCH body carries the bare upstream column, never the UMR path
+    assert len(upstream.records) == 1
+    assert upstream.records[0]["body"] == {"colour": "Red"}
+    assert upstream.records[0]["path"].startswith("/catalog/board-materials/")
+
+    after = attributes_of(clean_db, uid)
+    assert after["colour"] == "Red"
+    for key, value in before.items():
+        assert after[key] == value          # an unrelated key is untouched
+    assert state(clean_db, rid)["status"] == "applied"
+
+
+def test_clearing_an_attribute_drops_the_key(clean_db, upstream, wb_dsn):
+    uid = board_uid(clean_db)
+    set_it = make_diff_request(clean_db, uid,
+                               [{"path": "attributes.colour", "after": "Red"}])
+    assert run_cli(upstream, wb_dsn, "--apply", "--request-id", str(set_it)).returncode == 0
+    assert attributes_of(clean_db, uid)["colour"] == "Red"
+
+    clear_it = make_diff_request(clean_db, uid,
+                                 [{"path": "attributes.colour", "after": None}])
+    proc = run_cli(upstream, wb_dsn, "--apply", "--request-id", str(clear_it))
+    assert proc.returncode == 0, proc.stderr
+    assert upstream.records[-1]["body"] == {"colour": None}
+
+    after = attributes_of(clean_db, uid)
+    # a JSON null left behind would make `attributes ? 'colour'` a lie
+    assert "colour" not in after
+    # and the fingerprint agrees, so the same clear cannot be filed twice
+    with clean_db.cursor() as cur:
+        cur.execute("SELECT material_change_request_submit(%s, %s, NULL, 'alice')",
+                    (uid, json.dumps([{"path": "attributes.colour", "after": None}])))
+        assert cur.fetchone()[0]["code"] == "no_change"
+
+
+def test_verify_resolves_an_attribute_write(clean_db, upstream, wb_dsn):
+    uid = board_uid(clean_db)
+    rid = unknown_request(clean_db, upstream, wb_dsn, uid,
+                          diffs=[{"path": "attributes.colour", "after": "Blue"}])
+    upstream.get_body = {"colour": "Blue"}
+
+    proc = run_cli(upstream, wb_dsn, "--verify", str(rid), "--resolve")
+    assert proc.returncode == 0, proc.stderr
+    rep = json.loads(proc.stdout)
+    assert rep["rows"][0]["verdict"] == "upstream_matches"
+    assert rep["rows"][0]["outcome"] == "applied"
+    assert attributes_of(clean_db, uid)["colour"] == "Blue"
+
+
+def test_a_five_field_write_lands_as_one_patch(clean_db, upstream, wb_dsn):
+    uid = one_uid(clean_db, 10)
+    rid = make_diff_request(clean_db, uid, [
+        {"path": "name", "after": "Renamed by a test"},
+        {"path": "unit", "after": "box"},
+        {"path": "lead_time_days", "after": 7},
+        {"path": "product_url", "after": "https://example.test/five"},
+        {"path": "synonyms", "after": ["hinge 110", "soft close"]},
+    ])
+
+    proc = run_cli(upstream, wb_dsn, "--apply", "--request-id", str(rid))
+    assert proc.returncode == 0, proc.stderr
+    assert len(upstream.records) == 1
+    assert upstream.records[0]["body"] == {
+        "description": "Renamed by a test",
+        "um": "box",
+        "default_lead_time_days": 7,
+        "product_website": "https://example.test/five",
+        "synonyms": ["hinge 110", "soft close"],
+    }
+
+    with clean_db.cursor() as cur:
+        cur.execute("SELECT name, unit, lead_time_days, product_url, synonyms "
+                    "FROM material WHERE material_uid=%s", (uid,))
+        name, unit, lead, url, synonyms = cur.fetchone()
+    assert (name, unit, lead, url) == ("Renamed by a test", "box", 7,
+                                       "https://example.test/five")
+    assert synonyms == ["hinge 110", "soft close"]
