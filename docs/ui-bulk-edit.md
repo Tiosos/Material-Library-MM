@@ -1,6 +1,6 @@
 # Manual query and bulk edit UI
 
-Status: design, not implemented. Decisions are numbered `U1..U20`; T3's write-back decisions are
+Status: design, not implemented. Decisions are numbered `U1..U21`; T3's write-back decisions are
 `D1..D22` in [t3-writeback.md](t3-writeback.md) and are not repeated here.
 
 ## 0. One paragraph
@@ -93,11 +93,12 @@ path is the part that must not be.
 | U13 | `synonyms` edits as a token list; `attributes.<key>` edits as a typed scalar. | `synonyms` is `text[]` and a raw JSON textarea invites `["a", 1]`. Attribute values are string, number, boolean or null; the editor keeps the type it found. |
 | U14 | No optimistic UI on submit. A row shows "submitting" then the server's answer. | The answer decides whether the row is pending, `no_change`, `open_request` or `stale_base`. Guessing it means showing a state that may not exist. |
 | U15 | A batch submit of more than 5 materials requires a reason, and the server enforces it. | Five is the point where a person stops remembering why; below it the diff itself is the explanation. Enforcing it on the server rather than in the form means the CLI and any future client inherit the rule. |
-| U16 | Bulk approve is a batch decide route. A reason is required, and every request keeps its own `decided_at` from the database clock. | Approving twenty rows with no recorded why is the failure mode this whole repository is built to avoid. Per-request timestamps are truthful even inside one batch; they differ by milliseconds and that is fine. |
+| U16 | Bulk approve is a batch decide route capped at 25 ids per call. A reason is required, and every request keeps its own `decided_at` from the database clock. | Approving twenty rows with no recorded why is the failure mode this whole repository is built to avoid. Per-request timestamps are truthful even inside one batch; they differ by milliseconds and that is fine. The 25 cap is a brake on the hand, not on the process: a decision is terminal (`rejected`) or upstream-visible (`approved`), so a mis-click cannot be undone by rejecting it. Submissions stay capped at 100 because a submission is reversible - reject the request. |
 | U17 | `name` and `attributes.notes` are textareas that preserve line breaks. The editor hint comes from the schema endpoint, not from a length heuristic. | A length heuristic would render a short name as a single-line input, so a person could not type the first line break. Presentation belongs with the allowlist: one server answer decides both. |
 | U18 | No `decision_reason` column. The decision reason is read from `material_event` through a `LATERAL` projection in `queue()` and in the detail route. | The event already carries `reason`, `actor` and `at` from `decide()`, so a column would be a second copy of one fact. It would also be the copy that disappears: `scripts/prune_change_requests.py` deletes `applied` and `rejected` rows after 90 days but never touches `material_event`, so the event is the record that outlives the request. One lateral join over 20 queue rows is cheaper than a denormalised column that can drift. |
 | U19 | `name`, `product_type` and `unit` are trimmed of spaces and newlines and refused when the result is empty. `product_url` is exempt: a material may legitimately have no URL. | `btrim()` trims spaces only, so `"\n\n"` currently passes as a non-empty name, and `product_type` has no emptiness check at all. That hole was unreachable while the editors were single-line; a textarea makes it a keystroke away. `product_url` is different in kind: "no page for this item" is a real answer, so a blank URL clears the field instead of being refused. All three columns are nullable, so `null` stays a legal value for every one of them - clearing is an operation, not an error. |
 | U20 | Any string value in a diff is capped at 1000 characters, enforced in `submit()` as SQLSTATE `22023`. The cap is per value, not per field. | A pasted 100 KB `notes` would otherwise travel through the request row, the event payload and the PATCH body, and the upstream would be the first thing to complain. `22023` already maps to `400` at the HTTP edge, so the cap needs no new error plumbing. Per value means a `synonyms` array of fifty short tokens is fine; only one runaway string is refused. |
+| U21 | `notes` stays `attributes.notes` and does not become a first-class field. | `material` has no `notes` column, so promoting it means a migration; only 2 of the 9 catalogs allow the key, and five of the nine upstream tables have no `notes` column at all - a first-class field would either need a mapping entry that cannot be sent, or a PATCH to a column that does not exist. And the field currently holds data on **0 of 18** materials. Promoting it would be designing for data that is not there. The trigger to revisit is a third category that needs it, or real notes data arriving. |
 
 ## 5. Architecture
 
@@ -206,7 +207,8 @@ render them.
 `sort` is a whitelist, not a column name interpolated from the request. The four numeric bounds are
 plain comparisons; none of them is parsed from an expression.
 
-`POST /v1/change-requests/batch` - at most 100 materials per call:
+`POST /v1/change-requests/batch` - at most 100 materials per call; 101 is refused with
+`400 batch_too_large` before any row is written:
 
 ```json
 {"target_system": "joineryflow",
@@ -241,7 +243,7 @@ back the others. The per-item code taxonomy is the existing one (`_SUBMIT_FAILUR
 `conflict`, `forbidden_path`, `no_change`, `open_request`. `reason_required` and `reason_too_long` are
 the only new codes, they are request-level (not per item), and they add no SQL.
 
-`POST /v1/change-requests/decide-batch` - at most 100 request ids per call (U16):
+`POST /v1/change-requests/decide-batch` - at most 25 request ids per call (U16):
 
 ```json
 {"decision": "approve", "ids": [41, 42, 43], "reason": "Q4 price list, checked against the PDF"}
@@ -265,6 +267,11 @@ Each id goes through `material_change_request_decide()` unchanged, so `self_appr
 `decided_at` comes from the database clock per request; inside one batch those timestamps differ by
 milliseconds, which is truthful rather than a shared fiction. The single-request routes keep their
 existing optional reason, so nothing already shipped changes behaviour.
+
+The two caps are deliberately different: **100** submissions, **25** decisions. A submission is
+reversible - reject the request - while a decision is terminal or upstream-visible, so the same
+number would put the same brake on a reversible and an irreversible action. A call with 26 ids is
+refused with `400 batch_too_large` before anything is decided.
 
 ### 6.3 Saved views
 
@@ -406,6 +413,11 @@ Three rules make this safe to offer:
 - Rows that come back `self_approval`, `stale_base`, `material_inactive` or `already_decided` stay in
   the queue with the code shown; the rest are approved. Partial success is the normal case.
 
+The cap is 25 ids per action (U16). Selecting 26 or more disables `Approve selected` and says so
+(`26 selected, 25 per action`), so the second batch is a deliberate second click rather than a
+mistake. The server refuses a larger call with `400 batch_too_large` regardless, because the form is
+a courtesy and the route is the guard.
+
 Each approved row displays its own `decided_at` from the response, not the time the button was
 pressed. `decision_reason` is the batch reason, so the audit trail reads "approved by bob at
 08:12:04, reason: Q4 price list, checked against the PDF" on every row.
@@ -473,6 +485,7 @@ Every failure the UI can show, and what it means for the person:
 | `already_decided` | approve | the request was already decided | refresh the queue |
 | `reason_required` | submit, decide | more than 5 materials, or a bulk decision, with no reason | write one reason for the batch |
 | `reason_too_long` | submit, decide | the reason is over 500 characters | shorten it |
+| `batch_too_large` | submit, decide | over 100 materials, or over 25 decisions, in one call | split it; the form already refuses this |
 | `value_too_long` | submit | a string value is over 1000 characters | shorten it; the editor counts characters live |
 | `401 unauthorized` | any | token missing or wrong | re-enter the token |
 | network error | any | the server did not answer | nothing was written; retry |
@@ -489,13 +502,14 @@ rather than hidden.
   `unit_cost`, and every attribute key the catalog allows has an editor.
 - `tests/test_writeback_api.py` (extend): batch submit with two good and one `open_request` returns
   `200`, `submitted: 2`, `failed: 1`, and the failed item keeps its code; a batch of 101 materials
-  is refused with 400; a batch containing a `forbidden_path` fails only that item; **5 materials with
-  no reason succeed, 6 with no reason return 400 `reason_required`, 6 with a top-level reason succeed
-  and each request stores it, and a per-item reason overrides the batch one**; a reason of 501
-  characters returns 400 `reason_too_long`.
+  is refused with `400 batch_too_large`; a batch containing a `forbidden_path` fails only that item;
+  **5 materials with no reason succeed, 6 with no reason return 400 `reason_required`, 6 with a
+  top-level reason succeed and each request stores it, and a per-item reason overrides the batch
+  one**; a reason of 501 characters returns 400 `reason_too_long`.
 - `tests/test_writeback_api.py` (decide-batch): a reason is required for both decisions; three ids
   where one was filed by the same actor returns `decided: 2, failed: 1` with `self_approval` on that
-  row and `decided_at` present on the two that landed; the queue and the detail route both report the
+  row and `decided_at` present on the two that landed; 25 ids are accepted and 26 are refused with
+  `400 batch_too_large` before anything is decided; the queue and the detail route both report the
   same `decision_reason`, and it comes from the event - the request row still has no such column.
 - `tests/test_api.py` (extend): `sort` accepts only the whitelist and rejects `; drop table`;
   `unit_cost_min` / `unit_cost_max` / `lead_time_min` / `lead_time_max` / `status` narrow the result
@@ -551,9 +565,11 @@ decision to test it is a small step, not a rewrite.
 16. A bulk approve where one request was filed by the current actor returns `decided: 2, failed: 1`,
     the two are `approved`, the third stays `pending` with `self_approval` shown, and the sheet does
     not close on failure.
-17. No file under `api/ui/` contains CJK; `check_english.py` stays green. No `package.json`, no
+17. Selecting 26 requests disables `Approve selected` and says `26 selected, 25 per action`; the same
+    26 ids sent directly return `400 batch_too_large` with nothing decided (U16).
+18. No file under `api/ui/` contains CJK; `check_english.py` stays green. No `package.json`, no
     `node_modules`, no build step in any CI job.
-18. The five existing CI jobs stay green, and the full suite still passes with the new tests counted.
+19. The five existing CI jobs stay green, and the full suite still passes with the new tests counted.
 
 ## 14. Risks and non-goals
 
@@ -576,30 +592,33 @@ decision to test it is a small step, not a rewrite.
 | --- | --- | --- |
 | 1 | `submit()`: the `name`, `product_type` and `unit` trim includes newlines (`product_url` exempt), and any string value is capped at 1000 characters (U19, U20); `queue()` projects the decision reason from `material_event` (U18); contract assertions. No column, no migration | The contract asserts every refusal and the exemption, and the existing 37 write-back tests still pass |
 | 2 | `GET /v1/writeback/schema` with `editor` hints, the five new `/v1/materials` parameters, and their tests plus `api_contract.sql` assertions | The schema endpoint matches the tables; every new filter is asserted in both SQL and Python |
-| 3 | `POST /v1/change-requests/batch` with the reason rule, and `POST /v1/change-requests/decide-batch`, both with per-item results, the 100 cap and their tests | Partial success returns 200 with per-item codes; `reason_required` is enforced server-side; no new SQL beyond step 1 |
+| 3 | `POST /v1/change-requests/batch` with the reason rule, and `POST /v1/change-requests/decide-batch`, both with per-item results, the 100 / 25 caps and their tests | Partial success returns 200 with per-item codes; `reason_required` and `batch_too_large` are enforced server-side; no new SQL beyond step 1 |
 | 4 | `api/ui/` shell: layout, token and actor, query panel with facets and filter rows, saved views | A search and filter round trip works against a real database |
 | 5 | The grid: paging, inline editors including the two textareas, staging, the review sheet with the reason rule, submit and its result states | Acceptance criteria 3 to 7 and 11 to 12 pass by hand on a seeded database |
-| 6 | The Review tab: queue, detail with the three badges and the decision record, single and bulk approve and reject, actor switching | Acceptance criteria 8 to 10 and 13 to 14 pass |
+| 6 | The Review tab: queue, detail with the three badges and the decision record, single and bulk approve and reject, actor switching | Acceptance criteria 8 to 10 and 14 to 17 pass |
 | 7 | Docs: README section, this file's status, `docs/t3-progress.md` note, and a UI section in the design index if one exists | `check_english.py` green, links intact, PR opened |
 
 ## 16. Open questions
 
-1. **Should a batch decision record a batch identity?** Today a bulk approve writes the same
-   `decision_reason` on N rows and each keeps its own `decided_at`. Adding a `decision_batch` value
-   would let an auditor say "these twenty were one action", at the cost of one more column and one
-   more field in the response. It is deliberately not in v1.
-2. **Does the reason rule belong in `submit()` rather than the HTTP edge?** The 5-material threshold
-   is a policy, and policies live in SQL in this repository (D4). It sits in the route today because
-   `submit()` handles one request at a time and cannot see the batch size. If a second client appears,
-   the rule moves into a batch SQL function.
-3. **Should `notes` be a first-class field?** It is an attribute today, allowed only for
-   `board_materials` and `equipment_hire`. If it becomes the standard free-text slot for every
-   category, it belongs in `material_writeback_field` and the mapping, not in nine `attribute_keys`
-   lists.
-4. **Does the 1000-character cap belong in `submit()` or in the mapping?** It is enforced in `submit()`
-   today because that is the one gate every client passes. If joineryflow turns out to accept far
-   less for `description`, the number moves into `mapping/joineryflow.yaml` next to the field, and the
-   SQL reads it from there instead of holding a constant.
-5. **Should the grid show `material_event` history for a row?** Deliberately not in v1: it is a third
-   read path and a second drawer. The decision record in 8.3 covers "who approved this and why",
-   which was the actual question.
+Each of these has a leaning and a trigger, because a question with no trigger never gets revisited
+and a question with no leaning blocks the work. The ones that were decided rather than deferred are
+not here: `notes` staying an attribute is U21, and the two batch caps are U16.
+
+1. **Should a batch decision record a batch identity?** *Leaning: no.* `decided_at`, the same reason
+   and the same actor already let a reader recognise a batch, and each event carries its own `at`.
+   *Trigger: an auditor asking "were these twenty one action or twenty?"* The answer then is one
+   extra event with `op = 'batch'` listing the ids and the reason - no column, and no change to
+   `decide()`'s signature.
+2. **Does the reason rule belong in `submit()` rather than the HTTP edge?** *Leaning: keep it at the
+   edge for v1.* `submit()` handles one request at a time and cannot see the batch size, so moving
+   the threshold into SQL means a new `submit_batch()` that loops over `submit()` - a new function for
+   one integer. *Trigger: a second write client.* Then the rule has two homes and has to move into SQL
+   before they drift.
+3. **Does the 1000-character cap belong in `submit()` or in the mapping?** *Leaning: `submit()`.* It
+   is an entry check, and SQL cannot read `mapping/joineryflow.yaml`. *Trigger: joineryflow stating a
+   real per-field limit.* Then the number becomes a `material_writeback_field.max_length` column that
+   `submit()` reads, defaulting to 1000.
+4. **Should the grid show `material_event` history for a row?** *Leaning: no.* The decision record in
+   8.3 answers "who approved this and why"; full history is a third read path and a second drawer,
+   and `GET /v1/changes` already answers "what changed since". *Trigger: someone asking "why is this
+   price what it is" and the existing routes not answering it.*
