@@ -918,6 +918,27 @@ class ChangeRequestDecision(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
 
 
+# Batch bodies deliberately have no Pydantic length caps on lists or reasons: the
+# edge has to answer batch_too_large / reason_required / reason_too_long with their
+# own codes (U15, U16), and a validation error would flatten all three to bad_request.
+class BatchSubmitItem(BaseModel):
+    material_uid: str = Field(min_length=4, max_length=64)
+    diffs: list[dict[str, Any]] = Field(min_length=1)
+    reason: str | None = None
+
+
+class BatchSubmitRequest(BaseModel):
+    target_system: str | None = Field(default=None, max_length=32)
+    reason: str | None = None
+    materials: list[BatchSubmitItem] = Field(min_length=1)
+
+
+class BatchDecideRequest(BaseModel):
+    decision: str
+    ids: list[int]
+    reason: str | None = None
+
+
 # The submit edge treats an unknown uid as a 400 bad_request, while the decide
 # edge treats an unknown request id as a 404 (docs section 10). Every other
 # business outcome is a 409 conflict, because the row is in a terminal or stale
@@ -1108,3 +1129,156 @@ def reject_change_request(
 ) -> dict[str, Any]:
     """Reject a pending request; rejecting stale data is safe, so base is not re-checked."""
     return _decide_change_request(request_id, "reject", body, x_actor, conn)
+
+
+# ---------------------------------------------------------------------------
+# Batch write-back (docs/ui-bulk-edit.md section 6.2, U15 / U16)
+# ---------------------------------------------------------------------------
+# The pool is autocommit, so each item is its own statement and a refusal on one
+# row cannot roll back the others. Request-level problems (cap, reason) are
+# checked before any row is written; after that the answer is always 200 and the
+# per-item code carries the outcome, exactly like --apply's per-row report.
+
+def _batch_reason(item_reason: str | None, batch_reason: str | None) -> str | None:
+    """A per-item reason wins; the batch reason is the default for every other row."""
+    return item_reason if item_reason is not None else batch_reason
+
+
+@app.post(
+    "/v1/change-requests/batch",
+    tags=["writeback"],
+    dependencies=[Depends(require_token)],
+)
+def batch_create_change_requests(
+    body: BatchSubmitRequest,
+    x_actor: str | None = Header(default=None, alias="X-Actor"),
+    conn: psycopg.Connection = Depends(db.connection),
+) -> dict[str, Any]:
+    """File up to 100 materials; partial success is a 200 with one result per item."""
+    if len(body.materials) > 100:
+        raise ApiError(400, "batch_too_large", "at most 100 materials per batch",
+                       {"limit": 100, "got": len(body.materials)})
+
+    reasons = [_batch_reason(item.reason, body.reason) for item in body.materials]
+    if any(reason and len(reason) > 500 for reason in reasons):
+        raise ApiError(400, "reason_too_long", "reason must be at most 500 characters",
+                       {"limit": 500})
+    # More than five materials is a deliberate action, so it needs one recorded why.
+    if len(body.materials) > 5 and not any(reasons):
+        raise ApiError(400, "reason_required",
+                       "a batch of more than 5 materials requires a reason",
+                       {"threshold": 5})
+
+    actor = actor_from(x_actor)
+    results: list[dict[str, Any]] = []
+    submitted = 0
+    for item, reason in zip(body.materials, reasons):
+        row: dict[str, Any] = {"material_uid": item.material_uid}
+        try:
+            report = db.query_value(
+                conn,
+                """
+                SELECT material_change_request_submit(
+                    %(uid)s::text, %(diffs)s::jsonb, %(reason)s::text,
+                    %(actor)s::text, %(target)s::text)
+                """,
+                {
+                    "uid": item.material_uid,
+                    "diffs": json.dumps(item.diffs),
+                    "reason": reason,
+                    "actor": actor,
+                    "target": body.target_system,
+                },
+            )
+        except psycopg.errors.InvalidParameterValue as exc:
+            results.append({**row, "ok": False, "code": "bad_request",
+                            "detail": {"message": exc.diag.message_primary or str(exc).strip()}})
+            continue
+        if report.get("ok"):
+            submitted += 1
+            results.append({**row, "ok": True, "id": report["id"],
+                            "status": report["status"]})
+        else:
+            results.append({**row, "ok": False, "code": report["code"],
+                            "detail": {k: v for k, v in report.items()
+                                       if k not in {"ok", "code"}}})
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "submitted": submitted,
+        "failed": len(results) - submitted,
+        "results": results,
+    }
+
+
+@app.post(
+    "/v1/change-requests/decide-batch",
+    tags=["writeback"],
+    dependencies=[Depends(require_token)],
+)
+def batch_decide_change_requests(
+    body: BatchDecideRequest,
+    x_actor: str | None = Header(default=None, alias="X-Actor"),
+    conn: psycopg.Connection = Depends(db.connection),
+) -> dict[str, Any]:
+    """Decide up to 25 requests with one reason; a decision is not reversible by the UI."""
+    if len(body.ids) > 25:
+        raise ApiError(400, "batch_too_large", "at most 25 decisions per batch",
+                       {"limit": 25, "got": len(body.ids)})
+    if body.decision not in ("approve", "reject"):
+        raise ApiError(400, "bad_request", "decision must be approve or reject",
+                       {"decision": body.decision})
+    # A rubber stamp is the failure mode here, so unlike the single route the
+    # reason is mandatory for both decisions and is checked before any write.
+    if not body.reason:
+        raise ApiError(400, "reason_required", "a batch decision requires a reason")
+    if len(body.reason) > 500:
+        raise ApiError(400, "reason_too_long", "reason must be at most 500 characters",
+                       {"limit": 500})
+
+    actor = actor_from(x_actor)
+    outcomes: list[dict[str, Any]] = []
+    landed: list[int] = []
+    for rid in body.ids:
+        try:
+            report = db.query_value(
+                conn,
+                """
+                SELECT material_change_request_decide(
+                    %(id)s::bigint, %(decision)s::text, %(reason)s::text, %(actor)s::text)
+                """,
+                {"id": rid, "decision": body.decision, "reason": body.reason, "actor": actor},
+            )
+        except psycopg.errors.InvalidParameterValue as exc:
+            outcomes.append({"id": rid, "ok": False, "code": "bad_request",
+                             "detail": {"message": exc.diag.message_primary or str(exc).strip()}})
+            continue
+        if report.get("ok"):
+            landed.append(rid)
+            outcomes.append({"id": rid, "ok": True, "status": report["status"],
+                             "decided_by": report["decided_by"]})
+        else:
+            outcomes.append({"id": rid, "ok": False, "code": report["code"],
+                             "detail": {k: v for k, v in report.items()
+                                        if k not in {"ok", "code"}}})
+
+    # decide() returns decided_by but not decided_at; one read gives each landed
+    # row its own database-clock timestamp without N+1 queries.
+    stamps: dict[int, Any] = {}
+    if landed:
+        stamps = {row["id"]: row["decided_at"] for row in db.query_rows(
+            conn,
+            "SELECT id, decided_at FROM material_change_request "
+            "WHERE id = ANY(%(ids)s::bigint[])",
+            {"ids": landed},
+        )}
+    for row in outcomes:
+        if row["ok"]:
+            row["decided_at"] = stamps.get(row["id"])
+
+    decided = sum(1 for row in outcomes if row["ok"])
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "decided": decided,
+        "failed": len(outcomes) - decided,
+        "results": outcomes,
+    }

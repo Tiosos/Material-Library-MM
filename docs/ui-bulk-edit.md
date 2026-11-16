@@ -101,6 +101,7 @@ path is the part that must not be.
 | U21 | `notes` stays `attributes.notes` and does not become a first-class field. | `material` has no `notes` column, so promoting it means a migration; only 2 of the 9 catalogs allow the key, and five of the nine upstream tables have no `notes` column at all - a first-class field would either need a mapping entry that cannot be sent, or a PATCH to a column that does not exist. And the field currently holds data on **0 of 18** materials. Promoting it would be designing for data that is not there. The trigger to revisit is a third category that needs it, or real notes data arriving. |
 
 | U22 | Lead time is not a material attribute. It is removed from the UI result row, its filter and sort keys, the schema endpoint, the export whitelist, and T3's `material_writeback_field` and `mapping` write-back edge. The `material.lead_time_days` column and the ETL import edge stay. | Delivery time belongs to a supplier at a point in time: a different supplier quotes a different week, and the same supplier quotes differently next month. The importer still records the snapshot's value because `material_price(valid_from)` is where supplier-and-time data belongs and that migration is a separate design; what must stop is a person editing a single number on the material and believing it describes every quote. `schema/seed.sql` has a `custom` attribute also called `lead_time_days`; that is a per-category untyped key, not this column, and is untouched. |
+| U23 | The two batch routes are request-level strict and per-item lenient: caps, reason rules and decision validity are checked before any write; after that every answer is 200 with one code per item. A `22023` raised inside one item (blank name, oversized value) becomes that item's `bad_request`, not a 500 for the batch. | A batch of 40 with three `open_request` rows has already written 37 requests, so a 409 would tell the client to roll back something it cannot. The separate `decided_at` reads are one query over the landed ids, because `decide()` returns `decided_by` but not the timestamp. |
 
 ## 5. Architecture
 
@@ -578,7 +579,10 @@ decision to test it is a small step, not a rewrite.
     26 ids sent directly return `400 batch_too_large` with nothing decided (U16).
 18. No file under `api/ui/` contains CJK; `check_english.py` stays green. No `package.json`, no
     `node_modules`, no build step in any CI job.
-19. The five existing CI jobs stay green, and the full suite still passes with the new tests counted.
+19. A batch of three where one row is unknown and one has a 22023 value returns 200 with
+    `submitted: 1, failed: 2`; the good row is pending with the batch reason, and neither bad row
+    wrote anything (U23).
+20. The five existing CI jobs stay green, and the full suite still passes with the new tests counted.
 
 ## 14. Risks and non-goals
 
@@ -601,7 +605,7 @@ decision to test it is a small step, not a rewrite.
 | --- | --- | --- |
 | 1 | `submit()`: `name`, `product_type` and `unit` are refused when they trim to nothing, newlines included, while padding is stored as sent (`product_url` exempt); any string value is capped at 1000 characters (U19, U20). `ml_change_request_decision_reason()` backs both `queue()` and the detail route (U18). No column, no migration | The contract asserts every refusal, the exemption and the 1000/1001 boundary; the existing write-back tests still pass |
 | 2 | `GET /v1/writeback/schema` with `editor` hints and the unit domain, the six new `/v1/materials` parameters, their tests plus `api_contract.sql` assertions; lead time removed per U22 | The schema endpoint matches the tables; every filter and sort is asserted in both SQL and Python; lead time is absent everywhere a person can see or change it |
-| 3 | `POST /v1/change-requests/batch` with the reason rule, and `POST /v1/change-requests/decide-batch`, both with per-item results, the 100 / 25 caps and their tests | Partial success returns 200 with per-item codes; `reason_required` and `batch_too_large` are enforced server-side; no new SQL beyond step 1 |
+| 3 | `POST /v1/change-requests/batch` with the reason rule, and `POST /v1/change-requests/decide-batch`, both with per-item results, the 100 / 25 caps and their tests | Partial success returns 200 with per-item codes; `reason_required`, `reason_too_long` and `batch_too_large` are enforced server-side before any write; no new SQL beyond step 1 |
 | 4 | `api/ui/` shell: layout, token and actor, query panel with facets and filter rows, saved views | A search and filter round trip works against a real database |
 | 5 | The grid: paging, inline editors including the two textareas, staging, the review sheet with the reason rule, submit and its result states | Acceptance criteria 3 to 7 and 11 to 12 pass by hand on a seeded database |
 | 6 | The Review tab: queue, detail with the three badges and the decision record, single and bulk approve and reject, actor switching | Acceptance criteria 8 to 10 and 14 to 17 pass |
@@ -631,3 +635,10 @@ not here: `notes` staying an attribute is U21, and the two batch caps are U16.
    8.3 answers "who approved this and why"; full history is a third read path and a second drawer,
    and `GET /v1/changes` already answers "what changed since". *Trigger: someone asking "why is this
    price what it is" and the existing routes not answering it.*
+
+
+4. **Should the two routes spell timestamps the same way?** The detail route returns `decided_at`
+   as `+00:00` (the psycopg datetime is serialised by the `to_jsonb(r)` projection), while the batch
+   route returns `Z` (FastAPI's JSON encoder). They are the same instant. *Leaning: leave it until
+   the UI layer*, where one formatter can normalise both, rather than change an existing response
+   shape in a step about batching. *Trigger: a client comparing the strings directly.*
