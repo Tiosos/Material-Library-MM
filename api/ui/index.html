@@ -14,6 +14,7 @@
       <button type="button" class="tab active" data-tab="edit">Edit</button>
       <button type="button" class="tab" data-tab="review">Review</button>
     </nav>
+    <span id="review-count" class="pill" hidden></span>
     <div class="identity">
       <label>actor <input id="actor" type="text" autocomplete="off" placeholder="server default"></label>
       <span id="actor-note" class="hint">server default until typed</span>
@@ -108,6 +109,61 @@
   </section>
 </main>
 
+<section id="review-view" class="review-view" hidden>
+  <div class="review-toolbar">
+    <div class="filter-chips" aria-label="Queue status">
+      <button type="button" class="chip active" data-status="actionable">actionable</button>
+      <button type="button" class="chip" data-status="pending">pending</button>
+      <button type="button" class="chip" data-status="approved">approved</button>
+      <button type="button" class="chip" data-status="failed">failed</button>
+      <button type="button" class="chip" data-status="all">all</button>
+    </div>
+    <div class="review-actions">
+      <span id="queue-total" class="total">loading...</span>
+      <button type="button" id="approve-selected" class="btn primary" disabled>Approve selected</button>
+      <button type="button" id="reject-selected" class="btn" disabled>Reject selected</button>
+      <span id="selection-hint" class="hint"></span>
+      <button type="button" id="queue-prev" class="btn">Previous</button>
+      <button type="button" id="queue-next" class="btn">Next</button>
+    </div>
+  </div>
+  <div class="tablewrap">
+    <table id="queue">
+      <thead><tr>
+        <th aria-label="select"></th><th>id</th><th>material</th><th>paths</th>
+        <th>status</th><th>requested by</th><th>age</th><th>decision</th>
+      </tr></thead>
+      <tbody id="queue-rows"><tr><td colspan="8" class="empty">Loading...</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<aside id="detail-drawer" class="drawer" hidden>
+  <div class="drawer-head">
+    <h2 id="detail-title">Request</h2>
+    <button type="button" id="detail-close" class="btn small">Close</button>
+  </div>
+  <div id="detail-badges" class="badges"></div>
+  <div id="detail-body"></div>
+  <div class="drawer-actions">
+    <button type="button" id="detail-approve" class="btn primary">Approve</button>
+    <button type="button" id="detail-reject" class="btn">Reject</button>
+  </div>
+</aside>
+
+<dialog id="decision-sheet">
+  <div class="panel-head">
+    <h2 id="decision-title">Decide</h2>
+    <button type="button" id="decision-close" class="btn small">Close</button>
+  </div>
+  <div id="decision-body"></div>
+  <div class="review-footer">
+    <label>reason <textarea id="decision-reason" rows="2" maxlength="500" placeholder="why this decision"></textarea></label>
+    <span id="decision-hint" class="hint">a reason is required for a batch decision</span>
+    <button type="button" id="decision-confirm" class="btn primary">Confirm</button>
+  </div>
+</dialog>
+
 <div id="staging-bar" class="staging-bar" hidden>
   <span id="staging-summary">0 changes across 0 materials</span>
   <div class="staging-actions">
@@ -145,6 +201,6 @@
   <span class="hint">Edits are staged locally and filed as change requests, never written directly.</span>
 </footer>
 
-<script type="module" src="/ui/assets/edit.js"></script>
+<script type="module" src="/ui/assets/review.js"></script>
 </body>
 </html>

@@ -416,9 +416,12 @@ function wire() {
     tab.addEventListener('click', () => {
       document.querySelectorAll('.tab').forEach((t) => t.classList.remove('active'));
       tab.classList.add('active');
-      if (tab.dataset.tab === 'review') {
-        setStatus('Review tab lands in step 6');
-      }
+      const review = tab.dataset.tab === 'review';
+      document.body.classList.toggle('review-mode', review);
+      document.getElementById('review-view').hidden = !review;
+      // review.js acts on this; app.js does not import it (no reverse dependency).
+      document.dispatchEvent(new CustomEvent('ml:tab-changed',
+                                             { detail: { tab: tab.dataset.tab } }));
     });
   });
 

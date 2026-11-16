@@ -144,3 +144,49 @@ dialog h2{margin:0;font-size:17px}
 .review-footer textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 .review-result{border-left:3px solid var(--ok);padding:5px 9px;margin:5px 0;background:#f1fbf6;font-size:12px}
 .review-result.failed{border-left-color:var(--warn);background:var(--warn-soft)}
+
+/* ---------- step 6: review queue, detail drawer and decision sheet ---------- */
+.review-view{max-width:1600px;width:100%;margin:0 auto;padding:18px 20px;flex:1}
+.review-view[hidden]{display:none}
+body.review-mode main{display:none}
+.review-toolbar{display:flex;justify-content:space-between;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:11px}
+.filter-chips,.review-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.chip{border:1px solid var(--line);background:var(--panel);color:var(--ink2);padding:6px 12px;border-radius:20px;font-size:12px}
+.chip:hover{border-color:#c9cfda}
+.chip.active{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:600}
+#queue td{cursor:pointer}
+#queue td:first-child{cursor:default}
+.status-pending{color:var(--warn);font-weight:600}
+.status-approved{color:var(--ok);font-weight:600}
+.status-failed{color:#b91c1c;font-weight:600}
+.status-rejected,.status-applied{color:var(--ink3)}
+.badge{display:inline-block;font-size:11px;padding:3px 9px;border-radius:20px;margin-right:5px;border:1px solid}
+.badge.stale{background:var(--warn-soft);border-color:#f0d9a8;color:var(--warn)}
+.badge.inactive{background:#f3f4f6;border-color:var(--line);color:var(--ink3)}
+.badge.own{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
+.badge.decided{background:#f1fbf6;border-color:#a7e0c6;color:var(--ok)}
+
+.drawer{
+  position:fixed;top:0;right:0;bottom:0;z-index:50;width:min(520px,100vw);
+  background:var(--panel);border-left:1px solid var(--line);
+  box-shadow:-10px 0 35px rgba(17,24,39,.12);padding:18px;overflow:auto;
+}
+.drawer[hidden]{display:none}
+.drawer-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+.drawer-head h2{margin:0;font-size:16px}
+.badges{margin-bottom:12px}
+.detail-block{border:1px solid var(--line);border-radius:9px;padding:10px;margin-bottom:10px}
+.detail-block h3{margin:0 0 7px;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink3)}
+.detail-diff{display:grid;grid-template-columns:90px 1fr 18px 1fr;gap:6px;font-size:12px;padding:4px 0}
+.detail-diff .path{font-family:var(--mono)}
+.detail-diff .before{color:var(--ink3)}
+.detail-diff .after{font-family:var(--mono);white-space:pre-wrap;word-break:break-word}
+.detail-kv{display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:3px 0}
+.detail-kv .key{color:var(--ink3)}
+.detail-kv .value{font-family:var(--mono);text-align:right;word-break:break-all}
+.drawer-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
+dialog#decision-sheet{
+  border:1px solid var(--line);border-radius:12px;padding:18px;width:min(620px,calc(100vw - 36px));
+  max-height:86vh;overflow:auto;box-shadow:0 20px 60px rgba(17,24,39,.18);color:var(--ink);background:var(--panel);
+}
+dialog#decision-sheet::backdrop{background:rgba(17,24,39,.35)}

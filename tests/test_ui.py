@@ -9,6 +9,7 @@ asserted in test_api.py; this file only checks that the page can reach it.
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +37,7 @@ def test_ui_shell_is_served_without_a_token(client: TestClient, shell: str) -> N
     assert response.status_code == 200, response.text
     assert response.headers["content-type"].startswith("text/html")
     assert '<html lang="en">' in response.text
-    assert 'type="module" src="/ui/assets/edit.js"' in response.text
+    assert 'type="module" src="/ui/assets/review.js"' in response.text
     assert response.text.replace('\r\n', '\n') == shell.replace('\r\n', '\n')
 
 
@@ -69,7 +70,7 @@ def test_shell_exposes_the_query_controls(shell: str) -> None:
                     "editor-popover", "editor-apply", "review-sheet",
                     "batch-reason", "confirm-batch", "restore-banner"):
         assert f'id="{control}"' in shell, control
-    assert 'src="/ui/assets/edit.js"' in shell
+    assert 'src="/ui/assets/review.js"' in shell
 
 
 def test_query_compiler_uses_only_whitelisted_parameters(script: str) -> None:
@@ -207,3 +208,106 @@ def test_a_staged_batch_body_is_accepted_by_the_route(client: TestClient) -> Non
         assert detail["reason"] == "from the grid"
     else:
         assert result["code"] == "open_request"
+
+
+@pytest.fixture(scope="module")
+def review_script() -> str:
+    return (UI / "review.js").read_text(encoding="utf-8")
+
+
+def test_review_module_only_uses_existing_routes(review_script: str) -> None:
+    """No new API and no direct write: queue, detail, decide are the T3 routes."""
+    assert "from './app.js'" in review_script
+    for route in ("/v1/change-requests?${params", "/v1/change-requests/${row.id}",
+                  "/v1/materials/${encodeURIComponent(row.material_uid)}",
+                  "/v1/change-requests/${ids[0]}/${decision}",
+                  "'/v1/change-requests/decide-batch'"):
+        assert route in review_script, route
+    for verb in ("method: 'PATCH'", "method: 'PUT'", "method: 'DELETE'"):
+        assert verb not in review_script
+
+
+def test_review_badges_and_selection_are_pure(review_script: str) -> None:
+    """stale compares only the diffed paths; own rows are unchecked by default."""
+    for helper in ("computeBadges", "ageText", "selectionState", "deepEqual"):
+        assert f"export function {helper}" in review_script, helper
+    assert "Object.keys(base).some((key) => !deepEqual(base[key], live[key]))" in review_script
+    assert "actor === row.requested_by" in review_script
+    assert "const BULK_LIMIT = 25" in review_script
+    assert "selected.size > BULK_LIMIT" in review_script
+    assert "own request" in review_script
+    # decision_reason comes from the event via the existing detail payload
+    assert "row.decision_reason" in review_script
+    assert "row.decided_at" in review_script
+    assert "row.decided_by" in review_script
+
+
+def test_review_shell_exposes_the_controls(shell: str) -> None:
+    for control in ("review-view", "review-count", "queue-rows", "queue-total",
+                    "approve-selected", "reject-selected", "detail-drawer",
+                    "detail-badges", "detail-approve", "detail-reject",
+                    "decision-sheet", "decision-reason", "decision-confirm"):
+        assert f'id="{control}"' in shell, control
+    assert 'src="/ui/assets/review.js"' in shell
+    for status in ("actionable", "pending", "approved", "failed", "all"):
+        assert f'data-status="{status}"' in shell, status
+
+
+def test_queue_and_detail_round_trip(client: TestClient, conn) -> None:
+    """A filed request appears in the queue with its event-backed decision fields."""
+    # material_uid accepts only Crockford base-32 characters (see the table CHECK)
+    alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+    raw = uuid.uuid4().hex.upper()
+    body = "".join(ch for ch in raw if ch in alphabet)[:26]
+    uid = "mat_" + (body + "Z" * 26)[:26]
+    conn.execute(
+        "INSERT INTO material (material_uid, category_code, name, unit_cost, "
+        "source_system, source_id) SELECT %s, category_code, 'Review UI test', 45.00, "
+        "'joineryflow', 'review_ui:1' FROM material WHERE status='active' LIMIT 1 "
+        "ON CONFLICT (material_uid) DO NOTHING",
+        (uid,),
+    )
+    conn.execute("DELETE FROM material_change_request WHERE material_uid=%s", (uid,))
+    created = client.post("/v1/change-requests", json={
+        "material_uid": uid,
+        "diffs": [{"path": "product_url", "after": "https://example.test/review"}],
+        "reason": "from the review test",
+    }, headers={"X-Actor": "alice"})
+    assert created.status_code == 201, created.text
+    rid = created.json()["id"]
+
+    queue = client.get("/v1/change-requests", params={"status": "pending"}).json()
+    row = next(r for r in queue["rows"] if r["id"] == rid)
+    assert row["material_name"] and row["paths"] == ["product_url"]
+    assert row["requested_by"] == "alice" and row["reason"] == "from the review test"
+    assert row["decision_reason"] is None
+
+    # approve from a different actor, then the reason is read back from the event
+    decided = client.post(f"/v1/change-requests/{rid}/approve",
+                          json={"reason": "checked"}, headers={"X-Actor": "bob"})
+    assert decided.status_code == 200, decided.text
+    detail = client.get(f"/v1/change-requests/{rid}").json()
+    assert detail["status"] == "approved"
+    assert detail["decision_reason"] == "checked"
+    assert detail["decided_by"] == "bob" and detail["decided_at"]
+    # A plan can legitimately be invalid for a synthetic source_id; what matters
+    # to the UI is that it never contains a token and always reports a code.
+    plan = detail["plan"]
+    assert "code" in plan
+    assert "Authorization" not in plan.get("headers", {})
+
+    # own-request guard is still the server's, not the form's
+    other = client.post("/v1/change-requests", json={
+        "material_uid": uid,
+        "diffs": [{"path": "synonyms", "after": ["review", "own"]}],
+    }, headers={"X-Actor": "bob"})
+    assert other.status_code == 201
+    refused = client.post(f"/v1/change-requests/{other.json()['id']}/approve",
+                          json={"reason": "x"}, headers={"X-Actor": "bob"})
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["error"]["code"] == "conflict"
+    conn.execute("SELECT set_config('ml.allow_delete', 'on', false)")
+    try:
+        conn.execute("DELETE FROM material WHERE material_uid=%s", (uid,))
+    finally:
+        conn.execute("SELECT set_config('ml.allow_delete', 'off', false)")
