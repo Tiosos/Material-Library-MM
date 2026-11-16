@@ -170,7 +170,7 @@ The four ETL integration cases in `tests/test_etl.py` skip unless `ML_ETL_DSN` p
 database that has imported the joineryflow snapshot; the twenty-nine write-back integration cases in
 `tests/test_writeback.py` skip unless `ML_WRITEBACK_DSN` is set. The dedicated `etl` and
 `writeback` CI jobs supply those DSNs. On the CI `api` recipe the suite reports
-`187 passed, 33 skipped`.
+`192 passed, 33 skipped`.
 
 Design and decisions: [`docs/api-v1.md`](docs/api-v1.md) (endpoints, SQL additions, instrumentation, evaluation thresholds). Implementation log with verification for every step: [`docs/t1-progress.md`](docs/t1-progress.md).
 
@@ -359,8 +359,8 @@ queue and the request detail, and it stays readable after the request row is pru
 
 Measured on a fresh PostgreSQL 16 database: `scripts/writeback_contract.sql` green with zero
 residual rows, `tests/test_writeback.py` 38/38 with `ML_WRITEBACK_DSN`,
-`tests/test_writeback_api.py` 14/14 in the `api` job, and the full suite
-`187 passed, 33 skipped` on the CI `api` recipe. The dedicated `writeback` CI job rebuilds this
+`tests/test_writeback_api.py` 19/19 in the `api` job, and the full suite
+`192 passed, 33 skipped` on the CI `api` recipe. The dedicated `writeback` CI job rebuilds this
 from scratch on every PR with its own `ml_writeback` database; no `ML_JF_*` credential is set
 there.
 

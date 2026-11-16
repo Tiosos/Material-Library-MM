@@ -277,3 +277,132 @@ def test_there_is_no_apply_route(client: TestClient, jf_uid: str):
     rid = _submit(client, jf_uid).json()["id"]
     response = client.post(f"/v1/change-requests/{rid}/apply", json={})
     assert response.status_code in (404, 405), response.text
+
+
+# ---------------------------------------------------------------------------
+# Batch submit and batch decide (docs/ui-bulk-edit.md section 6.2, U15 / U16)
+# ---------------------------------------------------------------------------
+
+def _batch_item(uid: str, path: str = "unit_cost", after: Any = 301) -> dict[str, Any]:
+    return {"material_uid": uid, "diffs": [{"path": path, "after": after}]}
+
+
+def test_batch_submit_is_a_partial_success(client: TestClient, jf_uid: str) -> None:
+    body = {
+        "target_system": "joineryflow",
+        "reason": "Q4 supplier list",
+        "materials": [
+            _batch_item(jf_uid, after=401),
+            _batch_item("mat_does_not_exist", after=402),
+            _batch_item(jf_uid, "name", "\n\n"),   # 22023 at SQL, not a 500
+        ],
+    }
+    response = client.post("/v1/change-requests/batch", json=body,
+                           headers={"X-Actor": "alice"})
+    assert response.status_code == 200, response.text
+    report = response.json()
+    assert report["submitted"] == 1 and report["failed"] == 2
+    first, missing, blank = report["results"]
+    assert first["ok"] is True and first["status"] == "pending" and first["id"]
+    assert missing["ok"] is False and missing["code"] == "not_found"
+    assert blank["ok"] is False and blank["code"] == "bad_request"
+    assert "name must be a non-empty string" in blank["detail"]["message"]
+
+    # the one good row is really pending, with the batch reason on it
+    detail = client.get(f"/v1/change-requests/{first['id']}").json()
+    assert detail["reason"] == "Q4 supplier list"
+    assert detail["requested_by"] == "alice"
+
+
+def test_batch_submit_per_item_reason_wins(client: TestClient, jf_uid: str) -> None:
+    response = client.post(
+        "/v1/change-requests/batch",
+        json={"reason": "batch reason", "materials": [
+            _batch_item(jf_uid, after=501),
+            {**_batch_item(jf_uid, "product_type", "board"), "reason": "item reason"},
+        ]},
+        headers={"X-Actor": "alice"},
+    )
+    assert response.status_code == 200, response.text
+    report = response.json()
+    # both rows target a different path, so both land
+    assert report["submitted"] == 2, report
+    ids = [row["id"] for row in report["results"]]
+    reasons = [client.get(f"/v1/change-requests/{rid}").json()["reason"] for rid in ids]
+    assert reasons == ["batch reason", "item reason"]
+
+
+def test_batch_submit_rejects_bad_batches_before_writing(client: TestClient, jf_uid: str) -> None:
+    one = _batch_item(jf_uid)
+    cases = [
+        ("batch_too_large", {"reason": "x", "materials": [one] * 101}, 100),
+        ("reason_required", {"materials": [one] * 6}, 5),
+        ("reason_too_long", {"reason": "x" * 501, "materials": [one]}, 500),
+    ]
+    for code, body, limit in cases:
+        error = assert_error(client.post("/v1/change-requests/batch", json=body),
+                             400, code)
+        assert error["detail"]["limit"] if "limit" in error["detail"] else True
+        assert error["detail"].get("limit", error["detail"].get("threshold")) == limit
+    assert client.get("/v1/change-requests", params={"status": "all"}).json()["total"] == 0
+
+    # exactly at the reason threshold is allowed. Five different paths, because
+    # a second request on the same path is an open_request by design.
+    five = [
+        _batch_item(jf_uid, "name", "Five field batch"),
+        _batch_item(jf_uid, "product_type", "board"),
+        _batch_item(jf_uid, "unit_cost", 700),
+        _batch_item(jf_uid, "product_url", "https://example.test/five"),
+        _batch_item(jf_uid, "synonyms", ["one", "two"]),
+    ]
+    ok = client.post("/v1/change-requests/batch",
+                     json={"reason": "x", "materials": five})
+    assert ok.status_code == 200 and ok.json()["submitted"] == 5, ok.text
+
+
+def test_batch_decide_reports_each_decision(client: TestClient, jf_uid: str) -> None:
+    ids = []
+    for path, after in (("unit_cost", 601), ("product_type", "board")):
+        created = client.post("/v1/change-requests/batch",
+                              json={"reason": "batch",
+                                    "materials": [_batch_item(jf_uid, path, after)]},
+                              headers={"X-Actor": "alice"})
+        ids.append(created.json()["results"][0]["id"])
+    # one row was filed by the same actor who will decide -> self_approval
+    response = client.post(
+        "/v1/change-requests/decide-batch",
+        json={"decision": "approve", "ids": ids + [ids[0]], "reason": "checked against the PDF"},
+        headers={"X-Actor": "bob"},
+    )
+    assert response.status_code == 200, response.text
+    report = response.json()
+    assert report["decided"] == 2 and report["failed"] == 1, report
+    first, second, dup = report["results"]
+    assert first["ok"] is True and first["status"] == "approved"
+    assert first["decided_by"] == "bob" and first["decided_at"]
+    assert second["ok"] is True and second["decided_at"]
+    assert dup["ok"] is False and dup["code"] == "already_decided"
+    # the per-row timestamps are real column values, not a shared batch stamp.
+    # The detail route serialises the datetime as +00:00 and the batch route as
+    # Z, so compare the instants rather than the spellings.
+    from datetime import datetime
+    parse = lambda text: datetime.fromisoformat(text.replace("Z", "+00:00"))
+    stored = [client.get(f"/v1/change-requests/{rid}").json()["decided_at"] for rid in ids]
+    assert [parse(x) for x in stored] == [parse(first["decided_at"]),
+                                         parse(second["decided_at"])]
+    assert parse(first["decided_at"]) != parse(second["decided_at"])
+
+
+def test_batch_decide_requires_a_reason_and_a_valid_cap(client: TestClient) -> None:
+    error = assert_error(client.post("/v1/change-requests/decide-batch",
+                                     json={"decision": "approve", "ids": [1]}),
+                         400, "reason_required")
+    assert_error(client.post("/v1/change-requests/decide-batch",
+                             json={"decision": "approve", "ids": list(range(1, 27)),
+                                   "reason": "x"}), 400, "batch_too_large")
+    assert_error(client.post("/v1/change-requests/decide-batch",
+                             json={"decision": "maybe", "ids": [1], "reason": "x"}),
+                 400, "bad_request")
+    assert_error(client.post("/v1/change-requests/decide-batch",
+                             json={"decision": "reject", "ids": [1], "reason": "x" * 501}),
+                 400, "reason_too_long")
