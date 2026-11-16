@@ -323,6 +323,26 @@ BEGIN
         -- JSON null means "clear this field"; normalise it to SQL NULL so
         -- every type rule below reads its own "or null" literally.
         v_after := nullif(v_item -> 'after', 'null'::jsonb);
+        -- One ceiling for every string value: 1000 characters per value, not
+        -- per field, so a synonyms array of fifty short tokens passes while one
+        -- runaway string is refused. length() counts characters, not bytes.
+        -- A clear arrives as SQL NULL and skips both branches.
+        IF jsonb_typeof(v_after) = 'string' THEN
+            IF length(v_after #>> '{}') > 1000 THEN
+                RAISE EXCEPTION 'value for % exceeds 1000 characters', v_path
+                    USING ERRCODE = '22023';
+            END IF;
+        ELSIF jsonb_typeof(v_after) = 'array' THEN
+            -- separate branch, not an OR: jsonb_array_elements() raises on a
+            -- non-array and PL/pgSQL does not promise to short-circuit
+            IF EXISTS (SELECT 1
+                         FROM jsonb_array_elements(v_after) s
+                        WHERE jsonb_typeof(s) = 'string'
+                          AND length(s #>> '{}') > 1000) THEN
+                RAISE EXCEPTION 'value for % exceeds 1000 characters', v_path
+                    USING ERRCODE = '22023';
+            END IF;
+        END IF;
         IF v_path = ANY (v_paths) THEN
             RAISE EXCEPTION 'duplicate path in diffs: %', v_path USING ERRCODE = '22023';
         END IF;
@@ -361,12 +381,24 @@ BEGIN
             END IF;
             -- type rules per path (docs section 7)
             IF v_path = 'name' THEN
-                IF v_after IS NULL OR jsonb_typeof(v_after) <> 'string' OR btrim(v_after #>> '{}') = '' THEN
+                -- btrim()'s default character set is spaces only, so a name of
+                -- newlines used to pass as non-empty. The textarea makes that a
+                -- keystroke away, so the blank test now covers whitespace.
+                IF v_after IS NULL OR jsonb_typeof(v_after) <> 'string'
+                   OR btrim(v_after #>> '{}', E' \t\r\n') = '' THEN
                     RAISE EXCEPTION 'name must be a non-empty string' USING ERRCODE = '22023';
                 END IF;
             ELSIF v_path IN ('product_type', 'unit', 'product_url') THEN
                 IF v_after IS NOT NULL AND jsonb_typeof(v_after) <> 'string' THEN
                     RAISE EXCEPTION '% must be a string or null', v_path USING ERRCODE = '22023';
+                END IF;
+                -- Whitespace-only is refused, but null stays legal: all three
+                -- columns are nullable, so clearing is an edit and not an error.
+                -- product_url is exempt because "no page for this item" is a
+                -- real answer, and an empty URL clears the field.
+                IF v_path IN ('product_type', 'unit') AND v_after IS NOT NULL
+                   AND btrim(v_after #>> '{}', E' \t\r\n') = '' THEN
+                    RAISE EXCEPTION '% must not be blank', v_path USING ERRCODE = '22023';
                 END IF;
                 -- unit is a foreign key to the local unit table: a value the
                 -- master record cannot store must not be approvable (docs 6.2)
@@ -624,6 +656,33 @@ COMMENT ON FUNCTION material_change_request_plan(bigint, text) IS
     'The exact PATCH a worker would send for one request; no writes, no Authorization header.';
 
 -- ---------------------------------------------------------------------------
+-- ml_change_request_decision_reason - the why behind a decision
+-- ---------------------------------------------------------------------------
+-- decide() writes the reason into the material_event payload and nowhere else,
+-- so the event is the record of it. It is also the durable one: prune_change_requests.py
+-- deletes terminal request rows but never touches material_event, so a decision
+-- taken 91 days ago still explains itself after its row is gone. The filter uses
+-- the 'decision' key, which only decide() writes (retry() writes 'retry'), and
+-- compares the request id as text so no cast can land on a payload without one.
+CREATE OR REPLACE FUNCTION ml_change_request_decision_reason(
+    p_id  bigint,
+    p_uid text
+) RETURNS text
+LANGUAGE sql STABLE AS $$
+    SELECT e.payload ->> 'reason'
+      FROM material_event e
+     WHERE e.material_uid = p_uid
+       AND e.entity = 'material_change_request'
+       AND e.payload ->> 'decision' IN ('approve', 'reject')
+       AND e.payload ->> 'request_id' = p_id::text
+     ORDER BY e.seq DESC
+     LIMIT 1;
+$$;
+
+COMMENT ON FUNCTION ml_change_request_decision_reason(bigint, text) IS
+    'The reason decide() recorded for one request, read from material_event; outlives request retention.';
+
+-- ---------------------------------------------------------------------------
 -- material_change_request_queue - the review list
 -- ---------------------------------------------------------------------------
 -- actionable (the default) is pending + approved + failed: everything a human
@@ -661,6 +720,7 @@ BEGIN
                    r.last_status,
                    r.error,
                    r.reason,
+                   ml_change_request_decision_reason(r.id, r.material_uid) AS decision_reason,
                    r.requested_by,
                    r.requested_at,
                    r.decided_by,
