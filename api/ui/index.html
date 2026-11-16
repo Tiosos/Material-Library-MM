@@ -79,6 +79,7 @@
     </div>
 
     <div id="warning" class="warning" role="status" hidden></div>
+    <div id="restore-banner" class="warning" role="status" hidden></div>
 
     <div class="resultbar">
       <span id="total" class="total">loading...</span>
@@ -89,7 +90,7 @@
     <div class="tablewrap">
       <table id="results">
         <thead>
-          <tr>
+          <tr id="result-head">
             <th>name</th><th>category</th><th>brand</th><th>supplier</th>
             <th>unit</th><th class="num">unit_cost</th><th>updated_at</th>
             <th class="num">variants</th>
@@ -107,11 +108,43 @@
   </section>
 </main>
 
+<div id="staging-bar" class="staging-bar" hidden>
+  <span id="staging-summary">0 changes across 0 materials</span>
+  <div class="staging-actions">
+    <button type="button" id="review" class="btn primary">Review</button>
+    <button type="button" id="discard-all" class="btn">Discard all</button>
+    <button type="button" id="reload" class="btn">Reload</button>
+  </div>
+</div>
+
+<div id="editor-popover" class="popover" hidden>
+  <div id="editor-head" class="panel-head"><h3 id="editor-title">Edit</h3></div>
+  <div id="editor-body"></div>
+  <div id="editor-counter" class="hint"></div>
+  <div class="popover-actions">
+    <button type="button" id="editor-apply" class="btn primary">Apply</button>
+    <button type="button" id="editor-cancel" class="btn">Cancel</button>
+  </div>
+</div>
+
+<dialog id="review-sheet">
+  <div class="panel-head">
+    <h2>Review changes</h2>
+    <button type="button" id="review-close" class="btn small">Close</button>
+  </div>
+  <div id="review-body"></div>
+  <div class="review-footer">
+    <label>batch reason <textarea id="batch-reason" rows="2" maxlength="500" placeholder="one reason for the whole batch"></textarea></label>
+    <span id="reason-hint" class="hint"></span>
+    <button type="button" id="confirm-batch" class="btn primary">Confirm and submit</button>
+  </div>
+</dialog>
+
 <footer>
   <span id="footer-status">Ready</span>
-  <span class="hint">Read-only view. Editing lands in step 5.</span>
+  <span class="hint">Edits are staged locally and filed as change requests, never written directly.</span>
 </footer>
 
-<script type="module" src="/ui/assets/app.js"></script>
+<script type="module" src="/ui/assets/edit.js"></script>
 </body>
 </html>
