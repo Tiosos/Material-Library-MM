@@ -167,10 +167,10 @@ python -m pytest -q tests                                        # HTTP contract
 ```
 
 The four ETL integration cases in `tests/test_etl.py` skip unless `ML_ETL_DSN` points at a fresh
-database that has imported the joineryflow snapshot; the seventeen write-back integration cases in
+database that has imported the joineryflow snapshot; the twenty-eight write-back integration cases in
 `tests/test_writeback.py` skip unless `ML_WRITEBACK_DSN` is set. The dedicated `etl` and
 `writeback` CI jobs supply those DSNs. On the CI `api` recipe the suite reports
-`180 passed, 32 skipped`.
+`182 passed, 32 skipped`.
 
 Design and decisions: [`docs/api-v1.md`](docs/api-v1.md) (endpoints, SQL additions, instrumentation, evaluation thresholds). Implementation log with verification for every step: [`docs/t1-progress.md`](docs/t1-progress.md).
 
@@ -348,10 +348,17 @@ Every allowed path is now covered by the contract, not just `unit_cost`: the sev
 column name asserted against each other, and the tombstone rule - a confirmed write on a merged-away
 row lands on the tombstone, never on the survivor.
 
+Edits are validated before they become requests. A `name`, `product_type` or `unit` that trims to
+nothing is refused - newlines count as blank, and `product_url` is exempt because "no page for this
+item" is a real answer - while padding is stored as sent rather than silently rewritten, and every
+string value is capped at 1000 characters. The reason a reviewer gave is not a column: `decide()`
+records it in the audit event, `ml_change_request_decision_reason()` reads it back for both the
+queue and the request detail, and it stays readable after the request row is pruned.
+
 Measured on a fresh PostgreSQL 16 database: `scripts/writeback_contract.sql` green with zero
 residual rows, `tests/test_writeback.py` 37/37 with `ML_WRITEBACK_DSN`,
-`tests/test_writeback_api.py` 12/12 in the `api` job, and the full suite
-`180 passed, 32 skipped` on the CI `api` recipe. The dedicated `writeback` CI job rebuilds this
+`tests/test_writeback_api.py` 14/14 in the `api` job, and the full suite
+`182 passed, 32 skipped` on the CI `api` recipe. The dedicated `writeback` CI job rebuilds this
 from scratch on every PR with its own `ml_writeback` database; no `ML_JF_*` credential is set
 there.
 

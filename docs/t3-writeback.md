@@ -325,9 +325,13 @@ Three consequences:
 - **The window closes for readers.** `GET /v1/materials/{uid}`, export and search show the new
   value as soon as the worker commits, instead of waiting for the next snapshot.
 - **`submit()` validates what the master row can store**, because the value will be written there:
-  `unit` must be a known unit code (it is a foreign key), `unit_cost` must fit `numeric(14,4)`, and
-  `lead_time_days` must fit `integer`. Rejecting them at submit keeps the write from failing after
-  a PATCH has already landed.
+  `unit` must be a known unit code (it is a foreign key), `unit_cost` must fit `numeric(14,4)`,
+  `lead_time_days` must fit `integer`, `name`, `product_type` and `unit` must not trim to
+  whitespace (newlines included; `product_url` is exempt because an empty URL is a legitimate
+  clear), and no string value may exceed 1000 characters - per value, so a `synonyms` array of
+  many short tokens passes while one runaway string does not. Padding is stored as sent: the blank
+  test refuses, it never rewrites. Rejecting them at submit keeps the write from failing after a
+  PATCH has already landed.
 
 **JSON null was previously unusable.** Every type rule said "or null" but compared
 `jsonb_typeof(...) <> 'string'`, which is true for JSON null, so `after: null` was rejected for

@@ -71,6 +71,8 @@ DECLARE
     v_adv_start integer;
     v_wm_id    bigint;
     v_wm_at    timestamptz;
+    v_queue    jsonb;
+    v_row      jsonb;
 BEGIN
     -- 1. Additive columns, projection tables and the untouched CHECK -----------
     SELECT count(*) INTO v_count FROM information_schema.columns
@@ -809,6 +811,152 @@ BEGIN
         RAISE EXCEPTION 'resolving a tombstone write changed the survivor';
     END IF;
 
+    -- 18. blanks, the 1000-character ceiling and the decision record ----------
+    -- A textarea makes whitespace-only input a keystroke away, and a decision's
+    -- reason lives in the audit event rather than in a column.
+    v_uid := v_uids[1];
+
+    BEGIN
+        PERFORM material_change_request_submit(
+                   v_uid,
+                   jsonb_build_array(jsonb_build_object(
+                       'path', 'name', 'after', chr(10) || chr(9) || ' ')),
+                   NULL, 'requester');
+        RAISE EXCEPTION 'a whitespace-only name was accepted';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+
+    BEGIN
+        PERFORM material_change_request_submit(
+                   v_uid,
+                   jsonb_build_array(jsonb_build_object(
+                       'path', 'product_type', 'after', chr(10))),
+                   NULL, 'requester');
+        RAISE EXCEPTION 'a whitespace-only product_type was accepted';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+
+    -- unit is refused as blank, not as an unknown code
+    BEGIN
+        PERFORM material_change_request_submit(
+                   v_uid,
+                   jsonb_build_array(jsonb_build_object(
+                       'path', 'unit', 'after', '   ')),
+                   NULL, 'requester');
+        RAISE EXCEPTION 'a whitespace-only unit was accepted';
+    EXCEPTION WHEN invalid_parameter_value THEN
+        IF SQLERRM NOT LIKE '%must not be blank%' THEN
+            RAISE EXCEPTION 'a blank unit was refused for the wrong reason: %', SQLERRM;
+        END IF;
+    END;
+
+    -- product_url is exempt: an empty value clears the field, it is not an error
+    SELECT material_change_request_submit(
+               v_uid, '[{"path":"product_url","after":""}]'::jsonb,
+               NULL, 'requester') INTO r;
+    IF NOT (r->>'ok')::boolean THEN
+        RAISE EXCEPTION 'a blank product_url was refused: %', r;
+    END IF;
+    DELETE FROM material_change_request WHERE id = (r->>'id')::bigint;
+
+    -- the blank test refuses, it does not rewrite: padding is stored as sent
+    SELECT material_change_request_submit(
+               v_uid, '[{"path":"name","after":"  Padded Name  "}]'::jsonb,
+               NULL, 'requester') INTO r;
+    IF NOT (r->>'ok')::boolean OR (r->'diffs'->0->>'after') <> '  Padded Name  ' THEN
+        RAISE EXCEPTION 'a padded name was rewritten or refused: %', r;
+    END IF;
+    DELETE FROM material_change_request WHERE id = (r->>'id')::bigint;
+
+    -- 1000 characters is the ceiling, per value rather than per field
+    SELECT material_change_request_submit(
+               v_uid,
+               jsonb_build_array(jsonb_build_object(
+                   'path', 'name', 'after', repeat('a', 1000))),
+               NULL, 'requester') INTO r;
+    IF NOT (r->>'ok')::boolean OR length(r->'diffs'->0->>'after') <> 1000 THEN
+        RAISE EXCEPTION 'a 1000-character name was refused: %', r;
+    END IF;
+    DELETE FROM material_change_request WHERE id = (r->>'id')::bigint;
+
+    BEGIN
+        PERFORM material_change_request_submit(
+                   v_uid,
+                   jsonb_build_array(jsonb_build_object(
+                       'path', 'name', 'after', repeat('a', 1001))),
+                   NULL, 'requester');
+        RAISE EXCEPTION 'a 1001-character name was accepted';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+
+    -- fifty short tokens pass; one long token is refused
+    SELECT material_change_request_submit(
+               v_uid,
+               jsonb_build_array(jsonb_build_object(
+                   'path', 'synonyms', 'after',
+                   (SELECT jsonb_agg('token ' || g) FROM generate_series(1, 50) g))),
+               NULL, 'requester') INTO r;
+    IF NOT (r->>'ok')::boolean THEN
+        RAISE EXCEPTION 'fifty short synonyms were refused: %', r;
+    END IF;
+    DELETE FROM material_change_request WHERE id = (r->>'id')::bigint;
+
+    BEGIN
+        PERFORM material_change_request_submit(
+                   v_uid,
+                   jsonb_build_array(jsonb_build_object(
+                       'path', 'synonyms', 'after',
+                       jsonb_build_array('fine', repeat('b', 1001)))),
+                   NULL, 'requester');
+        RAISE EXCEPTION 'a 1001-character synonym was accepted';
+    EXCEPTION WHEN invalid_parameter_value THEN NULL;
+    END;
+
+    -- the reason for a decision comes back through the queue, from the event
+    SELECT coalesce(unit_cost, 0) + 5150 INTO v_cost
+      FROM material WHERE material_uid = v_uid;
+    SELECT material_change_request_submit(
+               v_uid,
+               jsonb_build_array(jsonb_build_object('path', 'unit_cost', 'after', v_cost)),
+               'Q4 price list', 'requester') INTO r;
+    IF NOT (r->>'ok')::boolean THEN
+        RAISE EXCEPTION 'could not file the decision-reason request: %', r;
+    END IF;
+    v_id := (r->>'id')::bigint;
+
+    v_queue := material_change_request_queue('all', 500, 0);
+    SELECT e INTO v_row FROM jsonb_array_elements(v_queue->'rows') e
+     WHERE (e->>'id')::bigint = v_id;
+    IF coalesce(v_row->>'decision_reason', '') <> '' THEN
+        RAISE EXCEPTION 'an undecided request already carries a reason: %', v_row;
+    END IF;
+
+    PERFORM material_change_request_decide(
+                v_id, 'approve', 'checked against the list', 'reviewer');
+    v_queue := material_change_request_queue('all', 500, 0);
+    SELECT e INTO v_row FROM jsonb_array_elements(v_queue->'rows') e
+     WHERE (e->>'id')::bigint = v_id;
+    IF v_row->>'decision_reason' IS DISTINCT FROM 'checked against the list' THEN
+        RAISE EXCEPTION 'the queue did not project the decision reason: %', v_row;
+    END IF;
+
+    -- a retry event carries decision = retry and must not replace the reason
+    PERFORM material_change_request_claim(10, 'worker', interval '5 minutes', v_id);
+    PERFORM material_change_request_settle(v_id, 'failed', 400, 'upstream said no', 'worker');
+    PERFORM material_change_request_retry(v_id, 'requester', 'resubmitting');
+    IF ml_change_request_decision_reason(v_id, v_uid)
+       IS DISTINCT FROM 'checked against the list' THEN
+        RAISE EXCEPTION 'a retry overwrote the decision reason: %',
+            ml_change_request_decision_reason(v_id, v_uid);
+    END IF;
+
+    -- retention deletes the row, not the reason: the event outlives it
+    DELETE FROM material_change_request WHERE id = v_id;
+    IF ml_change_request_decision_reason(v_id, v_uid)
+       IS DISTINCT FROM 'checked against the list' THEN
+        RAISE EXCEPTION 'pruning the row lost the decision reason';
+    END IF;
+
     RAISE NOTICE 'writeback contract OK: 9 endpoints, 7 fields, 6 additive columns, '
                  'submit/decide/claim/settle/retry transitions, 1 event per transition, '
                  'T3 x T2 guards (merge blocker, decide, plan, settle, retry), '
@@ -816,7 +964,9 @@ BEGIN
                  'the upstream watermark survives request retention, '
                  'verify stays read-only unless resolved and never guesses, '
                  'all seven fields and the attributes namespace reach the master row, '
-                 'a confirmed write on a tombstone lands there and not on the survivor';
+                 'a confirmed write on a tombstone lands there and not on the survivor, '
+                 'blanks are refused, values are capped at 1000 characters, '
+                 'and a decision reason outlives the row it explains';
 END $$;
 
 ROLLBACK;

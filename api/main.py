@@ -931,10 +931,21 @@ def change_request_detail(
     request_id: int,
     conn: psycopg.Connection = Depends(db.connection),
 ) -> dict[str, Any]:
-    """Full request plus its PATCH preview; no writes and no Authorization header."""
+    """Full request plus its PATCH preview; no writes and no Authorization header.
+
+    The decision reason is not a column: decide() records it in the audit event,
+    so it is read back from there. It stays readable after the request row is
+    pruned, which is the point of keeping it out of the row.
+    """
     row = db.query_value(
         conn,
-        "SELECT to_jsonb(r) FROM material_change_request r WHERE id = %(id)s",
+        """
+        SELECT to_jsonb(r) || jsonb_build_object(
+                   'decision_reason',
+                   ml_change_request_decision_reason(r.id, r.material_uid))
+          FROM material_change_request r
+         WHERE id = %(id)s
+        """,
         {"id": request_id},
     )
     if row is None:

@@ -493,6 +493,14 @@ written by a test at least once, the four places that derive an upstream column 
 each other, and the tombstone decision is asserted instead of implied. Counts are now 37/37
 write-back tests.
 
+Follow-up 6 comes from the UI design (`docs/ui-bulk-edit.md`, U18-U20) and is the only change to
+this file it makes: `submit()` refuses a `name`, `product_type` or `unit` that trims to nothing
+(newlines included, `product_url` exempt) and caps any string value at 1000 characters, and a
+reviewer's reason is read from `material_event` by `ml_change_request_decision_reason()` for both
+the queue and the request detail, so it outlives the row it explains. Contract section 18 asserts
+all of it; counts are now 37/37 write-back tests, 14/14 HTTP write-back tests and
+`182 passed, 32 skipped`.
+
 Still open for the project as a whole, and deliberately out of scope for T3: whether joineryflow
 honours `Idempotency-Key` (until confirmed, no retry depends on it), the exact form of the
 workspace guard, whether the upstream accepts a partial PATCH body, the exact `GET` response shape

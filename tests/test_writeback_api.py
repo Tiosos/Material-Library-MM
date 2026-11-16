@@ -170,6 +170,8 @@ def test_detail_returns_a_safe_plan(client: TestClient, jf_uid: str):
     rid = _submit(client, jf_uid).json()["id"]
     body = client.get(f"/v1/change-requests/{rid}").json()
     assert body["schema_version"] == "2" and body["id"] == rid
+    # no decision yet, and the key is present rather than missing
+    assert body["decision_reason"] is None
     plan = body["plan"]
     assert plan["ok"] is True and plan["method"] == "PATCH"
     assert plan["url"] == "/catalog/board-materials/9901"
@@ -182,6 +184,45 @@ def test_detail_returns_a_safe_plan(client: TestClient, jf_uid: str):
 
 def test_detail_unknown_id_is_404(client: TestClient):
     assert_error(client.get("/v1/change-requests/99999999"), 404, "not_found")
+
+
+def test_the_decision_reason_is_read_from_the_event(client: TestClient, jf_uid: str):
+    """decide() stores the reason in material_event, not in a column."""
+    rid = _submit(client, jf_uid, actor="alice").json()["id"]
+    assert client.get(f"/v1/change-requests/{rid}").json()["decision_reason"] is None
+
+    client.post(f"/v1/change-requests/{rid}/approve",
+                json={"reason": "checked against the supplier list"},
+                headers={"X-Actor": "bob"})
+
+    detail = client.get(f"/v1/change-requests/{rid}").json()
+    assert detail["decision_reason"] == "checked against the supplier list"
+    assert detail["decided_by"] == "bob" and detail["decided_at"]
+
+    listed = client.get("/v1/change-requests", params={"status": "approved"}).json()
+    row = next(r for r in listed["rows"] if r["id"] == rid)
+    assert row["decision_reason"] == detail["decision_reason"]
+
+
+def test_submit_refuses_a_blank_or_oversized_text_value(client: TestClient, jf_uid: str):
+    blank = client.post(
+        "/v1/change-requests",
+        json={"material_uid": jf_uid, "diffs": [{"path": "name", "after": "\n\t "}]},
+    )
+    assert_error(blank, 400, "bad_request")
+
+    oversized = client.post(
+        "/v1/change-requests",
+        json={"material_uid": jf_uid, "diffs": [{"path": "name", "after": "a" * 1001}]},
+    )
+    assert_error(oversized, 400, "bad_request")
+
+    # product_url is exempt from the blank rule: it clears the field instead
+    blank_url = client.post(
+        "/v1/change-requests",
+        json={"material_uid": jf_uid, "diffs": [{"path": "product_url", "after": ""}]},
+    )
+    assert blank_url.status_code == 201, blank_url.text
 
 
 def test_approve_requires_a_different_actor(client: TestClient, jf_uid: str):

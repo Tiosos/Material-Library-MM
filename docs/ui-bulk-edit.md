@@ -298,7 +298,7 @@ value, and editing `unit_cost` and `name` on one row produces one request with t
 
 | Field | Editor | Validation before staging |
 | --- | --- | --- |
-| `name` | textarea in a popover, 3 rows, line breaks preserved | non-empty after trimming spaces and newlines (U19); at most 1000 characters; no leading or trailing whitespace kept |
+| `name` | textarea in a popover, 3 rows, line breaks preserved | non-empty after trimming spaces and newlines (U19); at most 1000 characters; padding is stored as sent, never rewritten |
 | `product_type` | text | non-empty after trimming spaces and newlines (U19) |
 | `unit` | select | must be a code from the schema endpoint's `unit` domain; non-empty after trimming |
 | `unit_cost` | number | finite, non-negative, max 4 decimals |
@@ -376,25 +376,31 @@ actionable queue on the next refresh, and the UI does not pretend the request wa
 `approved`, because `--apply` is still a separate worker run.
 
 The detail view shows the decision once it exists: `decided_by` and `decided_at` come from the
-request row, and `decision_reason` comes from the audit event (U18). `material_change_request_queue()`
-gains one `LATERAL` projection so the queue can show it without a second round trip:
+request row, and `decision_reason` comes from the audit event (U18). One `STABLE` function is the
+only lookup, because the queue and the detail route are two callers and a `LATERAL` written twice
+would drift:
 
 ```sql
-LEFT JOIN LATERAL (
-    SELECT e.payload ->> 'reason' AS decision_reason
+CREATE OR REPLACE FUNCTION ml_change_request_decision_reason(p_id bigint, p_uid text)
+RETURNS text LANGUAGE sql STABLE AS $$
+    SELECT e.payload ->> 'reason'
       FROM material_event e
-     WHERE e.entity = 'material_change_request'
-       AND (e.payload ->> 'request_id')::bigint = r.id
-       AND e.payload ->> 'to' IN ('approved', 'rejected')
+     WHERE e.material_uid = p_uid                     -- uses (material_uid, seq DESC)
+       AND e.entity = 'material_change_request'
+       AND e.payload ->> 'decision' IN ('approve', 'reject')
+       AND e.payload ->> 'request_id' = p_id::text    -- text, so no cast can fail
      ORDER BY e.seq DESC
-     LIMIT 1
-) d ON true
+     LIMIT 1;
+$$;
 ```
 
-The detail route uses the same lookup. No column, no trigger, and the reason stays where `decide()`
-already put it. The consequence worth stating plainly: **`material_event` is now the only record of a
-decision's reason**, so the existing rule that `prune_change_requests.py` never deletes events is
-load-bearing rather than tidy. T3's contract already asserts it; this design depends on it.
+`material_change_request_queue()` selects it per row, and `GET /v1/change-requests/{id}` merges it
+into the row it already returns. The filter uses the `decision` key, which only `decide()` writes;
+`retry()` writes `'retry'`, so a retry cannot overwrite the reason it is retrying. No column, no
+trigger, and the reason stays where `decide()` already put it. The consequence worth stating
+plainly: **`material_event` is now the only record of a decision's reason**, so the existing rule
+that `prune_change_requests.py` never deletes events is load-bearing rather than tidy. T3's contract
+already asserts it; this design depends on it.
 
 Before a decision exists, the three badges of 8.2 stand in for the answer the server is going to give.
 
@@ -516,11 +522,13 @@ rather than hidden.
   set as expected, asserted against `scripts/api_contract.sql` data.
 - `scripts/api_contract.sql` (extend): the same numeric and status predicates asserted in SQL, so the
   Python and SQL views of the data cannot drift.
-- `scripts/writeback_contract.sql` (extend): `name`, `product_type` and `unit` set to newlines only are
-  refused (U19), while `product_url` set to `""` is accepted and clears the field; a 1001-character
-  value is refused with `22023` while 1000 is accepted, per value rather than per field (U20);
-  `queue()` returns the decision reason from the event; and after deleting every `applied` and
-  `rejected` row the reason is still readable, which is the property U18 depends on.
+- `scripts/writeback_contract.sql` (extend): `name`, `product_type` and `unit` set to newlines or
+  spaces only are refused (U19) - `unit` with "must not be blank" rather than the misleading
+  "not a known unit code" - while `product_url` set to `""` is accepted and clears the field, and a
+  padded `name` is stored exactly as sent; a 1001-character value is refused with `22023` while 1000
+  is accepted, per value rather than per field, so fifty short synonyms pass and one long token does
+  not (U20); `queue()` returns the decision reason from the event, a retry does not overwrite it, and
+  after the request row is deleted the reason is still readable, which is the property U18 depends on.
 - `scripts/check_english.py` already covers the new files; no change.
 - No new CI job. The `api` job runs all of it.
 
@@ -590,7 +598,7 @@ decision to test it is a small step, not a rewrite.
 
 | Step | Work | Done when |
 | --- | --- | --- |
-| 1 | `submit()`: the `name`, `product_type` and `unit` trim includes newlines (`product_url` exempt), and any string value is capped at 1000 characters (U19, U20); `queue()` projects the decision reason from `material_event` (U18); contract assertions. No column, no migration | The contract asserts every refusal and the exemption, and the existing 37 write-back tests still pass |
+| 1 | `submit()`: `name`, `product_type` and `unit` are refused when they trim to nothing, newlines included, while padding is stored as sent (`product_url` exempt); any string value is capped at 1000 characters (U19, U20). `ml_change_request_decision_reason()` backs both `queue()` and the detail route (U18). No column, no migration | The contract asserts every refusal, the exemption and the 1000/1001 boundary; the existing write-back tests still pass |
 | 2 | `GET /v1/writeback/schema` with `editor` hints, the five new `/v1/materials` parameters, and their tests plus `api_contract.sql` assertions | The schema endpoint matches the tables; every new filter is asserted in both SQL and Python |
 | 3 | `POST /v1/change-requests/batch` with the reason rule, and `POST /v1/change-requests/decide-batch`, both with per-item results, the 100 / 25 caps and their tests | Partial success returns 200 with per-item codes; `reason_required` and `batch_too_large` are enforced server-side; no new SQL beyond step 1 |
 | 4 | `api/ui/` shell: layout, token and actor, query panel with facets and filter rows, saved views | A search and filter round trip works against a real database |
