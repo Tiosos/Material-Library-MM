@@ -39,7 +39,7 @@ than the design prose:
 | Does `material_change_request` have any reader or writer? | No. Only `schema/material.sql` (DDL with a five-state CHECK) and one pending demo row in `schema/sample_demo.sql` reference it. |
 | What identifies the upstream row to PATCH? | All 18 imported joineryflow rows have `source_id` of the form `<table>:<int>`; each of the nine tables declares its own `endpoint` in `mapping/joineryflow.yaml`. |
 | Is the workspace persisted in the UMR? | No. The snapshot header carries `workspace_slug = hartwood-joinery`, but zero of the 18 `source_payload` objects contain that key. |
-| Does `material` expose the seven writable fields? | Yes: `name`, `product_type`, `unit`, `unit_cost` (numeric), `lead_time_days` (int), `product_url`, `synonyms` (text[]) and `attributes` (jsonb). |
+| Does `material` expose the writable fields? | Yes: `name`, `product_type`, `unit`, `unit_cost` (numeric), `product_url`, `synonyms` (text[]) and `attributes` (jsonb). `lead_time_days` is still a column but was removed from the write-back allowlist by UI decision U22: delivery time belongs to a supplier at a point in time, not to a material. |
 | Does the ETL's no-op re-import move `rev`? | No. `sync_seq` moves on 11 rows through `ml_child_touch()`, `rev` stays 1 on all 18. |
 
 The last row is why the approval fingerprint is field-level rather than a whole-row or
@@ -500,6 +500,12 @@ reviewer's reason is read from `material_event` by `ml_change_request_decision_r
 the queue and the request detail, so it outlives the row it explains. Contract section 18 asserts
 all of it; counts are now 37/37 write-back tests, 14/14 HTTP write-back tests and
 `182 passed, 32 skipped`.
+
+Follow-up 7 (UI decision U22) removes `lead_time_days` from the write-back allowlist: the column and
+its ETL import edge remain, but no person can edit it as a material attribute because delivery time
+is a supplier-and-time fact. This changes an already-merged surface, so the contract now asserts
+`forbidden_path` for that path and the field-coverage section writes four fields instead of five.
+Counts are 38/38 write-back tests and `187 passed, 33 skipped`.
 
 Still open for the project as a whole, and deliberately out of scope for T3: whether joineryflow
 honours `Idempotency-Key` (until confirmed, no retry depends on it), the exact form of the

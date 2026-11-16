@@ -197,7 +197,7 @@ def test_inverse_field_translation_agrees_with_the_mapping():
     got = {umr: (material_col, upstream_col) for umr, material_col, upstream_col in rows}
     assert set(got) == set(expected), got
     assert all(got[umr][1] == col for umr, col in expected.items())
-    assert len(got) == 7
+    assert len(got) == 6
 
 
 def test_all_nine_catalog_endpoints_agree_with_the_mapping():
@@ -264,7 +264,7 @@ def wb_conn(wb_dsn):
 
 
 # Every column a write-back can touch. The fixture restores them all, because a
-# test that applies a five-field diff would otherwise leak into the next one.
+# test that applies a multi-field diff would otherwise leak into the next one.
 WB_COLUMNS = ("name", "unit", "unit_cost", "lead_time_days", "product_url",
               "synonyms", "product_type", "attributes", "status", "superseded_by")
 JSON_COLUMNS = {"attributes"}
@@ -1018,12 +1018,11 @@ def test_verify_resolves_an_attribute_write(clean_db, upstream, wb_dsn):
     assert attributes_of(clean_db, uid)["colour"] == "Blue"
 
 
-def test_a_five_field_write_lands_as_one_patch(clean_db, upstream, wb_dsn):
+def test_a_four_field_write_lands_as_one_patch(clean_db, upstream, wb_dsn):
     uid = one_uid(clean_db, 10)
     rid = make_diff_request(clean_db, uid, [
         {"path": "name", "after": "Renamed by a test"},
         {"path": "unit", "after": "box"},
-        {"path": "lead_time_days", "after": 7},
         {"path": "product_url", "after": "https://example.test/five"},
         {"path": "synonyms", "after": ["hinge 110", "soft close"]},
     ])
@@ -1034,15 +1033,33 @@ def test_a_five_field_write_lands_as_one_patch(clean_db, upstream, wb_dsn):
     assert upstream.records[0]["body"] == {
         "description": "Renamed by a test",
         "um": "box",
-        "default_lead_time_days": 7,
         "product_website": "https://example.test/five",
         "synonyms": ["hinge 110", "soft close"],
     }
 
     with clean_db.cursor() as cur:
-        cur.execute("SELECT name, unit, lead_time_days, product_url, synonyms "
+        cur.execute("SELECT name, unit, product_url, synonyms "
                     "FROM material WHERE material_uid=%s", (uid,))
-        name, unit, lead, url, synonyms = cur.fetchone()
-    assert (name, unit, lead, url) == ("Renamed by a test", "box", 7,
-                                       "https://example.test/five")
+        name, unit, url, synonyms = cur.fetchone()
+    assert (name, unit, url) == ("Renamed by a test", "box",
+                                "https://example.test/five")
     assert synonyms == ["hinge 110", "soft close"]
+
+
+
+def test_lead_time_days_is_no_longer_writable(clean_db, upstream, wb_dsn):
+    """Lead time is supplier x time, not a material attribute (UI decision)."""
+    uid = one_uid(clean_db, 10)
+    with clean_db.cursor() as cur:
+        cur.execute(
+            "SELECT material_change_request_submit(%s, %s, NULL, 'alice')",
+            (uid, json.dumps([{"path": "lead_time_days", "after": 7}])),
+        )
+        result = cur.fetchone()[0]
+    assert result["ok"] is False
+    assert result["code"] == "forbidden_path"
+    # the import edge is intentionally untouched: the column still exists
+    with clean_db.cursor() as cur:
+        cur.execute("SELECT count(*) FROM information_schema.columns "
+                    "WHERE table_name='material' AND column_name='lead_time_days'")
+        assert cur.fetchone()[0] == 1

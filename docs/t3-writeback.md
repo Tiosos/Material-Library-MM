@@ -326,7 +326,7 @@ Three consequences:
   value as soon as the worker commits, instead of waiting for the next snapshot.
 - **`submit()` validates what the master row can store**, because the value will be written there:
   `unit` must be a known unit code (it is a foreign key), `unit_cost` must fit `numeric(14,4)`,
-  `lead_time_days` must fit `integer`, `name`, `product_type` and `unit` must not trim to
+  `name`, `product_type` and `unit` must not trim to
   whitespace (newlines included; `product_url` is exempt because an empty URL is a legitimate
   clear), and no string value may exceed 1000 characters - per value, so a `synonyms` array of
   many short tokens passes while one runaway string does not. Padding is stored as sent: the blank
@@ -456,7 +456,6 @@ Allowed paths:
 | `product_type` | `product_type` | `write_back.fields` |
 | `unit` | `um` | `write_back.fields` |
 | `unit_cost` | `unit_cost` | `write_back.fields` |
-| `lead_time_days` | `default_lead_time_days` | `write_back.fields` |
 | `product_url` | `product_website` | `write_back.fields` |
 | `synonyms` | `synonyms` | `write_back.fields` |
 | `attributes.<column>` | the same column | `write_back.attributes` + `keep_source_names: true` |
@@ -473,10 +472,10 @@ forbidden value can never reach the executor. The SQL contract asserts that no P
 fake upstream's log contains a forbidden key.
 
 **Every row of that table is exercised, not just `unit_cost`.** Section 16 of
-`scripts/writeback_contract.sql` writes the five fields that had no positive assertion (`name`,
-`unit`, `lead_time_days`, `product_url`, `synonyms`) in one diff, checks the PATCH body is exactly
-the five upstream columns, and asserts that `material_change_request_verify_plan()` expects the
-same five keys - the four places that derive an upstream column name independently
+`scripts/writeback_contract.sql` writes the four fields that had no positive assertion (`name`,
+`unit`, `product_url`, `synonyms`) in one diff, checks the PATCH body is exactly
+the four upstream columns, and asserts that `material_change_request_verify_plan()` expects the
+same four keys - the four places that derive an upstream column name independently
 (`ml_writeback_current_values`, `ml_writeback_apply_diffs`, `plan()`, `verify_plan()`) are only
 useful while they agree. `synonyms` gets its own case because it is the one path that builds a
 `text[]`; clearing it must yield `{}` and never NULL.
@@ -593,7 +592,7 @@ worker does not need FastAPI or httpx.
   path writes zero events and leaves the watermark alone, an `unreachable` verdict changes nothing
   even with `p_resolve`, a confirmed match applies the diff and advances the watermark by exactly
   one, and a confirmed miss records `verified_not_applied` without touching the master row.
-  Section 16 adds the field coverage of section 7: one diff carrying the five fields that had no
+  Section 16 adds the field coverage of section 7: one diff carrying the four fields that had no
   positive assertion, the PATCH body compared as a whole object, `verify_plan().expected` asserted
   equal to that body, `synonyms` cleared to `{}`, and `attributes.colour` written, preserved and
   dropped. Section 17 asserts that a confirmed write on a tombstone lands on the tombstone and
@@ -673,8 +672,7 @@ worker does not need FastAPI or httpx.
     master row untouched; a missing column is `unreachable` and changes nothing even with
     `--resolve`; a request that is not a candidate costs no HTTP call.
 14. Every allowed path actually lands (section 7): a single diff carrying `name`, `unit`,
-    `lead_time_days`, `product_url` and `synonyms` produces exactly those five upstream columns in
-    the PATCH body, reaches the master row (including `synonyms` as a `text[]`), moves `rev`, and
+    `product_url` and `synonyms` produces exactly those four upstream columns in the PATCH body, reaches the master row (including `synonyms` as a `text[]`), moves `rev`, and
     makes the same diff return `no_change`. `verify_plan()` expects the same keys the PATCH sends.
     `attributes.<key>` lands in `material.attributes` without clobbering an unrelated key, and
     clearing it removes the key rather than storing a JSON null.
@@ -720,7 +718,7 @@ and EPD collection, changes to search ranking, and any change to the ETL snapsho
 | 7 | T3 x T3 loop (section 6.2): `settle()` writes the diff home, submit validates storable values, JSON null clears, the importer refuses a stale snapshot | contract green, 22/22 write-back tests, full suite green, an old snapshot is refused after an apply |
 | 8 | Retention and the watermark (section 6.3): `material_writeback_state`, the watermark-based import guard, the prune CLI, contract assertions and integration cases | contract green, 25/25 write-back tests, full suite green, a stale snapshot stays refused after terminal rows are pruned |
 | 9 | `--verify` (section 6.4): `verify_plan()`, `verify()`, the shared local-write helpers, `JoineryflowClient.get()`, the `--verify` / `--resolve` modes, contract assertions and integration cases | contract green, 33/33 write-back tests, full suite green, a 5xx request is resolved by a GET and a missing column changes nothing |
-| 10 | Field coverage (section 7): contract sections 16 and 17 for the five fields with no positive assertion, the `plan`/`verify_plan` key agreement, the attributes namespace and the tombstone decision | contract green, 37/37 write-back tests, full suite green, every allowed path is written and asserted at least once |
+| 10 | Field coverage (section 7): contract sections 16 and 17 for the four fields with no positive assertion, the `plan`/`verify_plan` key agreement, the attributes namespace and the tombstone decision | contract green, 37/37 write-back tests, full suite green, every allowed path is written and asserted at least once |
 
 Effort: about two to three days at the T1/T2/ETL pace; most of it is the state machine, the
 outcome handling and making the CI simulation honest.

@@ -87,8 +87,8 @@ BEGIN
         RAISE EXCEPTION 'material_writeback_catalog has % rows, expected 9', v_count;
     END IF;
     SELECT count(*) INTO v_count FROM material_writeback_field;
-    IF v_count <> 7 THEN
-        RAISE EXCEPTION 'material_writeback_field has % rows, expected 7', v_count;
+    IF v_count <> 6 THEN
+        RAISE EXCEPTION 'material_writeback_field has % rows, expected 6', v_count;
     END IF;
 
     -- The five-state CHECK must not have grown a 'claimed' sixth state (D13).
@@ -611,7 +611,7 @@ BEGIN
     END IF;
 
     -- 16. every writable field lands, not just unit_cost (docs section 7) ----
-    -- The allowlist has seven fields plus an attributes namespace, but only
+    -- The allowlist has six fields plus an attributes namespace, but only
     -- unit_cost and product_type were ever asserted. synonyms is the riskiest:
     -- it is the one path that has to build a text[] instead of a scalar, and a
     -- break there would ship silently.
@@ -625,14 +625,22 @@ BEGIN
     SELECT material_change_request_submit(v_uid,
                '[{"path":"name","after":"Renamed by the contract"},
                  {"path":"unit","after":"box"},
-                 {"path":"lead_time_days","after":7},
                  {"path":"product_url","after":"https://example.test/contract"},
                  {"path":"synonyms","after":["hinge 110","soft close"]}]'::jsonb,
                NULL, 'requester') INTO r;
     IF NOT (r->>'ok')::boolean THEN
-        RAISE EXCEPTION 'five allowed fields were refused at submit: %', r;
+        RAISE EXCEPTION 'four allowed fields were refused at submit: %', r;
     END IF;
     v_fields := (r->>'id')::bigint;
+
+    -- Lead time is supplier x time, not a material attribute: it is still in
+    -- material and still imported, but it is no longer writable through T3.
+    SELECT material_change_request_submit(
+               v_uid, '[{"path":"lead_time_days","after":7}]'::jsonb,
+               NULL, 'requester') INTO r;
+    IF (r->>'ok')::boolean OR r->>'code' <> 'forbidden_path' THEN
+        RAISE EXCEPTION 'lead_time_days became writable again: %', r;
+    END IF;
 
     -- the PATCH body is the inverse translation and nothing else: upstream
     -- column names, no UMR path leaking through
@@ -640,7 +648,6 @@ BEGIN
       INTO v_body;
     IF v_body IS DISTINCT FROM
        '{"description": "Renamed by the contract", "um": "box",
-         "default_lead_time_days": 7,
          "product_website": "https://example.test/contract",
          "synonyms": ["hinge 110", "soft close"]}'::jsonb THEN
         RAISE EXCEPTION 'the plan body is wrong: %', v_body;
@@ -666,15 +673,14 @@ BEGIN
     SELECT * INTO v_mat FROM material WHERE material_uid = v_uid;
     IF v_mat.name <> 'Renamed by the contract'
        OR v_mat.unit <> 'box'
-       OR v_mat.lead_time_days <> 7
        OR v_mat.product_url <> 'https://example.test/contract'
        OR v_mat.synonyms IS DISTINCT FROM ARRAY['hinge 110', 'soft close'] THEN
-        RAISE EXCEPTION 'a confirmed field did not land: name=%, unit=%, lead=%, '
+        RAISE EXCEPTION 'a confirmed field did not land: name=%, unit=%, '
                         'url=%, synonyms=%', v_mat.name, v_mat.unit,
-                        v_mat.lead_time_days, v_mat.product_url, v_mat.synonyms;
+                        v_mat.product_url, v_mat.synonyms;
     END IF;
     IF v_mat.rev <= v_rev_before THEN
-        RAISE EXCEPTION 'a five-field write did not bump rev (% -> %)',
+        RAISE EXCEPTION 'a four-field write did not bump rev (% -> %)',
             v_rev_before, v_mat.rev;
     END IF;
     -- the fingerprint has to see the new value, or the same diff could be
@@ -957,13 +963,13 @@ BEGIN
         RAISE EXCEPTION 'pruning the row lost the decision reason';
     END IF;
 
-    RAISE NOTICE 'writeback contract OK: 9 endpoints, 7 fields, 6 additive columns, '
+    RAISE NOTICE 'writeback contract OK: 9 endpoints, 6 fields, 6 additive columns, '
                  'submit/decide/claim/settle/retry transitions, 1 event per transition, '
                  'T3 x T2 guards (merge blocker, decide, plan, settle, retry), '
                  'applied writes the master record and cannot be filed twice, '
                  'the upstream watermark survives request retention, '
                  'verify stays read-only unless resolved and never guesses, '
-                 'all seven fields and the attributes namespace reach the master row, '
+                 'all six fields and the attributes namespace reach the master row, '
                  'a confirmed write on a tombstone lands there and not on the survivor, '
                  'blanks are refused, values are capped at 1000 characters, '
                  'and a decision reason outlives the row it explains';

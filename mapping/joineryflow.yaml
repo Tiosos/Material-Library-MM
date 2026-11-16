@@ -427,7 +427,6 @@ write_back:
     product_type:     product_type
     um:               unit
     unit_cost:        unit_cost
-    default_lead_time_days: lead_time_days
     product_website:  product_url
     synonyms:         synonyms
   attributes: "flatten back into the same-named columns of each table (board.colour <- attributes.colour ...)"
