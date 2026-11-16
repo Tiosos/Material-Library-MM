@@ -36,8 +36,8 @@ def test_ui_shell_is_served_without_a_token(client: TestClient, shell: str) -> N
     assert response.status_code == 200, response.text
     assert response.headers["content-type"].startswith("text/html")
     assert '<html lang="en">' in response.text
-    assert 'type="module" src="/ui/assets/app.js"' in response.text
-    assert response.text == shell
+    assert 'type="module" src="/ui/assets/edit.js"' in response.text
+    assert response.text.replace('\r\n', '\n') == shell.replace('\r\n', '\n')
 
 
 @pytest.mark.parametrize("path,content_type", [
@@ -64,9 +64,12 @@ def test_shell_exposes_the_query_controls(shell: str) -> None:
     for control in ("q", "sort", "order", "actor", "token", "filters-toggle",
                     "views-toggle", "filter-rows", "view-list", "rows", "next", "prev"):
         assert f'id="{control}"' in shell, control
-    # step 4 is read-only: the staging controls arrive with the grid in step 5
-    assert "Review and submit" not in shell
-    assert "Discard all" not in shell
+    # step 5 adds staging; the grid editors are wired from edit.js
+    for control in ("staging-bar", "review", "discard-all", "reload",
+                    "editor-popover", "editor-apply", "review-sheet",
+                    "batch-reason", "confirm-batch", "restore-banner"):
+        assert f'id="{control}"' in shell, control
+    assert 'src="/ui/assets/edit.js"' in shell
 
 
 def test_query_compiler_uses_only_whitelisted_parameters(script: str) -> None:
@@ -138,3 +141,69 @@ def test_a_query_round_trip_works_from_the_shells_parameters(client: TestClient)
     assert len(body["results"]) <= 5
     assert all("updated_at" in row for row in body["results"])
     assert all("lead_time_days" not in row for row in body["results"])
+
+
+@pytest.fixture(scope="module")
+def edit_script() -> str:
+    return (UI / "edit.js").read_text(encoding="utf-8")
+
+
+def test_edit_module_uses_the_batch_route_not_direct_writes(edit_script: str) -> None:
+    """The grid stages diffs; only /v1/change-requests/batch may write (U1)."""
+    assert "from './app.js'" in edit_script
+    assert "'/v1/change-requests/batch'" in edit_script
+    assert "'/v1/writeback/schema'" in edit_script
+    assert "`/v1/materials/${encodeURIComponent(row.material_uid)}`" in edit_script
+    # no HTTP verb other than POST to the batch route, and never PATCH/PUT/DELETE
+    assert "method: 'POST'" in edit_script
+    for verb in ("method: 'PATCH'", "method: 'PUT'", "method: 'DELETE'"):
+        assert verb not in edit_script
+    # one request per material, all staged paths in one diffs array (U2)
+    assert "export function groupStaged" in edit_script
+    assert "material_uid," in edit_script and "diffs: [...diffs.entries()]" in edit_script
+    assert "sessionStorage.setItem(STAGE_KEY" in edit_script
+    assert "localStorage.setItem(STAGE_KEY" not in edit_script
+
+
+def test_edit_module_enforces_the_field_rules(edit_script: str) -> None:
+    """Client validation is a convenience; submit() stays the authority (U19/U20)."""
+    for helper in ("normaliseValue", "validateStaged", "stagedMaterials",
+                   "stagingSummary", "groupStaged", "hasLineBreak"):
+        assert f"export function {helper}" in edit_script, helper
+    assert "const MAX_CHARS = 1000" in edit_script
+    assert "text.trim() === '' ? null : text" in edit_script   # clearing stages null
+    assert "at most ${MAX_CHARS} characters" in edit_script
+    assert "must start with http:// or https://" in edit_script
+    # line breaks are kept and flagged in review, never blocked
+    assert "hasLineBreak(entry.after)" in edit_script
+    assert "upstream acceptance is unknown" in edit_script
+
+
+def test_a_staged_batch_body_is_accepted_by_the_route(client: TestClient) -> None:
+    """The body groupStaged() builds must be exactly what the batch route takes."""
+    uid = client.get("/v1/materials", params={"limit": 1}).json()["results"][0]["material_uid"]
+    response = client.post("/v1/change-requests/batch", json={
+        "target_system": "joineryflow",
+        "reason": "from the grid",
+        "materials": [
+            {"material_uid": uid, "diffs": [
+                {"path": "product_url", "after": "https://example.test/from-grid"},
+                {"path": "name", "after": "Line one\nLine two"},
+            ]},
+        ],
+    }, headers={"X-Actor": "alice"})
+    assert response.status_code == 200, response.text
+    report = response.json()
+    # Other cases in this module may already hold an open request on this row,
+    # so assert the 200 + per-item shape rather than demanding submitted == 1.
+    assert report["submitted"] + report["failed"] == 1, report
+    result = report["results"][0]
+    assert result["material_uid"] == uid
+    assert result["ok"] in (True, False)
+    if result["ok"]:
+        detail = client.get(f"/v1/change-requests/{result['id']}").json()
+        assert [d["path"] for d in detail["diffs"]] == ["product_url", "name"]
+        assert detail["diffs"][1]["after"] == "Line one\nLine two"
+        assert detail["reason"] == "from the grid"
+    else:
+        assert result["code"] == "open_request"

@@ -108,7 +108,7 @@ function writeViews(views) {
 function token() { return document.getElementById('token').value.trim(); }
 function actor() { return document.getElementById('actor').value.trim(); }
 
-async function api(path, options = {}) {
+export async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   const t = token();
   if (t) headers.Authorization = `Bearer ${t}`;
@@ -321,6 +321,8 @@ function renderPage(payload) {
   document.getElementById('prev').disabled = state.page === 0;
   document.getElementById('next').disabled = !payload.next_cursor;
   document.getElementById('footer-status').textContent = `ready in ${payload.took_ms || 0} ms`;
+  // The edit module listens and repaints staged cells; app.js does not import it.
+  document.dispatchEvent(new CustomEvent('ml:rows-rendered', { detail: payload }));
 }
 
 async function runSearch() {
