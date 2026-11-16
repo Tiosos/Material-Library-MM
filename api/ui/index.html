@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Material Library · Edit</title>
+<link rel="stylesheet" href="/ui/assets/styles.css">
+</head>
+<body>
+<header>
+  <div class="hrow">
+    <div class="brand"><span class="dot"></span>Material Library <small>edit</small></div>
+    <nav class="tabs" aria-label="Sections">
+      <button type="button" class="tab active" data-tab="edit">Edit</button>
+      <button type="button" class="tab" data-tab="review">Review</button>
+    </nav>
+    <div class="identity">
+      <label>actor <input id="actor" type="text" autocomplete="off" placeholder="server default"></label>
+      <span id="actor-note" class="hint">server default until typed</span>
+      <label>token <input id="token" type="password" autocomplete="off" placeholder="optional"></label>
+      <span id="auth-note" class="hint">checking...</span>
+    </div>
+  </div>
+</header>
+
+<main>
+  <aside class="sidebar" aria-label="Facets">
+    <div class="side-block">
+      <h3>Category</h3>
+      <div id="facet-category" class="facets"></div>
+    </div>
+    <div class="side-block">
+      <h3>Brand</h3>
+      <div id="facet-brand" class="facets"></div>
+    </div>
+    <div class="side-block">
+      <h3>Supplier</h3>
+      <div id="facet-supplier" class="facets"></div>
+    </div>
+  </aside>
+
+  <section class="content">
+    <div class="querybar">
+      <div class="searchwrap">
+        <span class="icon" aria-hidden="true">⌕</span>
+        <input id="q" type="search" maxlength="200" placeholder="Search materials" autocomplete="off">
+      </div>
+      <label>sort <select id="sort">
+        <option value="">relevance</option>
+        <option value="name">name</option>
+        <option value="unit_cost">unit_cost</option>
+        <option value="updated_at">updated_at</option>
+        <option value="source_id">source_id</option>
+      </select></label>
+      <label>order <select id="order">
+        <option value="asc">asc</option>
+        <option value="desc">desc</option>
+      </select></label>
+      <button type="button" id="filters-toggle" class="btn">Filters</button>
+      <button type="button" id="views-toggle" class="btn">Views</button>
+      <button type="button" id="search" class="btn primary">Search</button>
+    </div>
+
+    <div id="filters-panel" class="panel" hidden>
+      <div class="panel-head">
+        <h3>Structured filters</h3>
+        <button type="button" id="add-filter" class="btn small">+ condition</button>
+      </div>
+      <div id="filter-rows"></div>
+      <p class="hint">Unknown fields are dropped with a warning instead of being sent.</p>
+    </div>
+
+    <div id="views-panel" class="panel" hidden>
+      <div class="panel-head">
+        <h3>Saved views</h3>
+        <button type="button" id="save-view" class="btn small">Save current</button>
+      </div>
+      <div id="view-list"></div>
+    </div>
+
+    <div id="warning" class="warning" role="status" hidden></div>
+
+    <div class="resultbar">
+      <span id="total" class="total">loading...</span>
+      <span id="level" class="pill"></span>
+      <span id="status-pill" class="pill"></span>
+    </div>
+
+    <div class="tablewrap">
+      <table id="results">
+        <thead>
+          <tr>
+            <th>name</th><th>category</th><th>brand</th><th>supplier</th>
+            <th>unit</th><th class="num">unit_cost</th><th>updated_at</th>
+            <th class="num">variants</th>
+          </tr>
+        </thead>
+        <tbody id="rows"><tr><td colspan="8" class="empty">Loading...</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="pager">
+      <button type="button" id="prev" class="btn">Previous</button>
+      <span id="page-label" class="hint"></span>
+      <button type="button" id="next" class="btn">Next</button>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <span id="footer-status">Ready</span>
+  <span class="hint">Read-only view. Editing lands in step 5.</span>
+</footer>
+
+<script type="module" src="/ui/assets/app.js"></script>
+</body>
+</html>

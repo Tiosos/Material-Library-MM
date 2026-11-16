@@ -14,13 +14,15 @@ import io
 import json
 import logging
 import time
+from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Any, Iterator
 
 import psycopg
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel, Field
 
@@ -1282,3 +1284,21 @@ def batch_decide_change_requests(
         "failed": len(outcomes) - decided,
         "results": outcomes,
     }
+
+
+# ---------------------------------------------------------------------------
+# Query UI (docs/ui-bulk-edit.md section 10, steps 4-6)
+# ---------------------------------------------------------------------------
+# Plain ES modules and one stylesheet, no build step (U11). The shell is served
+# without a token: the page itself reveals nothing, and every fetch sends the
+# bearer token the person typed. Mounted last so no API path can be swallowed.
+UI_DIR = Path(__file__).resolve().parent / "ui"
+
+
+@app.get("/ui", include_in_schema=False)
+def ui_shell() -> FileResponse:
+    """The browser shell; a 200 here says nothing about authentication."""
+    return FileResponse(UI_DIR / "index.html", media_type="text/html")
+
+
+app.mount("/ui/assets", StaticFiles(directory=UI_DIR), name="ui-assets")

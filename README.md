@@ -26,7 +26,8 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 ├── api/                        read-only HTTP API (FastAPI, T1) plus five review routes (T3)
 ├── eval/                       golden search cases + deterministic evaluation fixture
 ├── scripts/eval_search.py      search evaluation runner (MRR@10, hit@1, zero-result, level accuracy)
-├── tests/                      HTTP smoke tests, ETL and write-back integration tests (pytest)
+├── tests/                      HTTP smoke tests, ETL, write-back and UI shell tests (pytest)
+├── api/ui/                     no-build browser UI: shell, one stylesheet, vanilla ES modules
 ├── mapping/
 │   └── joineryflow.yaml        executable v2 rules: 9 catalog tables → UMR (ETL step 1)
 ├── fixtures/
@@ -43,6 +44,7 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 ├── docs/etl-joineryflow-progress.md ETL implementation log and verification
 ├── docs/t3-writeback.md             T3 write-back design (final)
 ├── docs/t3-progress.md              T3 implementation log and verification
+├── docs/ui-bulk-edit.md             manual query and bulk edit UI design (steps 1-7)
 └── proto/                       ★ runnable prototype (zero dependencies, to validate the search feel)
     ├── build_db.py             generate the sample library (100 rows, real brands and field structure)
     ├── search.py               tiered graceful-degradation search implementation
@@ -170,7 +172,7 @@ The four ETL integration cases in `tests/test_etl.py` skip unless `ML_ETL_DSN` p
 database that has imported the joineryflow snapshot; the twenty-nine write-back integration cases in
 `tests/test_writeback.py` skip unless `ML_WRITEBACK_DSN` is set. The dedicated `etl` and
 `writeback` CI jobs supply those DSNs. On the CI `api` recipe the suite reports
-`192 passed, 33 skipped`.
+`201 passed, 33 skipped`.
 
 Design and decisions: [`docs/api-v1.md`](docs/api-v1.md) (endpoints, SQL additions, instrumentation, evaluation thresholds). Implementation log with verification for every step: [`docs/t1-progress.md`](docs/t1-progress.md).
 
@@ -360,12 +362,25 @@ queue and the request detail, and it stays readable after the request row is pru
 Measured on a fresh PostgreSQL 16 database: `scripts/writeback_contract.sql` green with zero
 residual rows, `tests/test_writeback.py` 38/38 with `ML_WRITEBACK_DSN`,
 `tests/test_writeback_api.py` 19/19 in the `api` job, and the full suite
-`192 passed, 33 skipped` on the CI `api` recipe. The dedicated `writeback` CI job rebuilds this
+`201 passed, 33 skipped` on the CI `api` recipe. The dedicated `writeback` CI job rebuilds this
 from scratch on every PR with its own `ml_writeback` database; no `ML_JF_*` credential is set
 there.
 
 Design (final): [`docs/t3-writeback.md`](docs/t3-writeback.md). Verification log and decisions:
 [`docs/t3-progress.md`](docs/t3-progress.md).
+
+---
+
+## Manual query and bulk edit UI
+
+`GET /ui` serves a no-build browser screen backed by the same API: search, facets, structured
+filters, saved views and a read-only result table with paging. It is English-only because
+`check_english.py` scans `.html`, `.css` and `.js`. Token and actor are kept in `localStorage` and
+sent as headers; the shell itself loads without authentication. Every edit will become a
+`material_change_request`, never a direct `UPDATE material`, so the allowlist, base fingerprint,
+watermark and audit trail still apply. The grid editors, staging, batch submit and the review tab
+land in steps 5 and 6; see [`docs/ui-bulk-edit.md`](docs/ui-bulk-edit.md) for the 23 decisions and
+the seven-step delivery plan.
 
 ---
 
