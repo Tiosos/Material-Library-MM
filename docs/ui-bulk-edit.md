@@ -608,7 +608,7 @@ decision to test it is a small step, not a rewrite.
 | 3 | `POST /v1/change-requests/batch` with the reason rule, and `POST /v1/change-requests/decide-batch`, both with per-item results, the 100 / 25 caps and their tests | Partial success returns 200 with per-item codes; `reason_required`, `reason_too_long` and `batch_too_large` are enforced server-side before any write; no new SQL beyond step 1 |
 | 4 | `api/ui/` shell: layout, token and actor, query panel with facets and filter rows, saved views, read-only result table and paging | A search and filter round trip works against a real database (9 HTTP checks in `tests/test_ui.py`) |
 | 5 | The grid: paging, inline editors including the two textareas, staging, the review sheet with the reason rule, submit and its result states | `tests/test_ui.py` 12/12; the pure staging helpers and the batch body are asserted in Python, and a staged body round-trips through the batch route |
-| 6 | The Review tab: queue, detail with the three badges and the decision record, single and bulk approve and reject, actor switching | Acceptance criteria 8 to 10 and 14 to 17 pass |
+| 6 | The Review tab: queue, detail with the three badges and the decision record, single and bulk approve and reject, actor switching | `tests/test_ui.py` 16/16; queue and detail round-trip through the T3 routes, badge and selection helpers are pure and asserted |
 | 7 | Docs: README section, this file's status, `docs/t3-progress.md` note, and a UI section in the design index if one exists | `check_english.py` green, links intact, PR opened |
 
 ## 16. Open questions
