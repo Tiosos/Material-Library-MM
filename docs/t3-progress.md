@@ -507,6 +507,14 @@ is a supplier-and-time fact. This changes an already-merged surface, so the cont
 `forbidden_path` for that path and the field-coverage section writes four fields instead of five.
 Counts are 38/38 write-back tests and `187 passed, 33 skipped`.
 
+The manual edit UI (`docs/ui-bulk-edit.md`) was then built in seven merged steps (PRs #22-#27):
+strict submit checks and the event-backed decision reason, the query filters and writeback schema
+endpoint, the two batch routes, the no-build query shell, the staging grid, and the Review tab. The
+UI adds no T3 state transition; it calls the same SQL functions and HTTP routes. Its browser pass
+confirmed the edit-to-submit flow end to end against a real database. Final counts are 38/38
+write-back tests, 19/19 HTTP write-back tests, 16/16 UI tests and `208 passed, 33 skipped` on the
+api recipe. Lead time is no longer writable (U22) but the column and its ETL import edge stay.
+
 Still open for the project as a whole, and deliberately out of scope for T3: whether joineryflow
 honours `Idempotency-Key` (until confirmed, no retry depends on it), the exact form of the
 workspace guard, whether the upstream accepts a partial PATCH body, the exact `GET` response shape
