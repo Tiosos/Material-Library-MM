@@ -50,7 +50,6 @@ EXPORT_COLUMNS = [
     "currency",
     "unit_cost",
     "cost_basis",
-    "lead_time_days",
     "image_url",
     "product_url",
     "attributes",
@@ -275,6 +274,11 @@ def _search_payload(
     limit: int,
     offset: int,
     collapse: bool = True,
+    status: str | None = None,
+    unit_cost_min: float | None = None,
+    unit_cost_max: float | None = None,
+    sort: str | None = None,
+    order: str = "asc",
 ) -> dict[str, Any]:
     """One call to material_search_page(): the payload shape lives in SQL, not here."""
     row = db.query_one(
@@ -289,7 +293,12 @@ def _search_payload(
                    p_limit => %(limit)s,
                    p_offset => %(offset)s,
                    p_measures => %(measures)s::jsonb,
-                   p_collapse => %(collapse)s) AS payload
+                   p_collapse => %(collapse)s,
+                   p_status => %(status)s,
+                   p_unit_cost_min => %(unit_cost_min)s::numeric,
+                   p_unit_cost_max => %(unit_cost_max)s::numeric,
+                   p_sort => %(sort)s,
+                   p_order => %(order)s) AS payload
         """,
         {
             "q": q,
@@ -301,6 +310,11 @@ def _search_payload(
             "limit": limit,
             "offset": offset,
             "collapse": collapse,
+            "status": status,
+            "unit_cost_min": unit_cost_min,
+            "unit_cost_max": unit_cost_max,
+            "sort": sort,
+            "order": order,
         },
     )
     return row["payload"]
@@ -363,6 +377,19 @@ def search_materials(
         pattern="^variants$",
         description="omit to collapse a family to its best hit; `variants` returns one row per material",
     ),
+    status: str | None = Query(
+        default=None,
+        pattern="^(active|archived|superseded|all)$",
+        description="row status; omit for active only, `all` includes merged and archived rows",
+    ),
+    unit_cost_min: float | None = Query(default=None, ge=0, description="inclusive"),
+    unit_cost_max: float | None = Query(default=None, ge=0, description="inclusive"),
+    sort: str | None = Query(
+        default=None,
+        pattern="^(name|unit_cost|updated_at|source_id)$",
+        description="column to order by; omit to rank by relevance",
+    ),
+    order: str = Query(default="asc", pattern="^(asc|desc)$"),
     x_actor: str | None = Header(default=None, description="system name, never a person"),
     x_no_log: str | None = Header(default=None, description="1 disables search logging"),
     conn: psycopg.Connection = Depends(db.connection),
@@ -384,6 +411,11 @@ def search_materials(
         limit=limit,
         offset=offset,
         collapse=expand != "variants",
+        status=status,
+        unit_cost_min=unit_cost_min,
+        unit_cost_max=unit_cost_max,
+        sort=sort,
+        order=order,
     )
     took_ms = int((time.perf_counter() - started) * 1000)
 
@@ -797,6 +829,73 @@ def duplicate_ignore(
         },
     )
     return _duplicate_result(report)
+
+
+# ---------------------------------------------------------------------------
+# The editable surface (docs/ui-bulk-edit.md section 6.2)
+# ---------------------------------------------------------------------------
+# One read that tells a client which cells are editable and how to render them,
+# so no client hard-codes the seven fields or the nine attribute allowlists. The
+# editor map lives here, next to the projection, because it is a presentation
+# decision rather than a database fact (U17): a new long-text field is one entry.
+FIELD_EDITORS = {
+    "name": "textarea",
+    "product_type": "text",
+    "unit": "select",
+    "unit_cost": "number",
+    "product_url": "url",
+    "synonyms": "tokens",
+}
+
+# Attribute keys are untyped in the catalog, so only the one known to hold prose
+# is marked; a client still picks the input from the value's own JSON type.
+ATTRIBUTE_EDITORS = {"notes": "textarea"}
+
+
+@app.get(
+    "/v1/writeback/schema",
+    tags=["writeback"],
+    dependencies=[Depends(require_token)],
+)
+def writeback_schema(conn: psycopg.Connection = Depends(db.connection)) -> dict[str, Any]:
+    """Fields, catalogs and the unit domain: the only place a client learns what is editable."""
+    fields = db.query_rows(
+        conn,
+        "SELECT umr_path, material_column, upstream_column "
+        "FROM material_writeback_field ORDER BY umr_path",
+    )
+    catalogs = db.query_rows(
+        conn,
+        "SELECT table_name, category_code, endpoint, attribute_keys "
+        "FROM material_writeback_catalog ORDER BY table_name",
+    )
+    units = db.query_rows(conn, "SELECT code, name, dimension FROM unit ORDER BY code")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "targets": ["joineryflow"],
+        "fields": [
+            {
+                "path": row["umr_path"],
+                "material_column": row["material_column"],
+                "upstream_column": row["upstream_column"],
+                "editor": FIELD_EDITORS.get(row["umr_path"], "text"),
+            }
+            for row in fields
+        ],
+        "catalogs": [
+            {
+                "table_name": row["table_name"],
+                "category_code": row["category_code"],
+                "endpoint": row["endpoint"],
+                "attributes": [
+                    {"key": key, "editor": ATTRIBUTE_EDITORS.get(key, "text")}
+                    for key in row["attribute_keys"]
+                ],
+            }
+            for row in catalogs
+        ],
+        "units": units,
+    }
 
 
 # ---------------------------------------------------------------------------

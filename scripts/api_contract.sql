@@ -21,6 +21,11 @@ DECLARE
     v_export   bigint;
     v_groups   bigint;
     v_raised   boolean;
+    v_page     jsonb;
+    v_prices   numeric[];
+    v_prev     numeric;
+    v_piece    numeric;
+    v_nulls    integer;
 BEGIN
     SELECT count(*) INTO v_active
       FROM material
@@ -96,6 +101,96 @@ BEGIN
     IF v_export <> (SELECT count(*) FROM material) THEN
         RAISE EXCEPTION 'export(include_archived) returned % documents', v_export;
     END IF;
+
+    -- 7. the query layer: status, numeric bounds, monotonic sort, no lead time
+    SELECT material_search_page(p_limit => 1, p_status => 'all',
+                                p_collapse => false) INTO v_page;
+    IF (v_page->>'total')::bigint <= v_active THEN
+        RAISE EXCEPTION 'status=all rows % are not more than active rows %',
+            v_page->>'total', v_active;
+    END IF;
+    SELECT (SELECT count(*) FROM material WHERE status = 'archived') INTO v_rows;
+    SELECT material_search_page(p_limit => 1, p_status => 'archived',
+                                p_collapse => false) INTO v_page;
+    IF v_page->>'status' <> 'archived' OR (v_page->>'total')::bigint <> v_rows THEN
+        RAISE EXCEPTION 'status=archived returned % rows, SQL has %',
+            v_page->>'total', v_rows;
+    END IF;
+
+    -- a bound excludes NULL prices and everything below it
+    SELECT (SELECT count(*) FROM material
+             WHERE status NOT IN ('archived', 'superseded') AND unit_cost >= 100) INTO v_rows;
+    SELECT material_search_page(p_limit => 500, p_collapse => false,
+                                p_unit_cost_min => 100) INTO v_page;
+    IF (v_page->>'total')::bigint <> v_rows THEN
+        RAISE EXCEPTION 'unit_cost_min=100 total % <> SQL count %',
+            v_page->>'total', v_rows;
+    END IF;
+    SELECT min((e->>'unit_cost')::numeric) INTO v_prev
+      FROM jsonb_array_elements(v_page->'results') e;
+    IF v_prev IS NULL OR v_prev < 100 THEN
+        RAISE EXCEPTION 'a row below the cost bound leaked through: %', v_prev;
+    END IF;
+
+    -- ascending sort is monotonic and NULLs come last in both directions
+    SELECT material_search_page(p_limit => 500, p_collapse => false,
+                                p_sort => 'unit_cost') INTO v_page;
+    SELECT array_agg((e->>'unit_cost')::numeric) INTO v_prices
+      FROM jsonb_array_elements(v_page->'results') e;
+    v_prev := -1; v_nulls := 0;
+    FOREACH v_piece IN ARRAY v_prices LOOP
+        IF v_piece IS NULL THEN
+            v_nulls := v_nulls + 1;
+        ELSE
+            IF v_nulls > 0 THEN
+                RAISE EXCEPTION 'a priced row followed a NULL in asc order';
+            END IF;
+            IF v_piece < v_prev THEN
+                RAISE EXCEPTION 'unit_cost asc is not monotonic: % after %', v_piece, v_prev;
+            END IF;
+            v_prev := v_piece;
+        END IF;
+    END LOOP;
+    IF v_nulls = 0 THEN
+        RAISE EXCEPTION 'the snapshot has no unpriced row, NULLS LAST is untested';
+    END IF;
+    SELECT material_search_page(p_limit => 500, p_collapse => false,
+                                p_sort => 'unit_cost', p_order => 'desc') INTO v_page;
+    SELECT array_agg((e->>'unit_cost')::numeric) INTO v_prices
+      FROM jsonb_array_elements(v_page->'results') e;
+    IF (SELECT bool_or(x IS NOT NULL) FROM
+          (SELECT unnest(v_prices[(SELECT count(*) FROM unnest(v_prices) p WHERE p IS NOT NULL) + 1:]) x) t) THEN
+        RAISE EXCEPTION 'a priced row followed a NULL in desc order';
+    END IF;
+
+    -- the result row gained updated_at but lead time is not a material attribute
+    SELECT v_page->'results'->0 INTO v_doc;
+    IF NOT (v_doc ? 'updated_at') THEN
+        RAISE EXCEPTION 'the result row has no updated_at: %', v_doc;
+    END IF;
+    IF v_doc ? 'lead_time_days' THEN
+        RAISE EXCEPTION 'lead_time_days leaked back into the result row: %', v_doc;
+    END IF;
+
+    -- unknown enum values and inverted bounds are client errors, not a quiet query
+    v_raised := false;
+    BEGIN
+        PERFORM material_search_page(p_sort => 'price');
+    EXCEPTION WHEN invalid_parameter_value THEN v_raised := true;
+    END;
+    IF NOT v_raised THEN RAISE EXCEPTION 'an unknown sort was accepted'; END IF;
+    v_raised := false;
+    BEGIN
+        PERFORM material_search_page(p_status => 'deleted');
+    EXCEPTION WHEN invalid_parameter_value THEN v_raised := true;
+    END;
+    IF NOT v_raised THEN RAISE EXCEPTION 'an unknown status was accepted'; END IF;
+    v_raised := false;
+    BEGIN
+        PERFORM material_search_page(p_unit_cost_min => 100, p_unit_cost_max => 10);
+    EXCEPTION WHEN invalid_parameter_value THEN v_raised := true;
+    END;
+    IF NOT v_raised THEN RAISE EXCEPTION 'an inverted cost range was accepted'; END IF;
 
     RAISE NOTICE 'api contract OK: % active materials, browse total %, levels browsable',
         v_active, v_total;

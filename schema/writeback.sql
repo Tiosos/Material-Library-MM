@@ -110,7 +110,6 @@ INSERT INTO material_writeback_field (umr_path, material_column, upstream_column
     ('product_type',   'product_type',   'product_type'),
     ('unit',           'unit',           'um'),
     ('unit_cost',      'unit_cost',      'unit_cost'),
-    ('lead_time_days', 'lead_time_days', 'default_lead_time_days'),
     ('product_url',    'product_url',    'product_website'),
     ('synonyms',       'synonyms',       'synonyms')
 ON CONFLICT (umr_path) DO UPDATE
@@ -210,9 +209,6 @@ BEGIN
                     END;
             ELSIF v_col = 'unit_cost' THEN
                 v_sets := v_sets || format('unit_cost = %s::numeric',
-                                           quote_nullable(v_after #>> '{}'));
-            ELSIF v_col = 'lead_time_days' THEN
-                v_sets := v_sets || format('lead_time_days = %s::integer',
                                            quote_nullable(v_after #>> '{}'));
             ELSE
                 v_sets := v_sets || format('%I = %L', v_col, v_after #>> '{}');
@@ -412,13 +408,6 @@ BEGIN
                                             OR (v_after #>> '{}')::numeric < 0
                                             OR (v_after #>> '{}')::numeric >= 10000000000) THEN
                     RAISE EXCEPTION 'unit_cost must be between 0 and 10^10 or null'
-                        USING ERRCODE = '22023';
-                END IF;
-            ELSIF v_path = 'lead_time_days' THEN
-                IF v_after IS NOT NULL AND (jsonb_typeof(v_after) <> 'number'
-                                            OR (v_after #>> '{}') !~ '^[0-9]+$'
-                                            OR (v_after #>> '{}')::numeric > 2147483647) THEN
-                    RAISE EXCEPTION 'lead_time_days must be a non-negative integer or null'
                         USING ERRCODE = '22023';
                 END IF;
             ELSIF v_path = 'synonyms' THEN

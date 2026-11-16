@@ -167,10 +167,10 @@ python -m pytest -q tests                                        # HTTP contract
 ```
 
 The four ETL integration cases in `tests/test_etl.py` skip unless `ML_ETL_DSN` points at a fresh
-database that has imported the joineryflow snapshot; the twenty-eight write-back integration cases in
+database that has imported the joineryflow snapshot; the twenty-nine write-back integration cases in
 `tests/test_writeback.py` skip unless `ML_WRITEBACK_DSN` is set. The dedicated `etl` and
 `writeback` CI jobs supply those DSNs. On the CI `api` recipe the suite reports
-`182 passed, 32 skipped`.
+`187 passed, 33 skipped`.
 
 Design and decisions: [`docs/api-v1.md`](docs/api-v1.md) (endpoints, SQL additions, instrumentation, evaluation thresholds). Implementation log with verification for every step: [`docs/t1-progress.md`](docs/t1-progress.md).
 
@@ -343,10 +343,12 @@ writes the diffed values and advances the watermark; a confirmed miss records
 `verified_not_applied` and becomes retryable; a column the adapter cannot find is `unreachable`
 and changes nothing, so a wrong field name can never downgrade a real write.
 
-Every allowed path is now covered by the contract, not just `unit_cost`: the seven fields (including
+Every allowed path is now covered by the contract, not just `unit_cost`: the six fields (including
 `synonyms` as a `text[]`), the `attributes.<key>` namespace, the four places that derive an upstream
 column name asserted against each other, and the tombstone rule - a confirmed write on a merged-away
-row lands on the tombstone, never on the survivor.
+row lands on the tombstone, never on the survivor. `lead_time_days` was removed from the writable
+set: delivery time belongs to a supplier at a point in time, not to a material, so the column and its
+ETL import edge stay but no UI, export or write-back path exposes it as a material attribute.
 
 Edits are validated before they become requests. A `name`, `product_type` or `unit` that trims to
 nothing is refused - newlines count as blank, and `product_url` is exempt because "no page for this
@@ -356,9 +358,9 @@ records it in the audit event, `ml_change_request_decision_reason()` reads it ba
 queue and the request detail, and it stays readable after the request row is pruned.
 
 Measured on a fresh PostgreSQL 16 database: `scripts/writeback_contract.sql` green with zero
-residual rows, `tests/test_writeback.py` 37/37 with `ML_WRITEBACK_DSN`,
+residual rows, `tests/test_writeback.py` 38/38 with `ML_WRITEBACK_DSN`,
 `tests/test_writeback_api.py` 14/14 in the `api` job, and the full suite
-`182 passed, 32 skipped` on the CI `api` recipe. The dedicated `writeback` CI job rebuilds this
+`187 passed, 33 skipped` on the CI `api` recipe. The dedicated `writeback` CI job rebuilds this
 from scratch on every PR with its own `ml_writeback` database; no `ML_JF_*` credential is set
 there.
 

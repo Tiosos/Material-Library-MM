@@ -364,90 +364,166 @@ $$;
 -- `variant_count` (family size). `total` counts groups in that mode, so paging is never short.
 -- Pass false for one row per material record (what `expand=variants` does at the edge).
 DROP FUNCTION IF EXISTS material_search_page(text, text, text, text, jsonb, integer, integer);
+DROP FUNCTION IF EXISTS material_search_page(text, text, text, text, jsonb, integer, integer, jsonb, boolean);
+DROP FUNCTION IF EXISTS material_search_page(text, text, text, text, jsonb, integer, integer, jsonb, boolean, text, numeric, numeric, integer, integer, text, text);
 CREATE OR REPLACE FUNCTION material_search_page(
-    p_q        text    DEFAULT NULL,
-    p_category text    DEFAULT NULL,
-    p_brand    text    DEFAULT NULL,
-    p_supplier text    DEFAULT NULL,
-    p_attrs    jsonb   DEFAULT '{}'::jsonb,
-    p_limit    integer DEFAULT 20,
-    p_offset   integer DEFAULT 0,
-    p_measures jsonb   DEFAULT '{}'::jsonb,
-    p_collapse boolean DEFAULT true
+    p_q             text    DEFAULT NULL,
+    p_category      text    DEFAULT NULL,
+    p_brand         text    DEFAULT NULL,
+    p_supplier      text    DEFAULT NULL,
+    p_attrs         jsonb   DEFAULT '{}'::jsonb,
+    p_limit         integer DEFAULT 20,
+    p_offset        integer DEFAULT 0,
+    p_measures      jsonb   DEFAULT '{}'::jsonb,
+    p_collapse      boolean DEFAULT true,
+    p_status        text    DEFAULT NULL,
+    p_unit_cost_min numeric DEFAULT NULL,
+    p_unit_cost_max numeric DEFAULT NULL,
+    p_sort          text    DEFAULT NULL,
+    p_order         text    DEFAULT 'asc'
 ) RETURNS jsonb
-LANGUAGE sql STABLE AS $$
-    WITH hits AS (
-        SELECT * FROM material_search(p_q, p_category, p_brand, p_supplier, p_attrs, false, 5000, 0, p_measures)
-    ),
-    sized AS (
-        SELECT coalesce(m.family_id, h.material_uid) AS group_key,
-               h.material_uid, h.score, h.level, h.total
-          FROM hits h
-          JOIN material m ON m.material_uid = h.material_uid
-    ),
-    sizes AS (
-        SELECT s.group_key,
-               count(*) AS member_count,
-               array_agg(s.material_uid ORDER BY s.score DESC, s.material_uid) AS members
-          FROM sized s
-         GROUP BY s.group_key
-    ),
-    collapsed AS (
-        SELECT DISTINCT ON (s.group_key)
-               s.material_uid, s.score, s.level, z.member_count, z.members
-          FROM sized s
-          JOIN sizes z USING (group_key)
-         ORDER BY s.group_key, s.score DESC, s.material_uid
-    ),
-    flat AS (
-        SELECT h.material_uid, h.score, h.level, 1 AS member_count, ARRAY[h.material_uid] AS members
-          FROM hits h
-    ),
-    visible AS (
-        SELECT * FROM collapsed WHERE coalesce(p_collapse, true)
-        UNION ALL
-        SELECT * FROM flat WHERE NOT coalesce(p_collapse, true)
-    ),
-    page AS (
-        SELECT * FROM visible
-         ORDER BY score DESC, material_uid
-         LIMIT greatest(p_limit, 1)
-        OFFSET greatest(p_offset, 0)
-    ),
-    totals AS (
-        SELECT CASE WHEN coalesce(p_collapse, true)
-                    THEN (SELECT count(*) FROM collapsed)
-                    ELSE coalesce((SELECT max(total) FROM hits), 0)
-               END AS n
-    )
-    SELECT jsonb_build_object(
-        'q', p_q,
-        'level', coalesce((SELECT level FROM page LIMIT 1),
-                          (SELECT level FROM visible LIMIT 1),
-                          'none'),
-        'total', (SELECT n FROM totals),
-        'offset', greatest(p_offset, 0),
-        'limit', greatest(p_limit, 1),
-        'collapsed', coalesce(p_collapse, true),
-        'suggestion', CASE WHEN (SELECT n FROM totals) = 0
-                           THEN (SELECT suggestion FROM material_suggest(p_q, 1))
-                           ELSE NULL END,
-        'results', coalesce((
-            SELECT jsonb_agg(jsonb_build_object(
-                       'material_uid', v.material_uid,
-                       'name', v.name,
-                       'category', v.category_code,
-                       'brand', v.brand,
-                       'supplier', v.supplier,
-                       'family_id', v.family_id,
-                       'family_name', v.family_name,
-                       'variant_values', v.variant_values,
-                       'unit', v.unit,
-                       'unit_cost', v.unit_cost,
-                       'variant_count', p.member_count,
-                       'variants', CASE WHEN coalesce(p_collapse, true)
-                                        THEN to_jsonb(array_remove(p.members, p.material_uid))
-                                        ELSE '[]'::jsonb END,
-                       'score', round(p.score::numeric, 4)))
-              FROM page p JOIN v_material v USING (material_uid)), '[]'::jsonb));
-$$;
+LANGUAGE plpgsql STABLE AS $$
+DECLARE
+    v_status text := lower(coalesce(nullif(btrim(coalesce(p_status, '')), ''), 'active'));
+    v_sort   text := nullif(lower(btrim(coalesce(p_sort, ''))), '');
+    v_order  text := lower(coalesce(nullif(btrim(coalesce(p_order, '')), ''), 'asc'));
+BEGIN
+    -- The rules live here rather than at the HTTP edge (D4): an unknown status or
+    -- sort is a client error, not a silently different query. Without this an
+    -- unknown sort would fall through every CASE and order by material_uid.
+    IF v_status NOT IN ('active', 'archived', 'superseded', 'all') THEN
+        RAISE EXCEPTION 'status must be active, archived, superseded or all (got %)', p_status
+            USING ERRCODE = '22023';
+    END IF;
+    IF v_sort IS NOT NULL
+       AND v_sort NOT IN ('name', 'unit_cost', 'updated_at', 'source_id') THEN
+        RAISE EXCEPTION 'sort must be name, unit_cost, updated_at or source_id (got %)',
+                        p_sort
+            USING ERRCODE = '22023';
+    END IF;
+    IF v_order NOT IN ('asc', 'desc') THEN
+        RAISE EXCEPTION 'order must be asc or desc (got %)', p_order USING ERRCODE = '22023';
+    END IF;
+    IF p_unit_cost_min IS NOT NULL AND p_unit_cost_max IS NOT NULL
+       AND p_unit_cost_min > p_unit_cost_max THEN
+        RAISE EXCEPTION 'unit_cost_min must not exceed unit_cost_max' USING ERRCODE = '22023';
+    END IF;
+
+    RETURN (
+        WITH hits AS (
+            -- A non-active status has to reach material_search, which hides archived
+            -- and superseded rows by default; the WHERE below then narrows it to one.
+            SELECT * FROM material_search(
+                       p_q, p_category, p_brand, p_supplier, p_attrs,
+                       v_status IN ('archived', 'superseded', 'all'),
+                       5000, 0, p_measures)
+        ),
+        sized AS (
+            -- Filtering happens on members, before a family collapses, so the row
+            -- that represents a group is always one that passed the filters.
+            SELECT coalesce(m.family_id, h.material_uid) AS group_key,
+                   h.material_uid, h.score, h.level,
+                   m.name AS mat_name, m.unit_cost, m.updated_at, m.source_id
+              FROM hits h
+              JOIN material m ON m.material_uid = h.material_uid
+             WHERE (v_status = 'all' OR m.status = v_status)
+               -- a NULL price is unknown, not cheap, so a bound excludes it
+               AND (p_unit_cost_min IS NULL OR m.unit_cost >= p_unit_cost_min)
+               AND (p_unit_cost_max IS NULL OR m.unit_cost <= p_unit_cost_max)
+        ),
+        sizes AS (
+            SELECT s.group_key,
+                   count(*) AS member_count,
+                   array_agg(s.material_uid ORDER BY s.score DESC, s.material_uid) AS members
+              FROM sized s
+             GROUP BY s.group_key
+        ),
+        collapsed AS (
+            SELECT DISTINCT ON (s.group_key)
+                   s.material_uid, s.score, s.level, z.member_count, z.members,
+                   s.mat_name, s.unit_cost, s.updated_at, s.source_id
+              FROM sized s
+              JOIN sizes z USING (group_key)
+             ORDER BY s.group_key, s.score DESC, s.material_uid
+        ),
+        flat AS (
+            SELECT s.material_uid, s.score, s.level, 1 AS member_count,
+                   ARRAY[s.material_uid] AS members,
+                   s.mat_name, s.unit_cost, s.updated_at, s.source_id
+              FROM sized s
+        ),
+        visible AS (
+            SELECT * FROM collapsed WHERE coalesce(p_collapse, true)
+            UNION ALL
+            SELECT * FROM flat WHERE NOT coalesce(p_collapse, true)
+        ),
+        ranked AS (
+            -- One CASE per (field, direction): exactly one is non-NULL for a given
+            -- request, so it alone decides the order. NULLS LAST keeps rows with no
+            -- value at the bottom in both directions, and material_uid is the stable
+            -- tiebreak that makes offset paging repeatable. The row number is kept
+            -- because a later JOIN to v_material is free to reorder the page, and
+            -- jsonb_agg() only preserves the order it is given explicitly.
+            SELECT v.*, row_number() OVER (
+                     ORDER BY
+                       CASE WHEN v_sort IS NULL THEN score END DESC,
+                       CASE WHEN v_sort = 'name' AND v_order = 'asc' THEN mat_name END ASC NULLS LAST,
+                       CASE WHEN v_sort = 'name' AND v_order = 'desc' THEN mat_name END DESC NULLS LAST,
+                       CASE WHEN v_sort = 'unit_cost' AND v_order = 'asc' THEN unit_cost END ASC NULLS LAST,
+                       CASE WHEN v_sort = 'unit_cost' AND v_order = 'desc' THEN unit_cost END DESC NULLS LAST,
+                       CASE WHEN v_sort = 'updated_at' AND v_order = 'asc' THEN updated_at END ASC NULLS LAST,
+                       CASE WHEN v_sort = 'updated_at' AND v_order = 'desc' THEN updated_at END DESC NULLS LAST,
+                       CASE WHEN v_sort = 'source_id' AND v_order = 'asc' THEN source_id END ASC NULLS LAST,
+                       CASE WHEN v_sort = 'source_id' AND v_order = 'desc' THEN source_id END DESC NULLS LAST,
+                       material_uid
+                   ) AS ord
+              FROM visible v
+        ),
+        page AS (
+            SELECT * FROM ranked
+             WHERE ord > greatest(p_offset, 0)
+               AND ord <= greatest(p_offset, 0) + greatest(p_limit, 1)
+        ),
+        totals AS (
+            SELECT CASE WHEN coalesce(p_collapse, true)
+                        THEN (SELECT count(*) FROM collapsed)
+                        ELSE (SELECT count(*) FROM sized)
+                   END AS n
+        )
+        SELECT jsonb_build_object(
+            'q', p_q,
+            'level', coalesce((SELECT level FROM page ORDER BY ord LIMIT 1),
+                              (SELECT level FROM visible LIMIT 1),
+                              'none'),
+            'total', (SELECT n FROM totals),
+            'offset', greatest(p_offset, 0),
+            'limit', greatest(p_limit, 1),
+            'collapsed', coalesce(p_collapse, true),
+            'status', v_status,
+            'sort', v_sort,
+            'order', CASE WHEN v_sort IS NULL THEN NULL ELSE v_order END,
+            'suggestion', CASE WHEN (SELECT n FROM totals) = 0
+                               THEN (SELECT suggestion FROM material_suggest(p_q, 1))
+                               ELSE NULL END,
+            'results', coalesce((
+                SELECT jsonb_agg(jsonb_build_object(
+                           'material_uid', v.material_uid,
+                           'name', v.name,
+                           'category', v.category_code,
+                           'brand', v.brand,
+                           'supplier', v.supplier,
+                           'family_id', v.family_id,
+                           'family_name', v.family_name,
+                           'variant_values', v.variant_values,
+                           'unit', v.unit,
+                           'unit_cost', v.unit_cost,
+                           'updated_at', v.updated_at,
+                           'variant_count', p.member_count,
+                           'variants', CASE WHEN coalesce(p_collapse, true)
+                                            THEN to_jsonb(array_remove(p.members, p.material_uid))
+                                            ELSE '[]'::jsonb END,
+                           'score', round(p.score::numeric, 4)) ORDER BY p.ord)
+                  FROM page p JOIN v_material v USING (material_uid)), '[]'::jsonb)
+        )
+    );
+END $$;

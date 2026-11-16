@@ -343,3 +343,81 @@ def test_token_gate(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None
         assert ok.status_code == 200
     finally:
         config["token"] = ""
+
+
+
+# ---------------------------------------------------------------------------
+# The query layer and the writeback schema (docs/ui-bulk-edit.md section 6)
+# ---------------------------------------------------------------------------
+
+def test_sort_is_monotonic_and_nulls_last(client: TestClient) -> None:
+    body = client.get("/v1/materials",
+                      params={"sort": "unit_cost", "order": "asc", "limit": 100}).json()
+    assert body["sort"] == "unit_cost" and body["order"] == "asc"
+    prices = [row["unit_cost"] for row in body["results"]]
+    priced = [p for p in prices if p is not None]
+    assert priced == sorted(priced)
+    assert all(p is None for p in prices[len(priced):])
+
+    desc = client.get("/v1/materials",
+                      params={"sort": "unit_cost", "order": "desc", "limit": 100}).json()
+    prices = [row["unit_cost"] for row in desc["results"]]
+    priced = [p for p in prices if p is not None]
+    assert priced == sorted(priced, reverse=True)
+    assert all(p is None for p in prices[len(priced):])
+
+
+def test_result_row_has_updated_at_but_no_lead_time(client: TestClient) -> None:
+    row = client.get("/v1/materials", params={"limit": 1}).json()["results"][0]
+    assert "updated_at" in row and row["updated_at"]
+    assert "lead_time_days" not in row
+
+
+def test_status_and_cost_filters(client: TestClient, conn) -> None:
+    all_rows = client.get("/v1/materials",
+                          params={"status": "all", "expand": "variants", "limit": 100}).json()
+    active = client.get("/v1/materials", params={"expand": "variants", "limit": 100}).json()
+    assert all_rows["status"] == "all" and active["status"] == "active"
+    assert all_rows["total"] > active["total"]
+
+    priced = client.get("/v1/materials",
+                        params={"unit_cost_min": 100, "expand": "variants",
+                                "limit": 100}).json()
+    assert all(row["unit_cost"] is not None and row["unit_cost"] >= 100
+               for row in priced["results"])
+
+
+def test_bad_query_parameters_are_400(client: TestClient) -> None:
+    assert_error(client.get("/v1/materials", params={"sort": "price"}), 400, "bad_request")
+    assert_error(client.get("/v1/materials", params={"status": "deleted"}), 400, "bad_request")
+    assert_error(client.get("/v1/materials", params={"order": "sideways"}), 400, "bad_request")
+    assert_error(client.get("/v1/materials",
+                            params={"unit_cost_min": 100, "unit_cost_max": 10}),
+                 400, "bad_request")
+
+
+def test_writeback_schema_matches_the_tables(client: TestClient, conn) -> None:
+    body = client.get("/v1/writeback/schema").json()
+    assert body["schema_version"] == "2"
+    assert body["targets"] == ["joineryflow"]
+
+    fields = {row["path"]: row for row in body["fields"]}
+    assert len(fields) == 6
+    assert "lead_time_days" not in fields
+    assert fields["name"]["editor"] == "textarea"
+    assert fields["synonyms"]["editor"] == "tokens"
+    assert fields["unit"]["editor"] == "select"
+    assert fields["name"]["upstream_column"] == "description"
+
+    catalogs = {row["table_name"]: row for row in body["catalogs"]}
+    assert set(catalogs) == {
+        row[0] for row in conn.execute(
+            "SELECT table_name FROM material_writeback_catalog").fetchall()
+    }
+    notes = next(a for a in catalogs["board_materials"]["attributes"]
+                 if a["key"] == "notes")
+    assert notes["editor"] == "textarea"
+
+    units = body["units"]
+    assert units and all({"code", "name", "dimension"} <= set(u) for u in units)
+    assert "box" in {u["code"] for u in units}

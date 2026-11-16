@@ -19,7 +19,7 @@ so a name of newlines and a 100 KB paragraph are both refused before they reach 
 
 | Piece | State |
 | --- | --- |
-| Read API | `GET /v1/materials` with `q`, `category`, `brand`, `supplier`, `attrs`, `measures`, `limit` (max 100), `cursor`, `expand`. No sorting, no numeric range on `unit_cost` or `lead_time_days`, no `status` filter. |
+| Read API | `GET /v1/materials` with `q`, `category`, `brand`, `supplier`, `attrs`, `measures`, `limit` (max 100), `cursor`, `expand`. No sorting, no numeric range on `unit_cost`, no `status` filter. |
 | Write-back API | `POST /v1/change-requests` (one material per call), `GET /v1/change-requests` (queue), `GET /v1/change-requests/{id}` (detail + PATCH preview), `POST .../approve`, `POST .../reject`. All present and tested. No batch submit, no batch decide, and a decision's reason is only in `material_event`, not on the request row. |
 | Executor | `scripts/apply_change_requests.py`, `--dry-run` by default, `--apply`, `--retry`, `--verify`. Unchanged by this work. |
 | Prototype page | `proto/web/index.html`, read-only search against the prototype database, served by `proto/serve.py`. Not reused: different database, different server, no write path. |
@@ -100,6 +100,8 @@ path is the part that must not be.
 | U20 | Any string value in a diff is capped at 1000 characters, enforced in `submit()` as SQLSTATE `22023`. The cap is per value, not per field. | A pasted 100 KB `notes` would otherwise travel through the request row, the event payload and the PATCH body, and the upstream would be the first thing to complain. `22023` already maps to `400` at the HTTP edge, so the cap needs no new error plumbing. Per value means a `synonyms` array of fifty short tokens is fine; only one runaway string is refused. |
 | U21 | `notes` stays `attributes.notes` and does not become a first-class field. | `material` has no `notes` column, so promoting it means a migration; only 2 of the 9 catalogs allow the key, and five of the nine upstream tables have no `notes` column at all - a first-class field would either need a mapping entry that cannot be sent, or a PATCH to a column that does not exist. And the field currently holds data on **0 of 18** materials. Promoting it would be designing for data that is not there. The trigger to revisit is a third category that needs it, or real notes data arriving. |
 
+| U22 | Lead time is not a material attribute. It is removed from the UI result row, its filter and sort keys, the schema endpoint, the export whitelist, and T3's `material_writeback_field` and `mapping` write-back edge. The `material.lead_time_days` column and the ETL import edge stay. | Delivery time belongs to a supplier at a point in time: a different supplier quotes a different week, and the same supplier quotes differently next month. The importer still records the snapshot's value because `material_price(valid_from)` is where supplier-and-time data belongs and that migration is a separate design; what must stop is a person editing a single number on the material and believing it describes every quote. `schema/seed.sql` has a `custom` attribute also called `lead_time_days`; that is a per-category untyped key, not this column, and is untouched. |
+
 ## 5. Architecture
 
 ```
@@ -157,8 +159,7 @@ The UI holds one query object:
 - `facets.category`, `facets.brand`, `facets.supplier` become `category`, `brand`, `supplier`.
 - `attributes.<key>` equality filters merge into one `attrs` JSON object.
 - `measures.<key>` comparisons merge into one `measures` JSON object (`{gte, lte, unit}`).
-- `unit_cost` and `lead_time_days` comparisons become `unit_cost_min` / `unit_cost_max` /
-  `lead_time_min` / `lead_time_max`.
+- `unit_cost` comparisons become `unit_cost_min` / `unit_cost_max`.
 - `status` equality becomes `status`.
 - `sort` becomes `sort` + `order`.
 - `page` becomes `limit` + `cursor`.
@@ -194,18 +195,19 @@ HTTP edge next to the projection, so a new long-text field is one entry there an
 change (U17). The endpoint is the only place a client learns which cells are editable and how to
 render them.
 
-`GET /v1/materials` gains five parameters, all optional:
+`GET /v1/materials` gains six parameters, all optional:
 
 | Parameter | Type | Notes |
 | --- | --- | --- |
-| `status` | text | exact, one of `active`, `archived`, `superseded` |
+| `status` | text | exact, one of `active`, `archived`, `superseded`, `all` (`all` includes merged and archived) |
 | `unit_cost_min` / `unit_cost_max` | numeric | inclusive |
-| `lead_time_min` / `lead_time_max` | integer | inclusive |
-| `sort` | text | whitelist: `name`, `unit_cost`, `lead_time_days`, `updated_at`, `source_id` |
+| `sort` | text | whitelist: `name`, `unit_cost`, `updated_at`, `source_id` |
 | `order` | text | `asc` or `desc`, default `asc` |
 
-`sort` is a whitelist, not a column name interpolated from the request. The four numeric bounds are
-plain comparisons; none of them is parsed from an expression.
+`sort` is a whitelist enforced in SQL, not a column name interpolated from the request. Both bounds
+are plain comparisons; neither is parsed from an expression. Ascending and descending sorts both put
+NULL values last, and a hidden `row_number()` keeps the assembled JSON in the same order as the page.
+`status=all` is the only way to see archived and superseded rows through this route.
 
 `POST /v1/change-requests/batch` - at most 100 materials per call; 101 is refused with
 `400 batch_too_large` before any row is written:
@@ -302,7 +304,6 @@ value, and editing `unit_cost` and `name` on one row produces one request with t
 | `product_type` | text | non-empty after trimming spaces and newlines (U19) |
 | `unit` | select | must be a code from the schema endpoint's `unit` domain; non-empty after trimming |
 | `unit_cost` | number | finite, non-negative, max 4 decimals |
-| `lead_time_days` | integer | non-negative |
 | `product_url` | text | blank is allowed and stages `null` (clearing); otherwise it must start with `http://` or `https://` |
 | `synonyms` | token list, comma separated | each token non-empty, no duplicates, at most 1000 characters |
 | `attributes.<key>` where `editor = textarea` (today: `notes`) | textarea in a popover, 6 rows | type must stay a string; at most 1000 characters; an empty value stages `null`, not `""` |
@@ -503,7 +504,7 @@ rather than hidden.
 
 - `tests/test_ui.py`: the shell is served at `/ui` with `text/html`; `app.js` and `styles.css` are
   served with the right content types; the shell loads without a token; `/v1/writeback/schema`
-  returns the seven fields and nine catalogs and matches `material_writeback_field` row for row;
+  returns the six fields and nine catalogs and matches `material_writeback_field` row for row;
   `editor` is `textarea` for `name` and for `notes`, `tokens` for `synonyms`, `number` for
   `unit_cost`, and every attribute key the catalog allows has an editor.
 - `tests/test_writeback_api.py` (extend): batch submit with two good and one `open_request` returns
@@ -518,7 +519,7 @@ rather than hidden.
   `400 batch_too_large` before anything is decided; the queue and the detail route both report the
   same `decision_reason`, and it comes from the event - the request row still has no such column.
 - `tests/test_api.py` (extend): `sort` accepts only the whitelist and rejects `; drop table`;
-  `unit_cost_min` / `unit_cost_max` / `lead_time_min` / `lead_time_max` / `status` narrow the result
+  `unit_cost_min` / `unit_cost_max` / `status` narrow the result
   set as expected, asserted against `scripts/api_contract.sql` data.
 - `scripts/api_contract.sql` (extend): the same numeric and status predicates asserted in SQL, so the
   Python and SQL views of the data cannot drift.
@@ -555,7 +556,7 @@ decision to test it is a small step, not a rewrite.
    the button is disabled before the click.
 9. A request whose material was superseded after filing shows the `inactive` badge, and approving it
    returns `material_inactive` rather than a generic error.
-10. `GET /v1/writeback/schema` matches `material_writeback_field` exactly: seven fields, and the
+10. `GET /v1/writeback/schema` matches `material_writeback_field` exactly: six fields, and the
     attribute keys per catalog equal `material_writeback_catalog.attribute_keys`. `name` and `notes`
     carry `editor: "textarea"`, `synonyms` carries `tokens`, `unit_cost` carries `number`.
 11. A textarea cell preserves line breaks: staging `Line one\nLine two` for `name` submits that exact
@@ -599,7 +600,7 @@ decision to test it is a small step, not a rewrite.
 | Step | Work | Done when |
 | --- | --- | --- |
 | 1 | `submit()`: `name`, `product_type` and `unit` are refused when they trim to nothing, newlines included, while padding is stored as sent (`product_url` exempt); any string value is capped at 1000 characters (U19, U20). `ml_change_request_decision_reason()` backs both `queue()` and the detail route (U18). No column, no migration | The contract asserts every refusal, the exemption and the 1000/1001 boundary; the existing write-back tests still pass |
-| 2 | `GET /v1/writeback/schema` with `editor` hints, the five new `/v1/materials` parameters, and their tests plus `api_contract.sql` assertions | The schema endpoint matches the tables; every new filter is asserted in both SQL and Python |
+| 2 | `GET /v1/writeback/schema` with `editor` hints and the unit domain, the six new `/v1/materials` parameters, their tests plus `api_contract.sql` assertions; lead time removed per U22 | The schema endpoint matches the tables; every filter and sort is asserted in both SQL and Python; lead time is absent everywhere a person can see or change it |
 | 3 | `POST /v1/change-requests/batch` with the reason rule, and `POST /v1/change-requests/decide-batch`, both with per-item results, the 100 / 25 caps and their tests | Partial success returns 200 with per-item codes; `reason_required` and `batch_too_large` are enforced server-side; no new SQL beyond step 1 |
 | 4 | `api/ui/` shell: layout, token and actor, query panel with facets and filter rows, saved views | A search and filter round trip works against a real database |
 | 5 | The grid: paging, inline editors including the two textareas, staging, the review sheet with the reason rule, submit and its result states | Acceptance criteria 3 to 7 and 11 to 12 pass by hand on a seeded database |
