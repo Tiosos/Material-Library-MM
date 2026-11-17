@@ -213,9 +213,11 @@ jobs:
         run: |
           # writeback.sql follows seed.sql: material_writeback_catalog references
           # the material_category rows that seed.sql inserts (docs/t3-writeback.md 5).
+          # create-material.sql follows writeback.sql: submit()/update() reuse the
+          # field allowlist and the actor convention it defines (docs/ui-create-material.md).
           for db in ml_api ml_fixture ml_blum ml_merge; do
             createdb "$db"
-            psql -q -v ON_ERROR_STOP=1 -d "$db"               -f schema/material.sql -f schema/search.sql -f schema/api.sql -f schema/merge.sql               -f schema/seed.sql -f schema/writeback.sql
+            psql -q -v ON_ERROR_STOP=1 -d "$db"               -f schema/material.sql -f schema/search.sql -f schema/api.sql -f schema/merge.sql               -f schema/seed.sql -f schema/writeback.sql -f schema/create-material.sql
           done
           psql -q -v ON_ERROR_STOP=1 -d ml_fixture -f eval/fixture.sql
           psql -q -v ON_ERROR_STOP=1 -d ml_api -f eval/fixture.sql
