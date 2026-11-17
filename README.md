@@ -41,6 +41,10 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 ├── scripts/writeback_contract.sql   SQL assertions for the T3 state machine (step 4)
 ├── scripts/create_material_contract.sql  SQL assertions for create requests (step 1)
 ├── scripts/prune_change_requests.py dry-run-first retention worker (T3 6.3)
+├── scripts/start_ui.py              one-command local UI: build DB + import samples + serve (preview)
+├── scripts/build_preview.py         rebuild the static HTML snapshot from the JSON below
+├── preview_snapshot.json            exported data behind material-library-preview.html
+├── material-library-preview.html    self-contained static snapshot of the UI (double-click to view)
 ├── ingest/joineryflow.py            pure snapshot reader and draft builder (step 2)
 ├── docs/etl-joineryflow.md          ETL design (final)
 ├── docs/etl-joineryflow-progress.md ETL implementation log and verification
@@ -399,6 +403,27 @@ no base to go stale against), and decisions go through the same single-request r
 all merged in PRs #22-#27. Five deferrals remain open in section 16 (batch identity, where the reason
 rule lives, the cap's home, event history in the grid and timestamp formatting); none blocks the
 screen.
+
+### Running the UI locally
+
+Two ways to look at it, depending on what you need:
+
+- **Interactive (real API + database)** - `python scripts/start_ui.py`. The script starts the
+  `ml-postgres16` Docker container if needed, creates a `ml_preview` database, loads every schema
+  in CI order and imports the Blum and Laminex sample catalogues (all skipped on a later run if the
+  data is already there), then serves the real UI at `http://127.0.0.1:8765/ui`. File a create in the
+  Add tab, approve it as a different `X-Actor` in Review, then run
+  `python scripts/apply_change_requests.py --dsn postgresql://postgres:postgres@127.0.0.1:5432/ml_preview --apply-creates`
+  to create the material. Needs Docker, Python and `api/requirements.txt`; options such as
+  `--db`, `--port`, `--no-browser` and `--skip-db` are in `scripts/start_ui.py --help`.
+- **Static snapshot (no setup)** - double-click `material-library-preview.html`. It inlines the
+  stylesheet and a real data snapshot and renders all three tabs with local filtering, form preview
+  and the Review queue. Nothing is written and no API is called; it is for looking at the screen,
+  not for exercising the approval flow. Rebuild it from a fresh snapshot with
+  `python scripts/build_preview.py`, which reads `preview_snapshot.json` and the stylesheet.
+
+Publishing one of these as a shareable online link is a follow-up idea recorded in the project
+notes; it is not wired up yet.
 
 ---
 
