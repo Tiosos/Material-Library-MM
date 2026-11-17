@@ -22,6 +22,7 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 │   ├── api.sql                 read-only payload functions (detail, family, changes, export, measures)
 │   ├── merge.sql               duplicate scan / preview / merge / ignore (T2)
 │   ├── writeback.sql           approval state machine + write-back mapping projections (T3)
+│   ├── create-material.sql     approval-based creation of new materials (step 1)
 │   └── material.schema.json    UMR exchange-format JSON Schema (contract)
 ├── api/                        read-only HTTP API (FastAPI, T1) plus five review routes (T3)
 ├── eval/                       golden search cases + deterministic evaluation fixture
@@ -38,6 +39,7 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 ├── scripts/etl_contract.sql         post-import SQL assertions (step 4)
 ├── scripts/apply_change_requests.py dry-run-first write-back worker (T3 step 3, --verify 6.4)
 ├── scripts/writeback_contract.sql   SQL assertions for the T3 state machine (step 4)
+├── scripts/create_material_contract.sql  SQL assertions for create requests (step 1)
 ├── scripts/prune_change_requests.py dry-run-first retention worker (T3 6.3)
 ├── ingest/joineryflow.py            pure snapshot reader and draft builder (step 2)
 ├── docs/etl-joineryflow.md          ETL design (final)
@@ -45,7 +47,7 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 ├── docs/t3-writeback.md             T3 write-back design (final)
 ├── docs/t3-progress.md              T3 implementation log and verification
 ├── docs/ui-bulk-edit.md             manual query and bulk edit UI design (steps 1-7)
-├── docs/ui-create-material.md       proposal: adding new materials from the UI (not implemented)
+├── docs/ui-create-material.md       adding new materials from the UI: design, step 1 of 6 implemented
 └── proto/                       ★ runnable prototype (zero dependencies, to validate the search feel)
     ├── build_db.py             generate the sample library (100 rows, real brands and field structure)
     ├── search.py               tiered graceful-degradation search implementation
