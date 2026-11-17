@@ -422,8 +422,8 @@ Two ways to look at it, depending on what you need:
   not for exercising the approval flow. Rebuild it from a fresh snapshot with
   `python scripts/build_preview.py`, which reads `preview_snapshot.json` and the stylesheet.
 
-Publishing one of these as a shareable online link is a follow-up idea recorded in the project
-notes; it is not wired up yet.
+Publishing as a shareable link is a decided follow-up, not wired up yet: when asked, publish the
+static snapshot as a static site (see the project notes for why the real app is not published).
 
 ---
 
