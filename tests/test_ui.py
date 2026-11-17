@@ -311,3 +311,71 @@ def test_queue_and_detail_round_trip(client: TestClient, conn) -> None:
         conn.execute("DELETE FROM material WHERE material_uid=%s", (uid,))
     finally:
         conn.execute("SELECT set_config('ml.allow_delete', 'off', false)")
+
+
+@pytest.fixture(scope="module")
+def create_script() -> str:
+    return (UI / "create.js").read_text(encoding="utf-8")
+
+
+def test_create_module_uses_only_the_three_routes(create_script: str) -> None:
+    """No direct write and no new API: the step-3 HTTP surface is the only path."""
+    assert "from './app.js'" in create_script
+    assert "from './edit.js'" in create_script   # reuses normaliseValue / validateStaged
+    for route in ("/v1/writeback/schema", "/v1/material-create-requests'",
+                  "/v1/material-create-requests/${editingId}"):
+        assert route in create_script, route
+    assert "method: editingId ? 'PATCH' : 'POST'" in create_script
+    assert "method: 'DELETE'" not in create_script
+    assert "reason: reason || undefined" in create_script
+
+
+def test_create_form_covers_allowlist_and_pure_helpers(create_script: str) -> None:
+    """The field list mirrors the SQL allowlist; helpers are exported for tests."""
+    for helper in ("buildProposed", "validateProposed", "editorForPath", "groupProposed",
+                   "FIELD_GROUPS"):
+        assert f"export function {helper}" in create_script or f"export const {helper}" in create_script
+    # Every proposed field the SQL validator accepts must have a form definition.
+    for path in ("category_code", "name", "product_type", "model_no", "brand_id",
+                 "default_supplier_id", "default_supplier_ref", "family_id", "unit",
+                 "unit_cost", "currency", "cost_basis", "lead_time_days", "description",
+                 "product_url", "image_url", "synonyms", "tags", "source_system",
+                 "source_id", "source_payload", "imported_at"):
+        assert f"path: '{path}'" in create_script, path
+    assert "attributes." in create_script            # dynamic per-category fields
+    assert "category_code is required" in create_script
+    assert "name is required" in create_script
+
+
+def test_create_preview_is_grouped_with_collapsed_json(create_script: str) -> None:
+    """Decision 1: a field table by default, raw JSON under a collapsed panel."""
+    assert "groupProposed(proposed" in create_script
+    assert "detail-diff" in create_script
+    assert "add-preview-json" in create_script
+    assert "JSON.stringify(proposed, null, 2)" in create_script
+    assert "startsWith('editing ')" in create_script  # do not clobber the reopen message
+
+
+def test_create_reopen_is_author_and_pending_only(create_script: str) -> None:
+    """Decision 2: pending is editable in place; decided rows open read-only."""
+    assert "row.status !== 'pending'" in create_script
+    assert "only pending requests can be edited" in create_script
+    assert "editingId = Number(id)" in create_script
+    assert "Save changes" in create_script
+    assert "the id stays the same" in create_script
+
+
+def test_shell_exposes_the_add_tab_and_controls(shell: str) -> None:
+    for control in ("add-view", "add-fields", "add-preview-table", "add-json-details",
+                    "add-preview-json", "add-reopen-id", "add-reopen", "add-reason",
+                    "add-submit", "add-status"):
+        assert f'id="{control}"' in shell, control
+    assert 'data-tab="add"' in shell
+    assert 'src="/ui/assets/create.js"' in shell
+
+
+def test_tab_switching_shows_one_view(script: str) -> None:
+    """Edit, Add and Review are mutually exclusive; the event still fans out."""
+    assert "body > main, #add-view, #review-view" in script
+    assert "view.tagName === 'MAIN' ? 'edit'" in script
+    assert "ml:tab-changed" in script

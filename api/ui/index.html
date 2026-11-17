@@ -12,6 +12,7 @@
     <div class="brand"><span class="dot"></span>Material Library <small>edit</small></div>
     <nav class="tabs" aria-label="Sections">
       <button type="button" class="tab active" data-tab="edit">Edit</button>
+      <button type="button" class="tab" data-tab="add">Add</button>
       <button type="button" class="tab" data-tab="review">Review</button>
     </nav>
     <span id="review-count" class="pill" hidden></span>
@@ -109,6 +110,40 @@
   </section>
 </main>
 
+<section id="add-view" class="add-view" hidden>
+  <div class="add-head">
+    <div>
+      <h2>Add a material</h2>
+      <p class="hint">Every new material is filed as a request. Another actor approves it before a
+        worker creates the row; nothing is written directly.</p>
+    </div>
+    <div class="add-head-actions">
+      <label>reopen pending request <input id="add-reopen-id" type="number" min="1"
+             placeholder="request id" aria-label="pending request id"></label>
+      <button type="button" id="add-reopen" class="btn">Reopen</button>
+    </div>
+  </div>
+  <div class="add-grid">
+    <div class="add-form" id="add-form">
+      <div id="add-fields"></div>
+    </div>
+    <aside class="add-preview">
+      <h3>Preview</h3>
+      <div id="add-preview-table" class="preview-table"></div>
+      <details id="add-json-details">
+        <summary>raw JSON</summary>
+        <pre id="add-preview-json"></pre>
+      </details>
+    </aside>
+  </div>
+  <div class="add-footer">
+    <label>reason <textarea id="add-reason" rows="2" maxlength="500"
+           placeholder="why this material is being added"></textarea></label>
+    <span id="add-status" class="hint"></span>
+    <button type="button" id="add-submit" class="btn primary">Submit for approval</button>
+  </div>
+</section>
+
 <section id="review-view" class="review-view" hidden>
   <div class="review-toolbar">
     <div class="filter-chips" aria-label="Queue status">
@@ -202,5 +237,6 @@
 </footer>
 
 <script type="module" src="/ui/assets/review.js"></script>
+<script type="module" src="/ui/assets/create.js"></script>
 </body>
 </html>
