@@ -45,6 +45,7 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 ├── docs/t3-writeback.md             T3 write-back design (final)
 ├── docs/t3-progress.md              T3 implementation log and verification
 ├── docs/ui-bulk-edit.md             manual query and bulk edit UI design (steps 1-7)
+├── docs/ui-create-material.md       proposal: adding new materials from the UI (not implemented)
 └── proto/                       ★ runnable prototype (zero dependencies, to validate the search feel)
     ├── build_db.py             generate the sample library (100 rows, real brands and field structure)
     ├── search.py               tiered graceful-degradation search implementation
