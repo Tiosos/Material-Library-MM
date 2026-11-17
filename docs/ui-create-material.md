@@ -1,7 +1,8 @@
 # Adding new materials from the UI - design and implementation
 
-Status: steps 1-3 of 6 implemented (`schema/create-material.sql`, `scripts/create_material_contract.sql`,
-the `--apply-creates` worker pass, retained create-request rows and five HTTP routes); steps 4-6 remain proposals. It answers one question raised after the seven-step manual edit UI
+Status: steps 1-4 of 6 implemented (`schema/create-material.sql`, `scripts/create_material_contract.sql`,
+the `--apply-creates` worker pass, retained create-request rows, five HTTP routes and the Add tab);
+steps 5-6 remain proposals. It answers one question raised after the seven-step manual edit UI
 shipped: the screen can find and change existing materials, but it cannot add a new one.
 
 ## 1. What exists now
@@ -158,7 +159,7 @@ A third tab, `Add`, next to `Edit` and `Review`:
 | 1 | `material_create_request` table, submit / update / decide SQL functions, event writes | `scripts/create_material_contract.sql` green with zero residual rows: field allowlist, U19/U20, client-supplied uid refused, self-approval, one event per transition, and update refused after a decision or by a non-requester |
 | 2 | Apply function and worker pass; retention extension | `scripts/create_material_contract.sql` and `tests/test_create_material.py` (3/3): `approved -> applied` with one material row and one insert event (the table trigger owns it), re-running apply is a no-op, a duplicate `source_id` goes to `failed` with `duplicate_source`, and prune clears the request row while keeping the material and its events |
 | 3 | HTTP routes and error mapping | `tests/test_create_material.py` 7/7: 201 submit, queued list with cursor paging, detail with event-backed `decision_reason`, `PATCH` in place (200 same id, 403 for a non-author, 409 once decided), approve/reject with 409 self-approval, 400 on validation; no token in any response |
-| 4 | `Add` tab, schema-driven form, grouped preview and collapsed JSON | A form round trip submits one request with the exact proposed JSON; no client supplies a uid; the grouped view and the raw JSON show the same values |
+| 4 | `Add` tab, schema-driven form, grouped preview and collapsed JSON | `tests/test_ui.py` 14/14; browser pass confirmed the 22-field form built from the schema, attribute fields that follow the category, a grouped preview plus collapsed JSON matching the proposed object, 201 submit, reopening a pending request prefilled and saving in place under the same id |
 | 5 | Review tab `creates` chip, badge adjustment and pending in-place edit | An approved create is visible, `own` is enforced, a pending request reopens prefilled and saves without changing its id, and an applied create links to the material |
 | 6 | Docs and full verification | `check_english.py`, all contracts, both DSN suites, API and UI test counts updated |
 

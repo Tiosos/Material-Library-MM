@@ -416,12 +416,15 @@ function wire() {
     tab.addEventListener('click', () => {
       document.querySelectorAll('.tab').forEach((t) => t.classList.remove('active'));
       tab.classList.add('active');
-      const review = tab.dataset.tab === 'review';
-      document.body.classList.toggle('review-mode', review);
-      document.getElementById('review-view').hidden = !review;
-      // review.js acts on this; app.js does not import it (no reverse dependency).
-      document.dispatchEvent(new CustomEvent('ml:tab-changed',
-                                             { detail: { tab: tab.dataset.tab } }));
+      const which = tab.dataset.tab;
+      // One view at a time. main is the Edit tab; the other two are sections.
+      // A view is shown only when its key matches the active tab.
+      document.querySelectorAll('body > main, #add-view, #review-view').forEach((view) => {
+        const key = view.tagName === 'MAIN' ? 'edit' : view.id.replace('-view', '');
+        view.hidden = key !== which;
+      });
+      // review.js and create.js act on this; app.js keeps no reverse dependency.
+      document.dispatchEvent(new CustomEvent('ml:tab-changed', { detail: { tab: which } }));
     });
   });
 

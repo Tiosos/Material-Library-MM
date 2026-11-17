@@ -148,7 +148,8 @@ dialog h2{margin:0;font-size:17px}
 /* ---------- step 6: review queue, detail drawer and decision sheet ---------- */
 .review-view{max-width:1600px;width:100%;margin:0 auto;padding:18px 20px;flex:1}
 .review-view[hidden]{display:none}
-body.review-mode main{display:none}
+.add-view[hidden]{display:none}
+main[hidden]{display:none}
 .review-toolbar{display:flex;justify-content:space-between;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:11px}
 .filter-chips,.review-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .chip{border:1px solid var(--line);background:var(--panel);color:var(--ink2);padding:6px 12px;border-radius:20px;font-size:12px}
@@ -190,3 +191,34 @@ dialog#decision-sheet{
   max-height:86vh;overflow:auto;box-shadow:0 20px 60px rgba(17,24,39,.18);color:var(--ink);background:var(--panel);
 }
 dialog#decision-sheet::backdrop{background:rgba(17,24,39,.35)}
+
+/* ---------- step 4: add-material form and proposed preview ---------- */
+.add-view{max-width:1500px;width:100%;margin:0 auto;padding:18px 20px;flex:1;overflow:auto}
+.add-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;flex-wrap:wrap}
+.add-head h2{margin:0 0 4px;font-size:18px}
+.add-head p{margin:0;max-width:760px}
+.add-head-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.add-head-actions input{width:130px}
+.add-grid{display:grid;grid-template-columns:minmax(420px,1fr) minmax(320px,0.85fr);gap:18px;margin:14px 0}
+.add-form,.add-preview{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:14px}
+.add-group{border:0;padding:0;margin:0 0 14px}
+.add-group legend{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--ink3);padding:0 0 6px}
+.add-row{display:grid;grid-template-columns:150px 1fr;gap:8px;align-items:start;margin-bottom:7px}
+.add-row label{font-size:12px;color:var(--ink2);padding-top:7px}
+.add-row input,.add-row textarea,.add-row select{width:100%}
+.add-row .req{color:var(--accent);font-weight:600}
+.add-preview{position:sticky;top:10px;align-self:start}
+.add-preview h3{margin:0 0 9px;font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink3)}
+.preview-table .detail-diff{grid-template-columns:130px 1fr}
+.preview-table .empty{color:var(--ink3);font-size:12px;font-style:italic}
+#add-json-details{margin-top:11px;border-top:1px solid var(--line);padding-top:9px}
+#add-json-details summary{cursor:pointer;font-size:12px;color:var(--ink2)}
+#add-preview-json{font-family:var(--mono);font-size:11px;white-space:pre-wrap;word-break:break-word;
+  background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:9px;margin:8px 0 0;max-height:260px;overflow:auto}
+.add-footer{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:12px}
+.add-footer label{flex:1;min-width:260px}
+.add-footer .btn{margin-bottom:2px}
+.result-block{border:1px solid var(--line);border-radius:8px;padding:10px;margin-top:10px;font-size:12px}
+.result-block.ok{background:var(--ok-soft);border-color:#a7e0c6}
+.result-block.bad{background:var(--warn-soft);border-color:#f0d9a8}
+@media (max-width:1000px){.add-grid{grid-template-columns:1fr}.add-preview{position:static}}

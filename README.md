@@ -47,7 +47,7 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 ├── docs/t3-writeback.md             T3 write-back design (final)
 ├── docs/t3-progress.md              T3 implementation log and verification
 ├── docs/ui-bulk-edit.md             manual query and bulk edit UI design (steps 1-7)
-├── docs/ui-create-material.md       adding new materials from the UI: design, steps 1-3 of 6 implemented
+├── docs/ui-create-material.md       adding new materials from the UI: design, steps 1-4 of 6 implemented
 └── proto/                       ★ runnable prototype (zero dependencies, to validate the search feel)
     ├── build_db.py             generate the sample library (100 rows, real brands and field structure)
     ├── search.py               tiered graceful-degradation search implementation
@@ -175,7 +175,7 @@ The four ETL integration cases in `tests/test_etl.py` skip unless `ML_ETL_DSN` p
 database that has imported the joineryflow snapshot; the twenty-nine write-back integration cases in
 `tests/test_writeback.py` skip unless `ML_WRITEBACK_DSN` is set. The dedicated `etl` and
 `writeback` CI jobs supply those DSNs. On the CI `api` recipe the suite reports
-`215 passed, 33 skipped`.
+`221 passed, 33 skipped`.
 
 Design and decisions: [`docs/api-v1.md`](docs/api-v1.md) (endpoints, SQL additions, instrumentation, evaluation thresholds). Implementation log with verification for every step: [`docs/t1-progress.md`](docs/t1-progress.md).
 
@@ -370,7 +370,7 @@ queue and the request detail, and it stays readable after the request row is pru
 Measured on a fresh PostgreSQL 16 database: `scripts/writeback_contract.sql` green with zero
 residual rows, `tests/test_writeback.py` 38/38 with `ML_WRITEBACK_DSN`,
 `tests/test_writeback_api.py` 19/19 in the `api` job, and the full suite
-`215 passed, 33 skipped` on the CI `api` recipe. The dedicated `writeback` CI job rebuilds this
+`221 passed, 33 skipped` on the CI `api` recipe. The dedicated `writeback` CI job rebuilds this
 from scratch on every PR with its own `ml_writeback` database; no `ML_JF_*` credential is set
 there.
 
@@ -389,7 +389,10 @@ files them through `POST /v1/change-requests/batch` - every edit becomes a `mate
 never a direct `UPDATE material`, so the allowlist, base fingerprint, watermark and audit trail still
 apply. Staging survives a refresh but not a closed tab (`sessionStorage`). The Review tab shows the
 actionable queue, a detail drawer with stale / inactive / own badges, and single or bulk decisions
-with a required reason; `decision_reason` is read back from the audit event, not a column. See
+with a required reason; `decision_reason` is read back from the audit event, not a column. The Add tab
+files a proposed new material through `/v1/material-create-requests` with a schema-driven form, a
+grouped preview plus collapsed JSON, and in-place editing of a pending request - the material row is
+created only after approval by a worker. See
 [`docs/ui-bulk-edit.md`](docs/ui-bulk-edit.md) for the 23 decisions and the seven-step delivery plan,
 all merged in PRs #22-#27. Five deferrals remain open in section 16 (batch identity, where the reason
 rule lives, the cap's home, event history in the grid and timestamp formatting); none blocks the
