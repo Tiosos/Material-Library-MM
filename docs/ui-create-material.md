@@ -1,7 +1,7 @@
 # Adding new materials from the UI - design and implementation
 
-Status: step 1 of 6 implemented (`schema/create-material.sql`, `scripts/create_material_contract.sql`);
-steps 2-6 remain proposals. It answers one question raised after the seven-step manual edit UI
+Status: steps 1-2 of 6 implemented (`schema/create-material.sql`, `scripts/create_material_contract.sql`,
+the `--apply-creates` worker pass and the retained create-request rows); steps 3-6 remain proposals. It answers one question raised after the seven-step manual edit UI
 shipped: the screen can find and change existing materials, but it cannot add a new one.
 
 ## 1. What exists now
@@ -156,7 +156,7 @@ A third tab, `Add`, next to `Edit` and `Review`:
 | Step | Work | Done when |
 | --- | --- | --- |
 | 1 | `material_create_request` table, submit / update / decide SQL functions, event writes | `scripts/create_material_contract.sql` green with zero residual rows: field allowlist, U19/U20, client-supplied uid refused, self-approval, one event per transition, and update refused after a decision or by a non-requester |
-| 2 | Apply function and worker pass; retention extension | A request goes `approved -> applied`, the material row and its insert event exist, re-running apply is a no-op, a duplicate `source_id` goes to `failed` with `duplicate_source`, and prune keeps the event |
+| 2 | Apply function and worker pass; retention extension | `scripts/create_material_contract.sql` and `tests/test_create_material.py` (3/3): `approved -> applied` with one material row and one insert event (the table trigger owns it), re-running apply is a no-op, a duplicate `source_id` goes to `failed` with `duplicate_source`, and prune clears the request row while keeping the material and its events |
 | 3 | HTTP routes and error mapping | 201 on submit, `PATCH` updates in place with 409 once decided, 409 on duplicate/forbidden, per-item codes if a batch is added later |
 | 4 | `Add` tab, schema-driven form, grouped preview and collapsed JSON | A form round trip submits one request with the exact proposed JSON; no client supplies a uid; the grouped view and the raw JSON show the same values |
 | 5 | Review tab `creates` chip, badge adjustment and pending in-place edit | An approved create is visible, `own` is enforced, a pending request reopens prefilled and saves without changing its id, and an applied create links to the material |

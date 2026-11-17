@@ -5,6 +5,10 @@
     python scripts/prune_change_requests.py --dsn "$ML_WRITEBACK_DSN" --older-than 90 --apply
 
 Dry-run is the default and makes zero writes, matching the executor's rule.
+When `material_create_request` exists, its terminal rows are pruned in the same
+run and reported under `create_requests`; the material row and its events stay.
+On a T3-only database the table is absent and that part is simply skipped.
+
 Only `applied` and `rejected` rows are candidates: `pending`, `approved` and
 `failed` are still actionable. The audit trail (`material_event`) and the
 upstream-write watermark (`material_writeback_state`) are never touched, so a
@@ -30,6 +34,17 @@ DEFAULT_DAYS = 90
 CANDIDATES_SQL = """
 SELECT id, status, coalesce(applied_at, decided_at, requested_at) AS closed_at
   FROM material_change_request
+ WHERE status IN ('applied', 'rejected')
+   AND coalesce(applied_at, decided_at, requested_at)
+         < now() - make_interval(days => %s)
+ ORDER BY id
+"""
+
+# Create requests have the same terminal states and the same retention window.
+# Their rows can go; the material row they created and every audit event stay.
+CREATE_CANDIDATES_SQL = """
+SELECT id, status, coalesce(applied_at, decided_at, requested_at) AS closed_at
+  FROM material_create_request
  WHERE status IN ('applied', 'rejected')
    AND coalesce(applied_at, decided_at, requested_at)
          < now() - make_interval(days => %s)
@@ -67,26 +82,39 @@ def run(args: argparse.Namespace, dsn: str, *, connect=None) -> dict:
         "candidates": 0,
         "deleted": 0,
         "rows": [],
+        "create_requests": {"candidates": 0, "deleted": 0, "rows": []},
         "watermark_untouched": True,
         "audit_untouched": True,
     }
+
+    def prune_one(cur, sql, table):
+        # The writeback CI job loads no create-material.sql. Treat the table as
+        # an optional extension so this CLI keeps working on a T3-only database.
+        cur.execute("SELECT to_regclass(%s) AS reg", (table,))
+        if cur.fetchone()["reg"] is None:
+            return {"candidates": 0, "deleted": 0, "rows": []}
+        cur.execute(sql, (args.older_than,))
+        rows = cur.fetchall()
+        ids = [row["id"] for row in rows]
+        summary = {
+            "candidates": len(ids), "deleted": 0,
+            "rows": [{"id": row["id"], "status": row["status"],
+                      "closed_at": str(row["closed_at"])} for row in rows[:10]],
+        }
+        if args.apply and ids:
+            # table is a literal chosen by the caller below, never user input
+            cur.execute(f"DELETE FROM {table} WHERE id = ANY(%s::bigint[])", (ids,))
+            summary["deleted"] = cur.rowcount
+        return summary
+
     try:
         with conn.cursor() as cur:
-            cur.execute(CANDIDATES_SQL, (args.older_than,))
-            rows = cur.fetchall()
-            ids = [row["id"] for row in rows]
-            report["candidates"] = len(ids)
-            report["rows"] = [
-                {"id": row["id"], "status": row["status"],
-                 "closed_at": str(row["closed_at"])}
-                for row in rows[:10]
-            ]
-            if args.apply and ids:
-                cur.execute(
-                    "DELETE FROM material_change_request WHERE id = ANY(%s::bigint[])",
-                    (ids,),
-                )
-                report["deleted"] = cur.rowcount
+            edits = prune_one(cur, CANDIDATES_SQL, "material_change_request")
+            creates = prune_one(cur, CREATE_CANDIDATES_SQL, "material_create_request")
+            report["candidates"] = edits["candidates"]
+            report["deleted"] = edits["deleted"]
+            report["rows"] = edits["rows"]
+            report["create_requests"] = creates
     finally:
         close = getattr(conn, "close", None)
         if close is not None:
@@ -103,8 +131,10 @@ def emit(report: dict, args: argparse.Namespace) -> None:
         out = Path(args.json_out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(payload, encoding="utf-8")
+    creates = report["create_requests"]
     print(f"OK mode={report['mode']} older_than={report['older_than_days']}d "
-          f"candidates={report['candidates']} deleted={report['deleted']}")
+          f"candidates={report['candidates']} deleted={report['deleted']} "
+          f"create_candidates={creates['candidates']} create_deleted={creates['deleted']}")
 
 
 def main(argv: list[str] | None = None, *, connect=None) -> int:
