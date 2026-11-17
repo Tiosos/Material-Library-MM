@@ -920,6 +920,21 @@ class ChangeRequestDecision(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
 
 
+# Create-request bodies (docs/ui-create-material.md step 3). proposed is a JSON
+# object so Pydantic does not flatten it: the SQL validator is the single source
+# of truth for the field allowlist, required keys and the 1000-character cap,
+# and a Pydantic schema here would become a second, drifting one.
+class CreateRequestSubmit(BaseModel):
+    proposed: dict[str, Any] = Field(min_length=1)
+    reason: str | None = Field(default=None, max_length=500)
+    target_system: str | None = Field(default=None, max_length=32)
+
+
+class CreateRequestUpdate(BaseModel):
+    proposed: dict[str, Any] = Field(min_length=1)
+    reason: str | None = Field(default=None, max_length=500)
+
+
 # Batch bodies deliberately have no Pydantic length caps on lists or reasons: the
 # edge has to answer batch_too_large / reason_required / reason_too_long with their
 # own codes (U15, U16), and a validation error would flatten all three to bad_request.
@@ -961,6 +976,31 @@ _DECISION_FAILURES = {
     # filed, so approving it would PATCH a tombstone (docs/t3-writeback.md 6.1).
     "material_inactive": (409, "conflict", "the material was archived or merged away"),
 }
+
+# Create requests use the same error shape as write-back, with two differences:
+# submit-time validation raises SQLSTATE 22023 (mapped to 400 by the global
+# handler), and update has a forbidden outcome for a non-author.
+_CREATE_UPDATE_FAILURES = {
+    "not_found": (404, "not_found", "create request not found"),
+    "already_decided": (409, "conflict", "the request was already decided"),
+    "forbidden": (403, "forbidden", "only the submitter may edit a pending request"),
+}
+_CREATE_DECISION_FAILURES = {
+    "not_found": (404, "not_found", "create request not found"),
+    "already_decided": (409, "conflict", "the request was already decided"),
+    "self_approval": (409, "conflict", "the submitter cannot approve their own request"),
+}
+
+
+def _create_result(report: dict[str, Any], failures: dict[str, tuple[int, str, str]]) -> dict[str, Any]:
+    """Map a create SQL report into the T1 error shape, or return it unchanged."""
+    if report.get("ok"):
+        return report
+    status, error_code, message = failures.get(
+        report.get("code"), (400, "bad_request", "create request refused")
+    )
+    detail = {k: v for k, v in report.items() if k not in {"ok", "code"}}
+    raise ApiError(status, error_code, message, detail)
 
 
 def _writeback_result(report: dict[str, Any], failures: dict[str, tuple[int, str, str]]) -> dict[str, Any]:
@@ -1284,6 +1324,218 @@ def batch_decide_change_requests(
         "failed": len(outcomes) - decided,
         "results": outcomes,
     }
+
+
+# ---------------------------------------------------------------------------
+# Create requests (docs/ui-create-material.md step 3)
+# ---------------------------------------------------------------------------
+# Five routes mirroring the write-back review flow: submit, queue, detail,
+# in-place update and decide. SQL owns every transition; these only validate
+# shape, map {ok, code} into the T1 error shape and read back the audit-backed
+# decision reason. No apply route: inserting the material is the worker's job.
+
+_CREATE_QUEUE_STATUSES = "^(actionable|pending|approved|rejected|applied|failed|all)$"
+
+
+@app.post(
+    "/v1/material-create-requests",
+    tags=["writeback"],
+    status_code=201,
+    dependencies=[Depends(require_token)],
+)
+def create_material_request(
+    body: CreateRequestSubmit,
+    x_actor: str | None = Header(default=None, alias="X-Actor"),
+    conn: psycopg.Connection = Depends(db.connection),
+) -> dict[str, Any]:
+    """File a proposed new material; the material row is not created here."""
+    report = db.query_value(
+        conn,
+        """
+        SELECT material_create_request_submit(
+            %(proposed)s::jsonb, %(reason)s::text, %(actor)s::text, %(target)s::text)
+        """,
+        {
+            "proposed": json.dumps(body.proposed),
+            "reason": body.reason,
+            "actor": actor_from(x_actor),
+            "target": body.target_system or "joineryflow",
+        },
+    )
+    # submit() either raises SQLSTATE 22023 (-> 400) or returns ok=true; an
+    # ok=false report has no defined code, so an empty map keeps it a 400.
+    return {**_create_result(report, {}), "schema_version": SCHEMA_VERSION}
+
+
+@app.get(
+    "/v1/material-create-requests",
+    tags=["writeback"],
+    dependencies=[Depends(require_token)],
+)
+def list_material_create_requests(
+    status: str = Query(default="actionable", pattern=_CREATE_QUEUE_STATUSES),
+    limit: int = Query(default=20, ge=1, le=100),
+    cursor: str | None = Query(default=None),
+    conn: psycopg.Connection = Depends(db.connection),
+) -> dict[str, Any]:
+    """The create review queue: actionable (pending + approved + failed) by default."""
+    offset = decode_cursor(cursor)
+    statuses = (
+        ["pending", "approved", "failed"] if status == "actionable" else [status]
+    )
+    # Two explicit statements keep the alias correct in both count and rows;
+    # string-replacing a WHERE clause would break the moment a column is renamed.
+    if status == "all":
+        total = db.query_value(
+            conn, "SELECT count(*) FROM material_create_request",
+        )
+        rows = db.query_rows(
+            conn,
+            """SELECT to_jsonb(r) FROM material_create_request r
+               ORDER BY r.requested_at DESC, r.id DESC
+               LIMIT %(limit)s OFFSET %(offset)s""",
+            {"limit": limit, "offset": offset},
+        )
+    else:
+        total = db.query_value(
+            conn,
+            "SELECT count(*) FROM material_create_request "
+            "WHERE status = ANY(%(statuses)s::text[])",
+            {"statuses": statuses},
+        )
+        rows = db.query_rows(
+            conn,
+            """SELECT to_jsonb(r) FROM material_create_request r
+               WHERE r.status = ANY(%(statuses)s::text[])
+               ORDER BY r.requested_at DESC, r.id DESC
+               LIMIT %(limit)s OFFSET %(offset)s""",
+            {"statuses": statuses, "limit": limit, "offset": offset},
+        )
+    payload = [row["to_jsonb"] for row in rows]
+    next_offset = offset + len(payload)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": status,
+        "total": int(total),
+        "offset": offset,
+        "limit": limit,
+        "rows": payload,
+        "next_cursor": encode_cursor(next_offset) if next_offset < int(total) else None,
+    }
+
+
+@app.get(
+    "/v1/material-create-requests/{request_id}",
+    tags=["writeback"],
+    dependencies=[Depends(require_token)],
+)
+def material_create_request_detail(
+    request_id: int,
+    conn: psycopg.Connection = Depends(db.connection),
+) -> dict[str, Any]:
+    """The request plus the event-backed decision reason; no token and no direct write."""
+    row = db.query_value(
+        conn,
+        """
+        SELECT to_jsonb(r) || jsonb_build_object(
+                   'decision_reason',
+                   (SELECT e.payload ->> 'reason'
+                      FROM material_event e
+                     WHERE e.entity = 'material_create_request'
+                       AND e.payload ->> 'request_id' = r.id::text
+                       AND e.payload ->> 'decision' IN ('approve', 'reject')
+                     ORDER BY e.seq DESC LIMIT 1))
+          FROM material_create_request r
+         WHERE r.id = %(id)s
+        """,
+        {"id": request_id},
+    )
+    if row is None:
+        raise ApiError(404, "not_found", "create request not found", {"id": request_id})
+    return {**row, "schema_version": SCHEMA_VERSION}
+
+
+@app.patch(
+    "/v1/material-create-requests/{request_id}",
+    tags=["writeback"],
+    dependencies=[Depends(require_token)],
+)
+def update_material_create_request(
+    request_id: int,
+    body: CreateRequestUpdate,
+    x_actor: str | None = Header(default=None, alias="X-Actor"),
+    conn: psycopg.Connection = Depends(db.connection),
+) -> dict[str, Any]:
+    """Rewrite a pending request in place; author only, same id, no second request."""
+    report = db.query_value(
+        conn,
+        """
+        SELECT material_create_request_update(
+            %(id)s::bigint, %(proposed)s::jsonb, %(reason)s::text, %(actor)s::text)
+        """,
+        {
+            "id": request_id,
+            "proposed": json.dumps(body.proposed),
+            "reason": body.reason,
+            "actor": actor_from(x_actor),
+        },
+    )
+    return {**_create_result(report, _CREATE_UPDATE_FAILURES),
+            "schema_version": SCHEMA_VERSION}
+
+
+def _decide_material_create_request(
+    request_id: int,
+    decision: str,
+    body: ChangeRequestDecision | None,
+    x_actor: str | None,
+    conn: psycopg.Connection,
+) -> dict[str, Any]:
+    report = db.query_value(
+        conn,
+        """
+        SELECT material_create_request_decide(
+            %(id)s::bigint, %(decision)s::text, %(reason)s::text, %(actor)s::text)
+        """,
+        {
+            "id": request_id,
+            "decision": decision,
+            "reason": body.reason if body else None,
+            "actor": actor_from(x_actor),
+        },
+    )
+    return {**_create_result(report, _CREATE_DECISION_FAILURES),
+            "schema_version": SCHEMA_VERSION}
+
+
+@app.post(
+    "/v1/material-create-requests/{request_id}/approve",
+    tags=["writeback"],
+    dependencies=[Depends(require_token)],
+)
+def approve_material_create_request(
+    request_id: int,
+    body: ChangeRequestDecision | None = None,
+    x_actor: str | None = Header(default=None, alias="X-Actor"),
+    conn: psycopg.Connection = Depends(db.connection),
+) -> dict[str, Any]:
+    """Approve a pending create request; a different actor is required."""
+    return _decide_material_create_request(request_id, "approve", body, x_actor, conn)
+
+
+@app.post(
+    "/v1/material-create-requests/{request_id}/reject",
+    tags=["writeback"],
+    dependencies=[Depends(require_token)],
+)
+def reject_material_create_request(
+    request_id: int,
+    body: ChangeRequestDecision | None = None,
+    x_actor: str | None = Header(default=None, alias="X-Actor"),
+    conn: psycopg.Connection = Depends(db.connection),
+) -> dict[str, Any]:
+    """Reject a pending create request; no base check, refusing is always safe."""
+    return _decide_material_create_request(request_id, "reject", body, x_actor, conn)
 
 
 # ---------------------------------------------------------------------------

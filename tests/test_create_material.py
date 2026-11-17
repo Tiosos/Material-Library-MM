@@ -174,3 +174,101 @@ def test_prune_clears_create_rows_but_keeps_the_event(dsn, create_conn):
             assert cur.fetchone()[0] >= 2  # material insert + create-request event
     finally:
         cleanup(create_conn, [rid], uids=[uid])
+
+
+# ---------------------------------------------------------------------------
+# HTTP routes (step 3)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def http_request(client, dsn):
+    """Yield a helper that files a create request and removes it afterwards."""
+    created = []
+
+    def submit(name="HTTP created", source_id=None, actor="alice"):
+        payload = {
+            "category_code": "board", "name": name,
+            "source_system": "test",
+            "source_id": source_id or f"http:{os.getpid()}:{len(created)}",
+        }
+        response = client.post(
+            "/v1/material-create-requests", json={"proposed": payload, "reason": "from http"},
+            headers={"X-Actor": actor},
+        )
+        assert response.status_code == 201, response.text
+        created.append(response.json()["id"])
+        return response.json()["id"], payload
+
+    yield submit
+    # The API deliberately has no delete route; clean up through the DB.
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        for rid in created:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM material_event WHERE entity='material_create_request' "
+                            "AND payload->>'request_id'=%s", (str(rid),))
+                cur.execute("DELETE FROM material_create_request WHERE id=%s", (rid,))
+
+
+def test_http_submit_queue_and_detail(client, http_request):
+    rid, payload = http_request()
+    queue = client.get("/v1/material-create-requests", params={"status": "pending"}).json()
+    assert any(row["id"] == rid for row in queue["rows"])
+    assert queue["schema_version"] and "next_cursor" in queue
+
+    detail = client.get(f"/v1/material-create-requests/{rid}").json()
+    assert detail["status"] == "pending"
+    assert detail["proposed"]["name"] == payload["name"]
+    assert detail["decision_reason"] is None
+
+    missing = client.get("/v1/material-create-requests/999999999")
+    assert missing.status_code == 404 and missing.json()["error"]["code"] == "not_found"
+
+
+def test_http_update_is_in_place_and_author_only(client, http_request):
+    rid, _ = http_request()
+    updated = client.patch(
+        f"/v1/material-create-requests/{rid}",
+        json={"proposed": {"category_code": "board", "name": "Renamed",
+                           "source_system": "test", "source_id": f"http-renamed:{rid}"},
+              "reason": "fixed a typo"},
+        headers={"X-Actor": "alice"},
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["id"] == rid and updated.json()["status"] == "pending"
+
+    denied = client.patch(
+        f"/v1/material-create-requests/{rid}",
+        json={"proposed": {"category_code": "board", "name": "Hijack"}},
+        headers={"X-Actor": "bob"},
+    )
+    assert denied.status_code == 403 and denied.json()["error"]["code"] == "forbidden"
+
+    detail = client.get(f"/v1/material-create-requests/{rid}").json()
+    assert detail["proposed"]["name"] == "Renamed"
+
+
+def test_http_decide_maps_codes_and_reads_reason_from_event(client, http_request):
+    rid, _ = http_request()
+    self_ap = client.post(f"/v1/material-create-requests/{rid}/approve",
+                          json={"reason": "x"}, headers={"X-Actor": "alice"})
+    assert self_ap.status_code == 409 and self_ap.json()["error"]["code"] == "conflict"
+
+    decided = client.post(f"/v1/material-create-requests/{rid}/approve",
+                          json={"reason": "checked via http"}, headers={"X-Actor": "bob"})
+    assert decided.status_code == 200 and decided.json()["code"] == "approved"
+
+    detail = client.get(f"/v1/material-create-requests/{rid}").json()
+    assert detail["status"] == "approved"
+    assert detail["decision_reason"] == "checked via http"
+    assert detail["decided_by"] == "bob" and detail["decided_at"]
+
+    twice = client.post(f"/v1/material-create-requests/{rid}/reject",
+                        json={"reason": "x"}, headers={"X-Actor": "carol"})
+    assert twice.status_code == 409 and twice.json()["error"]["code"] == "conflict"
+
+
+def test_http_submit_validation_is_a_400(client):
+    bad = client.post("/v1/material-create-requests",
+                      json={"proposed": {"category_code": "board", "name": "  \n  "}},
+                      headers={"X-Actor": "alice"})
+    assert bad.status_code == 400
