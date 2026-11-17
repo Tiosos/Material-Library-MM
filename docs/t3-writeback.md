@@ -1,7 +1,8 @@
 # T3 - Approval-based write-back executor design
 
-Status: design draft (step 0). Nothing is implemented yet. This file is the design record;
-step 5 of the delivery plan adds `docs/t3-progress.md` with verification.
+Status: implemented (T3, PRs #17-#20) with four consistency follow-ups merged. This file is the
+design record; `docs/t3-progress.md` holds the verification log. Section 7 reflects the six
+writable fields after UI decision U22 removed `lead_time_days` from the write-back allowlist.
 Owner: Tiosos.
 Scope decision: submit a diff, review and approve or reject it, then let a worker apply the
 approved diff to joineryflow. SQL owns the state machine, a CLI worker owns the HTTP hop, and

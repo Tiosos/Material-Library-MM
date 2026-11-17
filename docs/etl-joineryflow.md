@@ -1,7 +1,7 @@
 # Real-data ETL: joineryflow catalogue -> UMR v2
 
-Status: design. No code for this task is written yet; the numbered steps at the end are the
-implementation checklist. The first real dataset available in this environment is the joineryflow
+Status: implemented (PRs #9-#13) with a dedicated `etl` CI job; the numbered steps at the end are
+the original implementation checklist. `docs/etl-joineryflow-progress.md` holds the verification log. The first real dataset available in this environment is the joineryflow
 catalogue (`D:\new system test`, the `Tiosos/joineryflow` checkout, workspace `hartwood-joinery`).
 
 What it is: a two-part pipeline. An **exporter** reads the nine joineryflow catalogue tables into a

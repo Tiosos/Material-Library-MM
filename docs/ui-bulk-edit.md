@@ -1,7 +1,9 @@
 # Manual query and bulk edit UI
 
-Status: design, not implemented. Decisions are numbered `U1..U21`; T3's write-back decisions are
-`D1..D22` in [t3-writeback.md](t3-writeback.md) and are not repeated here.
+Status: implemented in steps 1-7 (`api/ui/`, the query and write-back additions and the four
+new/changed routes). Decisions are numbered `U1..U23`; T3's write-back decisions are `D1..D22` in
+[t3-writeback.md](t3-writeback.md) and are not repeated here. See the delivery table in section 15
+for what each step asserted and the verification log in `docs/t3-progress.md`.
 
 ## 0. One paragraph
 
@@ -609,7 +611,7 @@ decision to test it is a small step, not a rewrite.
 | 4 | `api/ui/` shell: layout, token and actor, query panel with facets and filter rows, saved views, read-only result table and paging | A search and filter round trip works against a real database (9 HTTP checks in `tests/test_ui.py`) |
 | 5 | The grid: paging, inline editors including the two textareas, staging, the review sheet with the reason rule, submit and its result states | `tests/test_ui.py` 12/12; the pure staging helpers and the batch body are asserted in Python, and a staged body round-trips through the batch route |
 | 6 | The Review tab: queue, detail with the three badges and the decision record, single and bulk approve and reject, actor switching | `tests/test_ui.py` 16/16; queue and detail round-trip through the T3 routes, badge and selection helpers are pure and asserted |
-| 7 | Docs: README section, this file's status, `docs/t3-progress.md` note, and a UI section in the design index if one exists | `check_english.py` green, links intact, PR opened |
+| 7 | Docs: README section, this file's status, `docs/t3-progress.md` note, and a UI section in the design index if one exists | `check_english.py` green, links intact, all six CI jobs green, PR opened |
 
 ## 16. Open questions
 
@@ -635,9 +637,7 @@ not here: `notes` staying an attribute is U21, and the two batch caps are U16.
    8.3 answers "who approved this and why"; full history is a third read path and a second drawer,
    and `GET /v1/changes` already answers "what changed since". *Trigger: someone asking "why is this
    price what it is" and the existing routes not answering it.*
-
-
-4. **Should the two routes spell timestamps the same way?** The detail route returns `decided_at`
+5. **Should the two routes spell timestamps the same way?** The detail route returns `decided_at`
    as `+00:00` (the psycopg datetime is serialised by the `to_jsonb(r)` projection), while the batch
    route returns `Z` (FastAPI's JSON encoder). They are the same instant. *Leaning: leave it until
    the UI layer*, where one formatter can normalise both, rather than change an existing response
