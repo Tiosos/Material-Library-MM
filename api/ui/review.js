@@ -7,6 +7,7 @@ import { state, api } from './app.js';
 const BULK_LIMIT = 25;
 const selected = new Set();
 let status = 'actionable';
+let kind = 'edits';           // 'edits' (change requests) or 'creates' (new materials)
 let queue = null;             // last queue payload
 let current = null;           // detail row currently open
 let detail = null;            // /v1/change-requests/{id} payload
@@ -36,6 +37,23 @@ export function computeBadges(row, live, actor) {
 let detailBaseValues = null;
 export function detailBase() { return detailBaseValues; }
 export function setDetailBase(values) { detailBaseValues = values; }
+
+// A create has no base row to go stale against and no material to archive:
+// only the own badge applies (docs/ui-create-material.md section 4.4).
+export function computeCreateBadges(row, actor) {
+  return actor && actor === row.requested_by ? ['own'] : [];
+}
+
+// A create row carries `proposed` instead of material_name / paths. These two
+// helpers keep renderQueue and the decision sheet free of a kind branch.
+export function rowTitle(row, rowKind = kind) {
+  if (rowKind === 'creates') return row.proposed && row.proposed.name || '(unnamed)';
+  return row.material_name;
+}
+export function rowFields(row, rowKind = kind) {
+  if (rowKind === 'creates') return Object.keys(row.proposed || {});
+  return row.paths || [];
+}
 
 export function ageText(iso, now = Date.now()) {
   if (!iso) return '-';
@@ -83,7 +101,9 @@ async function loadQueue() {
   const params = new URLSearchParams({ status, limit: '50' });
   if (queue && queue.next_cursor) params.set('cursor', queue.next_cursor);
   try {
-    queue = await api(`/v1/change-requests?${params.toString()}`);
+    const base = kind === 'creates'
+      ? '/v1/material-create-requests' : '/v1/change-requests';
+    queue = await api(`${base}?${params.toString()}`);
     renderQueue();
   } catch (exc) {
     document.getElementById('footer-status').textContent = `queue failed: ${exc.message}`;
@@ -121,7 +141,7 @@ function renderQueue() {
     checkTd.appendChild(check);
     tr.appendChild(checkTd);
 
-    for (const value of [row.id, row.material_name, (row.paths || []).join(', ')]) {
+    for (const value of [row.id, rowTitle(row), rowFields(row).join(', ')]) {
       const td = document.createElement('td');
       td.textContent = String(value ?? '');
       tr.appendChild(td);
@@ -174,6 +194,7 @@ function updateSelection() {
 // ---------------------------------------------------------------------------
 async function openDetail(row) {
   current = row;
+  if (kind === 'creates') return openCreateDetail(row);
   try {
     detail = await api(`/v1/change-requests/${row.id}`);
   } catch (exc) {
@@ -243,6 +264,67 @@ async function openDetail(row) {
   document.getElementById('detail-drawer').hidden = false;
 }
 
+// Create detail: the proposed row is the whole request. No base, no live row
+// (it may not exist yet), no PATCH preview - those belong to the edit flow.
+async function openCreateDetail(row) {
+  try {
+    detail = await api(`/v1/material-create-requests/${row.id}`);
+  } catch (exc) {
+    document.getElementById('footer-status').textContent = `detail failed: ${exc.message}`;
+    return;
+  }
+  setDetailBase(null);
+  document.getElementById('detail-title').textContent =
+    `Create ${row.id} - ${rowTitle(row, 'creates')}`;
+
+  const badgeHost = document.getElementById('detail-badges');
+  badgeHost.replaceChildren();
+  for (const badge of [...computeCreateBadges(row, actorName()),
+                       ...(detail.decision_reason || row.decided_at ? ['decided'] : [])]) {
+    const span = document.createElement('span');
+    span.className = `badge ${badge}`;
+    span.textContent = badge;
+    badgeHost.appendChild(span);
+  }
+
+  const body = document.getElementById('detail-body');
+  body.replaceChildren();
+  // The proposed object is grouped by its top-level keys; nested attributes
+  // get their own block so a reader sees exactly what will be inserted.
+  body.appendChild(keyValues('Proposed', detail.proposed));
+  if (detail.proposed && detail.proposed.attributes) {
+    body.appendChild(keyValues('Attributes', detail.proposed.attributes));
+  }
+  if (detail.material_uid) {
+    const link = document.createElement('p');
+    link.className = 'hint';
+    link.textContent = `material: ${detail.material_uid} (${detail.status})`;
+    body.appendChild(link);
+  }
+  const decision = document.createElement('div');
+  decision.className = 'detail-block';
+  const heading = document.createElement('h3'); heading.textContent = 'Decision';
+  decision.appendChild(heading);
+  for (const [key, value] of [
+    ['status', detail.status], ['decided_by', detail.decided_by],
+    ['decided_at', detail.decided_at], ['decision_reason', detail.decision_reason],
+    ['error', detail.error],
+  ]) {
+    const kv = document.createElement('div'); kv.className = 'detail-kv';
+    const k = document.createElement('span'); k.className = 'key'; k.textContent = key;
+    const v = document.createElement('span'); v.className = 'value';
+    v.textContent = value == null ? '-' : String(value);
+    kv.append(k, v); decision.appendChild(kv);
+  }
+  body.appendChild(decision);
+
+  const own = actorName() && actorName() === row.requested_by;
+  const approve = document.getElementById('detail-approve');
+  approve.disabled = Boolean(own);
+  approve.title = own ? 'a submitter cannot approve their own request' : '';
+  document.getElementById('detail-drawer').hidden = false;
+}
+
 function actorName() { return document.getElementById('actor').value.trim(); }
 
 function block(title, nodes) {
@@ -280,8 +362,9 @@ function openDecision(ids, decision) {
     const row = rows.find((r) => r.id === id);
     const line = document.createElement('div');
     line.className = 'review-result';
+    const fields = row ? rowFields(row) : [];
     line.textContent = row
-      ? `${id} - ${row.material_name} (${(row.paths || []).length} field${(row.paths || []).length === 1 ? '' : 's'})`
+      ? `${id} - ${rowTitle(row)} (${fields.length} field${fields.length === 1 ? '' : 's'})`
       : String(id);
     body.appendChild(line);
   }
@@ -304,6 +387,32 @@ async function confirmDecision() {
   body.appendChild(Object.assign(document.createElement('p'),
                                  { className: 'hint', textContent: 'Deciding...' }));
   try {
+    if (kind === 'creates') {
+      // No batch create route (deferred in the design): decide each row
+      // through its own single-request route and report every outcome.
+      const outcomes = [];
+      for (const id of ids) {
+        try {
+          const report = await api(`/v1/material-create-requests/${id}/${decision}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reason: reason || undefined }),
+          });
+          outcomes.push(`${id}: ${report.status || report.code}`);
+        } catch (exc) {
+          outcomes.push(`${id}: ${exc.message}`);
+        }
+      }
+      body.replaceChildren();
+      for (const text of outcomes) {
+        body.appendChild(Object.assign(document.createElement('div'),
+                                       { className: 'review-result', textContent: text }));
+      }
+      selected.clear();
+      document.getElementById('detail-drawer').hidden = true;
+      await loadQueue();
+      return;
+    }
     if (ids.length === 1) {
       await api(`/v1/change-requests/${ids[0]}/${decision}`, {
         method: 'POST',
@@ -347,11 +456,22 @@ async function confirmDecision() {
 function wireReview() {
   for (const chip of document.querySelectorAll('.chip[data-status]')) {
     chip.addEventListener('click', () => {
-      document.querySelectorAll('.chip').forEach((c) => c.classList.remove('active'));
+      document.querySelectorAll('.chip[data-status]').forEach((c) => c.classList.remove('active'));
       chip.classList.add('active');
       status = chip.dataset.status;
       queue = null;
       selected.clear();
+      loadQueue();
+    });
+  }
+  for (const chip of document.querySelectorAll('.chip[data-kind]')) {
+    chip.addEventListener('click', () => {
+      document.querySelectorAll('.chip[data-kind]').forEach((c) => c.classList.remove('active'));
+      chip.classList.add('active');
+      kind = chip.dataset.kind;
+      queue = null;
+      selected.clear();
+      document.getElementById('detail-drawer').hidden = true;
       loadQueue();
     });
   }

@@ -218,7 +218,8 @@ def review_script() -> str:
 def test_review_module_only_uses_existing_routes(review_script: str) -> None:
     """No new API and no direct write: queue, detail, decide are the T3 routes."""
     assert "from './app.js'" in review_script
-    for route in ("/v1/change-requests?${params", "/v1/change-requests/${row.id}",
+    for route in ("'/v1/material-create-requests' : '/v1/change-requests'",  # queue base
+                  "/v1/change-requests/${row.id}",
                   "/v1/materials/${encodeURIComponent(row.material_uid)}",
                   "/v1/change-requests/${ids[0]}/${decision}",
                   "'/v1/change-requests/decide-batch'"):
@@ -379,3 +380,47 @@ def test_tab_switching_shows_one_view(script: str) -> None:
     assert "body > main, #add-view, #review-view" in script
     assert "view.tagName === 'MAIN' ? 'edit'" in script
     assert "ml:tab-changed" in script
+
+
+def test_review_creates_chip_and_badges(review_script: str) -> None:
+    """The creates queue uses only own; stale/inactive do not apply to a new row."""
+    assert "computeCreateBadges" in review_script
+    assert "export function computeCreateBadges" in review_script
+    # Only own is returned for creates; no base or material-status comparison.
+    block = review_script[review_script.index("export function computeCreateBadges"):
+                          review_script.index("// A create row carries")]
+    assert "return actor && actor === row.requested_by ? ['own'] : []" in block
+    assert "stale" not in block and "inactive" not in block
+    assert "let kind = 'edits'" in review_script
+    assert ".chip[data-kind]" in review_script
+    assert "chip.dataset.kind" in review_script
+
+
+def test_review_create_queue_and_detail_use_the_step3_routes(review_script: str) -> None:
+    assert "/v1/material-create-requests/${row.id}" in review_script
+    assert "openCreateDetail" in review_script
+    # A create detail shows the proposed row and the event-backed reason, not a PATCH preview.
+    block = review_script[review_script.index("async function openCreateDetail"):
+                          review_script.index("function actorName")]
+    assert "keyValues('Proposed', detail.proposed)" in block
+    assert "detail.decision_reason" in block
+    assert "detail.material_uid" in block
+    assert "keyValues('PATCH preview'" not in block
+    assert "setDetailBase(null)" in block
+
+
+def test_review_create_decisions_are_per_request(review_script: str) -> None:
+    """No batch create route: each create is decided through its own route."""
+    assert "if (kind === 'creates')" in review_script
+    assert "/v1/material-create-requests/${id}/${decision}" in review_script
+    assert "/v1/material-create-requests/batch" not in review_script
+    assert "for (const id of ids)" in review_script
+
+
+def test_review_row_helpers_and_shell_kind_chips(review_script: str, shell: str) -> None:
+    assert "export function rowTitle" in review_script
+    assert "export function rowFields" in review_script
+    assert "row.proposed && row.proposed.name" in review_script
+    assert "Object.keys(row.proposed || {})" in review_script
+    assert 'data-kind="edits"' in shell and 'data-kind="creates"' in shell
+    assert 'aria-label="Queue type"' in shell
