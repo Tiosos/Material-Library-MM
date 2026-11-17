@@ -77,24 +77,38 @@ material_create_request(
   malformed `attributes` object, or a `material_uid` that is already taken. The same
   `material_writeback_field` allowlist and the U19/U20 checks live here, so the API is not a
   second source of truth.
+- `material_create_request_update(id, proposed, reason, actor)` rewrites `proposed` and `reason`
+  **only while `status = 'pending'`**, re-running every submit-time validation, and writes one
+  `material_event(entity='material_create_request', op='update')` with the before/after JSON. The
+  requester may edit their own pending request; a different actor may not, so approval cannot be
+  pre-empted by someone else's edit. Once decided the row is immutable - a change after approval
+  would invalidate the decision that was just recorded. To change an approved or rejected request,
+  file a new one.
 - `material_create_request_decide(id, decision, reason, actor)` mirrors `decide()`:
   different actor, reason recorded in `material_event`, no self-approval.
 - `ml_material_create_apply_diffs()` inserts the row with `status='active'`, `rev=1`,
   `sync_seq` from the default sequence, `created_by`/`updated_by` from the actor, and one
   `material_event(entity='material', op='insert')`. The material UID is generated server-side
   with the existing Crockford base-32 rule; the client never supplies one.
+- Before inserting, apply checks `source_system + source_id` for an existing row. If one exists
+  it moves the request to `failed` with `error = 'duplicate_source: <uid>'` and writes the failure
+  event; it never skips silently and never overwrites the imported row.
 - The worker in `scripts/apply_change_requests.py` gains a `--apply-creates` pass. It must be
   idempotent: a request already `applied` with a `material_uid` is a no-op, not a duplicate insert.
 - Retention extends to the new table with the same 90-day rule, and the audit event stays.
 
-Because the proposed row is JSON, the UI can show a real PATCH-style preview before approval:
-"this will insert a material with these fields". There is no `before` column to show.
+The proposed row is shown as a grouped field/value table by default, with the raw JSON available
+in a collapsed panel for anyone who needs to check the exact payload. There is no `before` column:
+the preview says "this will insert a material with these fields", not "change A to B".
 
 ### 4.2 HTTP surface
 
 - `GET /v1/material-create-requests` and `GET /v1/material-create-requests/{id}` - the queue and
   detail, shaped like the existing change-request routes so the Review tab can reuse its components.
 - `POST /v1/material-create-requests` - one create request; `status_code=201`.
+- `PATCH /v1/material-create-requests/{id}` - update a **pending** request; `409 conflict` once
+  decided or when the actor is not the requester, `400 bad_request` on a validation failure.
+  The response is the updated row, not a new id: an edit does not create a second request.
 - `POST /v1/material-create-requests/{id}/approve` and `/reject` - same error mapping as T3.
 - `POST /v1/material-create-requests/batch` - optional, only if "add 20 materials" is a real
   workflow. Defer until asked; the existing batch caps (100 submit / 25 decide) were chosen for
@@ -124,41 +138,53 @@ state remains available for a future "save without publishing" action.
 A third tab, `Add`, next to `Edit` and `Review`:
 
 1. A category picker, then the full field form driven by `/v1/writeback/schema`.
-2. A live preview of the proposed JSON with the same before/after language the Review sheet uses
-   (here there is only "after").
+2. A live preview grouped by field (Required / Classification / Commercial / Text / Attributes),
+   with a collapsed "raw JSON" panel underneath. The same editors drive both the form and the
+   preview, so what is shown is what will be inserted.
 3. `Submit for approval` writes one create request and shows its id and `pending`.
-4. Approved rows appear in the Review tab under a `creates` chip, with the same badges adapted:
+4. A pending request can be reopened from the `Add` tab by its author and edited in place. The
+   form is prefilled from `proposed`, and every field is revalidated with the same rules as a new
+   submission. The header shows `pending - editable until a decision`; a decided request opens
+   read-only with a link to file a new one.
+5. Approved rows appear in the Review tab under a `creates` chip, with the same badges adapted:
    `own` still applies; `stale` and `inactive` do not, because there is no base row yet.
-5. Once applied, the material appears in normal search. The create request keeps its `material_uid`
+6. Once applied, the material appears in normal search. The create request keeps its `material_uid`
    so a reader can follow the audit trail from request to row.
 
 ## 5. Delivery steps and acceptance
 
 | Step | Work | Done when |
 | --- | --- | --- |
-| 1 | `material_create_request` table, submit and decide SQL functions, event writes | Contract asserts the allowlist, the U19/U20 checks, duplicate-uid refusal, self-approval and one event per transition |
-| 2 | Apply function and worker pass; retention extension | A request goes `approved -> applied`, the material row and its insert event exist, re-running apply is a no-op, and prune keeps the event |
-| 3 | HTTP routes and error mapping | 201 on submit, 409 on duplicate/forbidden, per-item codes if a batch is added later |
-| 4 | `Add` tab, schema-driven form and preview | A form round trip submits one request with the exact proposed JSON; no client supplies a uid |
-| 5 | Review tab `creates` chip and badge adjustment | An approved create is visible, `own` is enforced, and an applied create links to the material |
+| 1 | `material_create_request` table, submit / update / decide SQL functions, event writes | Contract asserts the allowlist, the U19/U20 checks, duplicate-uid refusal, self-approval, one event per transition, and that update is refused after a decision or by a non-requester |
+| 2 | Apply function and worker pass; retention extension | A request goes `approved -> applied`, the material row and its insert event exist, re-running apply is a no-op, a duplicate `source_id` goes to `failed` with `duplicate_source`, and prune keeps the event |
+| 3 | HTTP routes and error mapping | 201 on submit, `PATCH` updates in place with 409 once decided, 409 on duplicate/forbidden, per-item codes if a batch is added later |
+| 4 | `Add` tab, schema-driven form, grouped preview and collapsed JSON | A form round trip submits one request with the exact proposed JSON; no client supplies a uid; the grouped view and the raw JSON show the same values |
+| 5 | Review tab `creates` chip, badge adjustment and pending in-place edit | An approved create is visible, `own` is enforced, a pending request reopens prefilled and saves without changing its id, and an applied create links to the material |
 | 6 | Docs and full verification | `check_english.py`, all contracts, both DSN suites, API and UI test counts updated |
 
 Nothing in these steps changes `material_change_request` or the existing edit grid. The two flows
 share the audit event table and the actor rules, not their state machine.
 
-## 6. Open questions before step 1
+## 6. Decisions made before step 1
 
-1. **Does a create need a diff preview at all?** The JSON is the whole row, which may be long. A
-   field-by-field table is friendlier but more code. *Leaning: show the table, keep the JSON
-   collapsible.*
-2. **Can a create request be edited after submission?** *Leaning: no.* Reject and submit again,
-   matching the edit path's immutability.
-3. **Who may create?** Every authenticated actor today can stage edits. *Leaning: same rule for
-   creates*, with approval providing the second pair of eyes.
-4. **What happens to a create request whose material was made by the ETL meanwhile?** The unique
-   uid is server-generated, so a collision is unlikely, but a duplicate `source_id` could still
-   happen. *Leaning: refuse at apply with a new `duplicate_source` code rather than silently
-   skipping.*
+These were asked and answered before any code was written. They are recorded here so the choices do
+not have to be relitigated while implementing.
+
+1. **Preview: a grouped field table, with the raw JSON collapsed.** The table is what a reviewer
+   reads; the JSON is there when someone needs to check the exact payload. Both render from the
+   same `proposed` object.
+2. **A pending create request is editable in place.** The author may rewrite `proposed` and the
+   reason through `PATCH /v1/material-create-requests/{id}`, with all submit-time validation re-run
+   and an `update` event written. It keeps its id. Once a decision exists the row is immutable; to
+   change it, reject and file a new request. This differs from the edit path, where a staged diff is
+   local until submit and a filed request is immutable - here the reason is that a create form has
+   many fields and a single typo should not cost the requester their place in the queue.
+3. **Every authenticated actor may submit a create.** The same rule as staging edits. The second
+   pair of eyes comes from the approval, not from a creation whitelist.
+4. **A duplicate `source_id` at apply time is a `duplicate_source` failure.** The request goes to
+   `failed` with that code and the conflicting uid in `error`; it is never silently skipped and it
+   never overwrites the row the ETL just wrote. A human decides whether to reject the create or
+   retire the imported row.
 
 ## 7. Non-goals
 
