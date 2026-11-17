@@ -84,7 +84,8 @@ BEGIN
         'category_code','name','product_type','description','brand_id','model_no',
         'family_id','default_supplier_id','default_supplier_ref','lead_time_days',
         'unit','currency','cost_basis','unit_cost','image_url','product_url',
-        'synonyms','tags','attributes'
+        'synonyms','tags','attributes','source_system','source_id',
+        'source_payload','imported_at'
      );
     IF array_length(v_keys, 1) > 0 THEN
         RAISE EXCEPTION 'unknown proposed field: %', v_keys[1] USING ERRCODE = '22023';
@@ -289,3 +290,143 @@ END $$;
 COMMENT ON FUNCTION material_create_request_decide(bigint, text, text, text) IS
     'Decide a pending create request. Different actor required; the reason is written to '
     'material_event, which is its only home.';
+
+-- ---------------------------------------------------------------------------
+-- material_create_request_apply - insert the material, once
+-- ---------------------------------------------------------------------------
+-- Called by the worker for an approved request. The material row, its insert
+-- event and the request's applied marker are written in ONE transaction: if
+-- anything raises, the caller's ROLLBACK leaves the request approved and
+-- re-runnable. A request already applied is a no-op, so a retried worker pass
+-- never inserts a second material.
+CREATE OR REPLACE FUNCTION material_create_request_apply(
+    p_id       bigint,
+    p_actor    text DEFAULT NULL
+) RETURNS jsonb
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_row      material_create_request%ROWTYPE;
+    v_actor    text;
+    v_uid      text;
+    v_source   text;
+    v_sourceid text;
+    v_existing text;
+    v_tries    integer := 0;
+BEGIN
+    v_actor := ml_create_material_actor(p_actor);
+
+    SELECT * INTO v_row FROM material_create_request WHERE id = p_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'not_found', 'id', p_id);
+    END IF;
+    -- Idempotence first: an applied request already has its material and event.
+    IF v_row.status = 'applied' THEN
+        RETURN jsonb_build_object('ok', true, 'code', 'already_applied', 'id', p_id,
+                                  'material_uid', v_row.material_uid);
+    END IF;
+    IF v_row.status <> 'approved' THEN
+        RETURN jsonb_build_object('ok', false, 'code', 'not_approved', 'id', p_id,
+                                  'status', v_row.status);
+    END IF;
+
+    v_source   := nullif(btrim(coalesce(v_row.proposed ->> 'source_system', ''), E' \t\r\n'), '');
+    v_sourceid := nullif(btrim(coalesce(v_row.proposed ->> 'source_id', ''), E' \t\r\n'), '');
+    -- source_id alone is not unique; a source system declares the namespace.
+    IF v_source IS NOT NULL AND v_sourceid IS NOT NULL THEN
+        SELECT m.material_uid INTO v_existing
+          FROM material m
+         WHERE m.source_system = v_source AND m.source_id = v_sourceid
+         LIMIT 1;
+        IF v_existing IS NOT NULL THEN
+            UPDATE material_create_request
+               SET status = 'failed', applied_at = now(),
+                   error  = 'duplicate_source: ' || v_existing
+             WHERE id = p_id;
+            INSERT INTO material_event (material_uid, entity, op, payload, actor)
+            VALUES (v_existing, 'material_create_request', 'update',
+                    jsonb_build_object('request_id', p_id, 'actor', v_actor,
+                                       'code', 'duplicate_source',
+                                       'material_uid', v_existing),
+                    v_actor);
+            RETURN jsonb_build_object('ok', false, 'code', 'duplicate_source', 'id', p_id,
+                                      'material_uid', v_existing);
+        END IF;
+    END IF;
+
+    -- The validator refuses a proposed material_uid, so generation is always
+    -- server-side. Retry the tiny collision space rather than failing a valid
+    -- request on bad luck.
+    LOOP
+        v_tries := v_tries + 1;
+        v_uid := ml_new_material_uid();
+        EXIT WHEN NOT EXISTS (SELECT 1 FROM material WHERE material_uid = v_uid);
+        IF v_tries > 10 THEN
+            RAISE EXCEPTION 'could not allocate a free material_uid after 10 tries';
+        END IF;
+    END LOOP;
+
+    INSERT INTO material (
+        material_uid, category_code, name, product_type, description, brand_id,
+        model_no, family_id, default_supplier_id, default_supplier_ref,
+        lead_time_days, unit, currency, cost_basis, unit_cost, image_url,
+        product_url, synonyms, tags, attributes,
+        source_system, source_id, created_by, updated_by, status
+    ) VALUES (
+        v_uid,
+        v_row.proposed ->> 'category_code',
+        v_row.proposed ->> 'name',
+        nullif(v_row.proposed ->> 'product_type', ''),
+        nullif(v_row.proposed ->> 'description', ''),
+        NULLIF(v_row.proposed ->> 'brand_id', '')::bigint,
+        nullif(v_row.proposed ->> 'model_no', ''),
+        nullif(v_row.proposed ->> 'family_id', ''),
+        NULLIF(v_row.proposed ->> 'default_supplier_id', '')::bigint,
+        nullif(v_row.proposed ->> 'default_supplier_ref', ''),
+        NULLIF(v_row.proposed ->> 'lead_time_days', '')::integer,
+        nullif(v_row.proposed ->> 'unit', ''),
+        coalesce(nullif(v_row.proposed ->> 'currency', ''), 'AUD'),
+        coalesce(nullif(v_row.proposed ->> 'cost_basis', ''), 'ex_gst'),
+        NULLIF(v_row.proposed ->> 'unit_cost', '')::numeric,
+        nullif(v_row.proposed ->> 'image_url', ''),
+        nullif(v_row.proposed ->> 'product_url', ''),
+        CASE WHEN v_row.proposed ? 'synonyms'
+                  AND jsonb_typeof(v_row.proposed -> 'synonyms') = 'array'
+             THEN (SELECT coalesce(array_agg(x #>> '{}'), '{}'::text[])
+                     FROM jsonb_array_elements(v_row.proposed -> 'synonyms') x)
+             ELSE '{}'::text[] END,
+        CASE WHEN v_row.proposed ? 'tags'
+                  AND jsonb_typeof(v_row.proposed -> 'tags') = 'array'
+             THEN (SELECT coalesce(array_agg(x #>> '{}'), '{}'::text[])
+                     FROM jsonb_array_elements(v_row.proposed -> 'tags') x)
+             ELSE '{}'::text[] END,
+        CASE WHEN v_row.proposed ? 'attributes'
+                  AND jsonb_typeof(v_row.proposed -> 'attributes') = 'object'
+             THEN v_row.proposed -> 'attributes'
+             ELSE '{}'::jsonb END,
+        v_source, v_sourceid, v_actor, v_actor, 'active'
+    );
+
+    -- The material table's AFTER INSERT trigger writes the material:insert
+    -- event itself; writing one here would duplicate it. Set the actor so the
+    -- trigger attributes the row to the worker, and link the request in the
+    -- create_request event below.
+    PERFORM set_config('ml.actor', v_actor, true);
+    INSERT INTO material_event (material_uid, entity, op, payload, actor)
+    VALUES (v_uid, 'material_create_request', 'insert',
+            jsonb_build_object('request_id', p_id, 'code', 'applied',
+                               'proposed', v_row.proposed, 'actor', v_actor),
+            v_actor);
+
+    UPDATE material_create_request
+       SET status = 'applied', material_uid = v_uid,
+           applied_at = now(), error = NULL
+     WHERE id = p_id;
+
+    RETURN jsonb_build_object('ok', true, 'code', 'applied', 'id', p_id,
+                              'material_uid', v_uid);
+END $$;
+
+COMMENT ON FUNCTION material_create_request_apply(bigint, text) IS
+    'Insert the approved material, its insert event and the applied marker in one '
+    'transaction. Re-running on an applied request is a no-op. A duplicate '
+    '(source_system, source_id) fails the request with duplicate_source.';

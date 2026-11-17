@@ -24,6 +24,7 @@ DECLARE
     v_bad    jsonb;
     v_id     bigint;
     v_rej    bigint;
+    v_uid    text;
     v_count  integer;
 BEGIN
     -- 1. Entry validation: allowlist, required fields, U19 and U20 -----------
@@ -144,10 +145,83 @@ BEGIN
     EXCEPTION WHEN SQLSTATE '22023' THEN NULL;
     END;
 
-    -- No direct material write: creation happens only in the apply step.
+    -- No direct material write during submit/update/decide: creation is only
+    -- in apply. (The applied rows below use different names.)
     IF EXISTS (SELECT 1 FROM material
                 WHERE name IN ('First name', 'Second name', 'Reject me')) THEN
         RAISE EXCEPTION 'a material was written during submit/update/decide';
+    END IF;
+
+    -- 6. Apply: approved -> applied, one material row and one insert event ---
+    v_report := material_create_request_submit(
+        ('{"category_code":"board","name":"Apply me","unit":"m2",'
+         '"attributes":{"colour":"oak"},"synonyms":["a","b"],'
+         '"source_system":"joineryflow","source_id":"contract:apply"}')::jsonb,
+        'why', 'alice');
+    v_id := (v_report ->> 'id')::bigint;
+    -- unapproved apply is refused
+    v_report := material_create_request_apply(v_id, 'worker');
+    IF v_report ->> 'code' <> 'not_approved' THEN RAISE EXCEPTION 'apply pending: %', v_report; END IF;
+    PERFORM material_create_request_decide(v_id, 'approve', 'ok', 'bob');
+    v_report := material_create_request_apply(v_id, 'worker');
+    IF v_report ->> 'code' <> 'applied' THEN RAISE EXCEPTION 'apply: %', v_report; END IF;
+    v_uid := v_report ->> 'material_uid';
+
+    IF NOT EXISTS (SELECT 1 FROM material
+                    WHERE material_uid = v_uid AND name = 'Apply me'
+                      AND attributes = '{"colour":"oak"}'::jsonb
+                      AND synonyms = ARRAY['a','b']
+                      AND status = 'active' AND created_by = 'worker') THEN
+        RAISE EXCEPTION 'apply did not create the material row correctly';
+    END IF;
+    -- Exactly one material:insert: the table's AFTER INSERT trigger owns it.
+    IF (SELECT count(*) FROM material_event
+         WHERE material_uid = v_uid AND entity = 'material' AND op = 'insert') <> 1 THEN
+        RAISE EXCEPTION 'apply did not write exactly one material insert event';
+    END IF;
+    -- The request link lives on a create_request event, not the material event.
+    IF NOT EXISTS (SELECT 1 FROM material_event
+                    WHERE material_uid = v_uid AND entity = 'material_create_request'
+                      AND payload ->> 'request_id' = v_id::text
+                      AND payload ->> 'code' = 'applied') THEN
+        RAISE EXCEPTION 'apply did not link the request to the new material';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM material_create_request
+                    WHERE id = v_id AND status = 'applied' AND material_uid = v_uid
+                      AND applied_at IS NOT NULL) THEN
+        RAISE EXCEPTION 'apply did not mark the request applied';
+    END IF;
+
+    -- 7. Re-running apply is a no-op: no second row, no second event --------
+    v_report := material_create_request_apply(v_id, 'worker');
+    IF v_report ->> 'code' <> 'already_applied' THEN RAISE EXCEPTION 'idempotent apply: %', v_report; END IF;
+    IF (SELECT count(*) FROM material WHERE name = 'Apply me') <> 1 THEN
+        RAISE EXCEPTION 'a second apply inserted a duplicate material';
+    END IF;
+    IF (SELECT count(*) FROM material_event
+         WHERE material_uid = v_uid AND entity = 'material' AND op = 'insert') <> 1 THEN
+        RAISE EXCEPTION 'a second apply wrote a duplicate insert event';
+    END IF;
+
+    -- 8. Duplicate source_id at apply time: failed with duplicate_source ----
+    -- Seed a row with the same source namespace, as the ETL would.
+    INSERT INTO material (material_uid, category_code, name, source_system, source_id)
+    VALUES (ml_new_material_uid(), 'board', 'Imported first', 'joineryflow', 'contract:dup');
+    v_report := material_create_request_submit(
+        '{"category_code":"board","name":"Dup","source_system":"joineryflow",'
+         '"source_id":"contract:dup"}'::jsonb, 'why', 'alice');
+    v_rej := (v_report ->> 'id')::bigint;
+    PERFORM material_create_request_decide(v_rej, 'approve', 'ok', 'bob');
+    v_report := material_create_request_apply(v_rej, 'worker');
+    IF v_report ->> 'code' <> 'duplicate_source' THEN RAISE EXCEPTION 'duplicate apply: %', v_report; END IF;
+    IF NOT EXISTS (SELECT 1 FROM material_create_request
+                    WHERE id = v_rej AND status = 'failed'
+                      AND error LIKE 'duplicate_source:%') THEN
+        RAISE EXCEPTION 'duplicate_source was not recorded on the request';
+    END IF;
+    IF (SELECT count(*) FROM material
+         WHERE source_system = 'joineryflow' AND source_id = 'contract:dup') <> 1 THEN
+        RAISE EXCEPTION 'duplicate_source overwrote or duplicated the imported row';
     END IF;
 END $$;
 
@@ -155,5 +229,5 @@ ROLLBACK;
 
 DO $$
 BEGIN
-    RAISE NOTICE 'create-material contract OK: allowlist, U19/U20, in-place update with author and pending guards, self-approval, decision reason in the event, per-transition events, and no direct material write';
+    RAISE NOTICE 'create-material contract OK: allowlist, U19/U20, in-place update with author and pending guards, self-approval, decision reason in the event, per-transition events, and no direct material write, idempotent apply, duplicate_source failure';
 END $$;

@@ -8,6 +8,7 @@ Design: docs/t3-writeback.md sections 3, 8 and 9.
     python scripts/apply_change_requests.py --dsn "$ML_WRITEBACK_DSN" --retry 12
     python scripts/apply_change_requests.py --dsn "$ML_WRITEBACK_DSN" --verify 12
     python scripts/apply_change_requests.py --dsn "$ML_WRITEBACK_DSN" --verify 12 --resolve
+    python scripts/apply_change_requests.py --dsn "$ML_DSN" --apply-creates
 
 Dry-run is the default and is a true no-op: zero writes to
 material_change_request, zero material_event rows and zero HTTP calls. It still
@@ -18,6 +19,9 @@ upstream shows the approved values; it is read-only unless --resolve is given,
 and a missing upstream column is reported as unreachable, never as a mismatch.
 The executor sends one PATCH per claimed request and settles every
 outcome through SQL; it never decides a state transition itself (D4).
+--apply-creates instead inserts locally approved create requests through
+material_create_request_apply(); it makes no upstream call and needs no
+joineryflow credentials, because a new material has no upstream row to PATCH.
 
 CI never egresses to joineryflow: tests point ML_JF_BASE_URL at a stdlib
 http.server on 127.0.0.1 with an ephemeral port and inject a dummy token. No
@@ -102,6 +106,7 @@ def resolve_workspace(mapping_path: Path | None = None) -> str:
 def build_config(args: argparse.Namespace) -> Config:
     mode = ("retry" if args.retry else
             "verify" if args.verify else
+            "apply-creates" if args.apply_creates else
             "apply" if args.apply else "dry-run")
     workspace = resolve_workspace()
     if mode not in ("apply", "verify"):
@@ -196,6 +201,8 @@ def make_parser() -> argparse.ArgumentParser:
                       help="report plans without writing or sending (the default)")
     mode.add_argument("--apply", action="store_true",
                       help="claim, PATCH the upstream and settle each outcome")
+    mode.add_argument("--apply-creates", action="store_true",
+                      help="insert approved create requests locally; no upstream call")
     single = ap.add_mutually_exclusive_group()
     single.add_argument("--request-id", type=int, default=None,
                         help="restrict the batch to one request id")
@@ -289,6 +296,41 @@ def dry_run(cur, cfg: Config, args, report: dict) -> None:
             "id": rid, "status": "preview", "url": plan["url"],
             "headers": plan["headers"], "body": plan["body"],
             "http_status": None, "error": None, "outcome": "preview",
+        })
+
+
+def apply_creates(cur, cfg: Config, args, report: dict) -> None:
+    """Insert approved create requests. No upstream call, no claim, no retry.
+
+    The SQL function is idempotent: an already-applied request returns
+    already_applied and is counted as skipped, not as a second insert. A
+    duplicate source_id returns duplicate_source and the request is failed.
+    """
+    cur.execute(
+        "SELECT id FROM material_create_request WHERE status = 'approved' "
+        "ORDER BY id LIMIT %s",
+        (args.limit,),
+    )
+    ids = [row["id"] for row in cur.fetchall()]
+    report["checked"] = len(ids)
+    for rid in ids:
+        result = _one(
+            cur, "SELECT material_create_request_apply(%s, %s)",
+            (rid, report["actor"]),
+        )
+        code = result.get("code")
+        outcome = code if code in ("applied", "already_applied", "duplicate_source") else "failed"
+        if outcome == "applied":
+            report["applied"] += 1
+        elif outcome == "already_applied":
+            report["skipped"] += 1
+        else:
+            report["failed"] += 1
+        report["rows"].append({
+            "id": rid, "status": code, "url": None, "http_status": None,
+            "error": None if result.get("ok") else code,
+            "outcome": outcome,
+            "material_uid": result.get("material_uid"),
         })
 
 
@@ -441,6 +483,8 @@ def run(args: argparse.Namespace, cfg: Config, dsn: str, *,
                 dry_run(cur, cfg, args, report)
             elif cfg.mode == "verify":
                 verify_request(cur, cfg, args, report, client)
+            elif cfg.mode == "apply-creates":
+                apply_creates(cur, cfg, args, report)
             else:
                 apply_batch(cur, cfg, args, report, client)
     finally:
@@ -481,6 +525,10 @@ def main(argv: list[str] | None = None, *, connect=None, client=None) -> int:
         return USAGE
     if args.retry and args.apply:
         print("error: --retry cannot be combined with --apply", file=sys.stderr)
+        return USAGE
+    if args.apply_creates and (args.retry or args.verify is not None):
+        print("error: --apply-creates cannot be combined with --retry or --verify",
+              file=sys.stderr)
         return USAGE
     if args.resolve and args.verify is None:
         print("error: --resolve requires --verify N", file=sys.stderr)
