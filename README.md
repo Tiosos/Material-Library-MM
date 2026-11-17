@@ -47,7 +47,7 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 ├── docs/t3-writeback.md             T3 write-back design (final)
 ├── docs/t3-progress.md              T3 implementation log and verification
 ├── docs/ui-bulk-edit.md             manual query and bulk edit UI design (steps 1-7)
-├── docs/ui-create-material.md       adding new materials from the UI: design, steps 1-5 of 6 implemented
+├── docs/ui-create-material.md       adding new materials from the UI: design, all 6 steps implemented
 └── proto/                       ★ runnable prototype (zero dependencies, to validate the search feel)
     ├── build_db.py             generate the sample library (100 rows, real brands and field structure)
     ├── search.py               tiered graceful-degradation search implementation
@@ -297,7 +297,7 @@ dummy token.
 # 1) Load the state machine after seed.sql (it references material_category rows)
 psql -q -v ON_ERROR_STOP=1 -d ml -f schema/writeback.sql
 
-# 1b) Optional: approval-based creation (docs/ui-create-material.md, steps 1-3)
+# 1b) Approval-based creation, fully shipped (docs/ui-create-material.md, all 6 steps)
 psql -q -v ON_ERROR_STOP=1 -d ml -f schema/create-material.sql
 
 # 2) Review routes (FastAPI; X-Actor names the caller)
@@ -426,8 +426,9 @@ Edit the material pool at the top of `proto/build_db.py` (`BOARDS` / `HARDWARE` 
 - [x] **Real-data ETL (snapshot-first)**: committed 18-row joineryflow snapshot, executable mapping v2, pure reader/draft builder, idempotent import CLI, SQL contract, integration tests and a dedicated `etl` CI job (PRs #9-#13), verified end to end on PostgreSQL 16
 - [x] **Write-back executor (T3)**: SQL-owned approval state machine with a five-minute lease and `FOR UPDATE SKIP LOCKED`, dry-run-first PATCH worker with a fake upstream in CI, five HTTP review routes, SQL contract and a dedicated `writeback` CI job
 - [x] **Manual query and bulk edit UI**: no-build ES-module screen at `/ui` with facets, structured filters, saved views, a staging grid with schema-driven editors, a review sheet that files batches, and a Review tab with stale / inactive / own badges and single or bulk decisions; 23 decisions and seven merged steps (PRs #22-#27)
+- [x] **Approval-based new materials**: `material_create_request` table and submit / update / decide / apply SQL, a `--apply-creates` worker pass and 90-day retention, five HTTP routes, an Add tab with a schema-driven form and grouped preview, and a Review `creates` chip; six merged steps (PRs #29-#34)
 
-**Next step: operational hardening, not another structural gap.** The model layer now covers design, search, supplier imports, duplicate merge, MCP, real-data ETL, approval-based write-back and the manual edit UI, and the four T3 consistency follow-ups are merged. Every state in the five-state machine now has a way out: `--apply` for `approved`, `--retry` for a known failure, and `--verify` for an outcome nobody could see. What remains depends on the live source system: incremental sync needs joineryflow's `updated_at` and real credentials, while `Idempotency-Key` support, the exact workspace guard, the `GET` response shape and a read-scoped token are open questions recorded in [`docs/t3-writeback.md`](docs/t3-writeback.md) §16 and [`docs/t3-progress.md`](docs/t3-progress.md). Request retention is no longer open: the 90-day prune CLI and the watermark are shipped. Who schedules the worker and the prune job is an operations choice. ETIM/eCl@ss codes and EPD collection stay reserved slots until real supplier classification data arrives. T1b closed the two gaps the read API used to advertise: families collapse by default (`expand=variants` returns the records) and `format=json` exports the versioned envelope validated by `schema/export.schema.json`. `docs/t2-merge.md` §9 explains recovery without an `unmerge()`.
+**Next step: operational hardening, not another structural gap.** The model layer now covers design, search, supplier imports, duplicate merge, MCP, real-data ETL, approval-based write-back, the manual edit UI and approval-based creation of new materials, and the four T3 consistency follow-ups are merged. `docs/ui-create-material.md` records all six shipped steps (PRs #29-#34): a proposed row is filed from the Add tab, decided by a second actor in Review, and turned into a material by `--apply-creates` - there is deliberately no `POST /v1/materials`. Every state in the five-state machine now has a way out: `--apply` for `approved`, `--retry` for a known failure, and `--verify` for an outcome nobody could see. What remains depends on the live source system: incremental sync needs joineryflow's `updated_at` and real credentials, while `Idempotency-Key` support, the exact workspace guard, the `GET` response shape and a read-scoped token are open questions recorded in [`docs/t3-writeback.md`](docs/t3-writeback.md) §16 and [`docs/t3-progress.md`](docs/t3-progress.md). Request retention is no longer open: the 90-day prune CLI and the watermark are shipped. Who schedules the worker and the prune job is an operations choice. ETIM/eCl@ss codes and EPD collection stay reserved slots until real supplier classification data arrives. T1b closed the two gaps the read API used to advertise: families collapse by default (`expand=variants` returns the records) and `format=json` exports the versioned envelope validated by `schema/export.schema.json`. `docs/t2-merge.md` §9 explains recovery without an `unmerge()`.
 
 ---
 

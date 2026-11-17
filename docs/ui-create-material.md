@@ -1,9 +1,8 @@
 # Adding new materials from the UI - design and implementation
 
-Status: steps 1-5 of 6 implemented (`schema/create-material.sql`, `scripts/create_material_contract.sql`,
-the `--apply-creates` worker pass, retained create-request rows, five HTTP routes, the Add tab and
-the Review `creates` chip); step 6 remains a proposal. It answers one question raised after the seven-step manual edit UI
-shipped: the screen can find and change existing materials, but it cannot add a new one.
+Status: all 6 delivery steps implemented and verified. It answers one question raised after the
+seven-step manual edit UI shipped: the screen could find and change existing materials but could
+not add a new one. It now can, through approval rather than a direct browser `INSERT`.
 
 ## 1. What exists now
 
@@ -12,11 +11,14 @@ shipped: the screen can find and change existing materials, but it cannot add a 
 | View stored materials | Yes: search, facets, structured filters, paging, detail | `/ui` Edit tab, `/v1/materials`, `GET /v1/materials/{uid}` |
 | Change existing values | Yes: staged diffs, one batch call, approval, audit | `/ui` staging grid, `POST /v1/change-requests/batch`, T3 |
 | Approve / reject changes | Yes: queue, badges, single and bulk decisions | `/ui` Review tab, `decide()` and `decide-batch` |
-| Add a new material | **No** | Only `scripts/import_joineryflow.py` inserts rows, from the committed snapshot |
+| Add a new material | Yes: proposed row, approval, worker apply, audit | `/ui` Add tab, `/v1/material-create-requests`, `--apply-creates`, `material_create_request` |
 
-The gap is real and narrow: there is no `POST /v1/materials` and no `material_create()` SQL
-function. `material_change_request_submit()` also computes `before` and `base.values` from a live
-row, so a request about a material that does not exist yet has nothing to compare against.
+The gap used to be real and narrow: there was no `POST /v1/materials` and no `material_create()`
+SQL function, and `material_change_request_submit()` computes `before` and `base.values` from a
+live row, so a request about a material that does not exist yet has nothing to compare against.
+The shipped design files a `material_create_request` instead (section 3C), decides it under the
+same actor rules, and lets the `--apply-creates` worker create the row only after approval. There
+is still no `POST /v1/materials`: creation is deliberately approval-based, never a direct write.
 
 ## 2. Why create is not just another diff
 
@@ -161,7 +163,7 @@ A third tab, `Add`, next to `Edit` and `Review`:
 | 3 | HTTP routes and error mapping | `tests/test_create_material.py` 7/7: 201 submit, queued list with cursor paging, detail with event-backed `decision_reason`, `PATCH` in place (200 same id, 403 for a non-author, 409 once decided), approve/reject with 409 self-approval, 400 on validation; no token in any response |
 | 4 | `Add` tab, schema-driven form, grouped preview and collapsed JSON | `tests/test_ui.py` 14/14; browser pass confirmed the 22-field form built from the schema, attribute fields that follow the category, a grouped preview plus collapsed JSON matching the proposed object, 201 submit, reopening a pending request prefilled and saving in place under the same id |
 | 5 | Review tab `creates` chip, badge adjustment and pending in-place edit | `tests/test_ui.py` 18/18; browser pass confirmed the creates chip queues proposed rows, the detail shows Proposed + an event-backed reason with only the `own` badge, a second actor can approve, and an applied request links to its material |
-| 6 | Docs and full verification | `check_english.py`, all contracts, both DSN suites, API and UI test counts updated |
+| 6 | Docs and full verification | `check_english.py`, compileall, mapping checks, 93 unit tests, five SQL contracts (zero residual rows), all three DSN suites; full suite 258 passed with all three DSNs and 225 passed / 33 skipped on the api recipe; per-step file counts are recorded in steps 3-5 |
 
 Nothing in these steps changes `material_change_request` or the existing edit grid. The two flows
 share the audit event table and the actor rules, not their state machine.
