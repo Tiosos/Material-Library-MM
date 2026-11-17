@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Material Library - Preview</title>
+<style>
+/* ===== inlined from api/ui/styles.css ===== */
+/* Visual language inherited from proto/web/index.html: light surfaces, one blue
+   accent, Inter first. Copied by hand so proto/ stays untouched and this screen
+   can diverge when the grid arrives in step 5. */
+:root{
+  --bg:#f7f8fa; --panel:#fff; --line:#e4e7ec; --line2:#eef0f4;
+  --ink:#111827; --ink2:#4b5563; --ink3:#8b94a3;
+  --accent:#1f5eff; --accent-soft:#eef3ff;
+  --ok:#0f8a5f; --warn:#b45309; --warn-soft:#fef6e7;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%}
+body{
+  background:var(--bg);color:var(--ink);
+  font:14px/1.5 Inter,-apple-system,"Segoe UI",sans-serif;
+  display:flex;flex-direction:column;
+}
+button{font:inherit;cursor:pointer}
+input,select{font:inherit;color:var(--ink)}
+.hint{color:var(--ink3);font-size:12px}
+
+header{position:sticky;top:0;z-index:20;background:var(--panel);border-bottom:1px solid var(--line)}
+.hrow{max-width:1600px;margin:0 auto;padding:11px 20px;display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:9px;font-weight:650;letter-spacing:-.01em;white-space:nowrap}
+.brand .dot{width:9px;height:9px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.brand small{font-weight:400;color:var(--ink3);font-size:12px}
+.tabs{display:flex;gap:4px}
+.tab{border:1px solid transparent;background:transparent;color:var(--ink2);padding:7px 14px;border-radius:8px}
+.tab:hover{background:var(--line2)}
+.tab.active{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:600}
+.identity{margin-left:auto;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.identity label{font-size:12px;color:var(--ink2);display:flex;gap:6px;align-items:center}
+.identity input{width:120px;padding:6px 9px;border:1px solid var(--line);border-radius:7px;background:#fbfcfd;outline:none}
+.identity input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+
+main{max-width:1600px;width:100%;margin:0 auto;padding:18px 20px;display:grid;grid-template-columns:210px minmax(0,1fr);gap:18px;flex:1}
+.sidebar{display:flex;flex-direction:column;gap:18px}
+.side-block{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}
+.side-block h3{margin:0 0 9px;font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink3)}
+.facets{display:flex;flex-direction:column;gap:2px;max-height:230px;overflow:auto}
+.facet{display:flex;justify-content:space-between;gap:8px;border:0;background:transparent;text-align:left;padding:5px 6px;border-radius:6px;color:var(--ink2);font-size:13px}
+.facet:hover{background:var(--line2)}
+.facet.selected{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.facet .count{color:var(--ink3);font-variant-numeric:tabular-nums}
+.facet-empty{color:var(--ink3);font-size:12px;padding:4px 6px}
+
+.content{min-width:0}
+.querybar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+.searchwrap{flex:1;min-width:230px;position:relative}
+.searchwrap input{width:100%;padding:9px 12px 9px 33px;border:1px solid var(--line);border-radius:9px;background:var(--panel);outline:none}
+.searchwrap input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.searchwrap .icon{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--ink3)}
+.querybar label{font-size:12px;color:var(--ink2);display:flex;gap:6px;align-items:center}
+.querybar select{padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+.btn{border:1px solid var(--line);background:var(--panel);color:var(--ink2);padding:8px 12px;border-radius:8px;white-space:nowrap}
+.btn:hover{border-color:#c9cfda;color:var(--ink)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.primary:hover{background:#1a50e0}
+.btn.small{padding:5px 9px;font-size:12px}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px}
+.panel-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:9px}
+.panel h3{margin:0;font-size:13px}
+.filter-row{display:flex;gap:8px;align-items:center;margin-bottom:7px;flex-wrap:wrap}
+.filter-row select,.filter-row input{padding:6px 8px;border:1px solid var(--line);border-radius:7px;background:var(--panel)}
+.filter-row .remove{border:0;background:transparent;color:var(--ink3)}
+.filter-row .remove:hover{color:var(--warn)}
+.view{display:flex;gap:8px;align-items:center;padding:5px 0}
+.view button.link{border:0;background:transparent;color:var(--accent);padding:0}
+.view button.delete{border:0;background:transparent;color:var(--ink3);margin-left:auto}
+.view button.delete:hover{color:var(--warn)}
+
+.warning{background:var(--warn-soft);border:1px solid #f0d9a8;color:var(--warn);border-radius:8px;padding:8px 11px;margin-bottom:12px;font-size:13px}
+.resultbar{display:flex;gap:10px;align-items:center;margin-bottom:9px;flex-wrap:wrap}
+.total{font-weight:600}
+.pill{font-size:12px;padding:3px 9px;border-radius:20px;border:1px solid var(--line);background:var(--panel);color:var(--ink2)}
+.pill:empty{display:none}
+
+.tablewrap{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:auto}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{text-align:left;padding:9px 11px;border-bottom:1px solid var(--line2);white-space:nowrap}
+th{position:sticky;top:0;background:var(--panel);font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink3);z-index:1}
+td.name{font-weight:550;max-width:330px;overflow:hidden;text-overflow:ellipsis}
+td .uid{font:11px var(--mono);color:var(--ink3)}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+tbody tr:last-child td{border-bottom:0}
+tbody tr:hover{background:#fafbfe}
+.empty{text-align:center;color:var(--ink3);padding:28px}
+.pager{display:flex;gap:10px;align-items:center;justify-content:flex-end;margin-top:11px}
+
+footer{max-width:1600px;width:100%;margin:0 auto;padding:10px 20px;display:flex;gap:16px;justify-content:space-between;border-top:1px solid var(--line);color:var(--ink2);font-size:12px}
+
+/* ---------- step 5: edit grid, staging, popover and review sheet ---------- */
+td.editable{cursor:text;border-bottom:2px solid transparent}
+td.editable:hover{background:var(--accent-soft);border-bottom-color:var(--accent)}
+td.dirty{background:#fff8e8;border-bottom-color:var(--warn)}
+td .linecount{font:11px var(--mono);color:var(--warn);margin-left:5px}
+
+.staging-bar{
+  position:sticky;bottom:0;z-index:15;background:var(--panel);
+  border-top:1px solid var(--line);box-shadow:0 -3px 12px rgba(17,24,39,.06);
+  max-width:1600px;width:100%;margin:0 auto;padding:11px 20px;
+  display:flex;justify-content:space-between;align-items:center;gap:14px;
+}
+.staging-bar[hidden]{display:none}
+.staging-actions{display:flex;gap:8px}
+#staging-summary{font-weight:600}
+
+.popover{
+  position:fixed;z-index:40;right:26px;bottom:70px;width:min(430px,calc(100vw - 40px));
+  background:var(--panel);border:1px solid var(--line);border-radius:11px;
+  box-shadow:0 14px 40px rgba(17,24,39,.16);padding:13px;
+}
+.popover[hidden]{display:none}
+.popover textarea,.popover input,.popover select{
+  width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:8px;
+  background:#fbfcfd;outline:none;
+}
+.popover textarea:focus,.popover input:focus,.popover select:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.popover textarea{resize:vertical;font:13px/1.55 var(--mono)}
+.popover-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:10px}
+#editor-counter{text-align:right;margin-top:4px}
+#editor-counter.over{color:#b91c1c;font-weight:600}
+.popover .field-label{font-size:12px;color:var(--ink2);display:block;margin-bottom:5px}
+
+dialog#review-sheet{
+  border:1px solid var(--line);border-radius:12px;padding:18px;
+  width:min(780px,calc(100vw - 36px));max-height:86vh;overflow:auto;
+  box-shadow:0 20px 60px rgba(17,24,39,.18);color:var(--ink);background:var(--panel);
+}
+dialog#review-sheet::backdrop{background:rgba(17,24,39,.35)}
+dialog h2{margin:0;font-size:17px}
+.review-group{border:1px solid var(--line);border-radius:9px;margin-bottom:10px;padding:10px}
+.review-group h3{margin:0 0 7px;font-size:13px}
+.diff-line{display:grid;grid-template-columns:120px 1fr 24px 1fr;gap:8px;align-items:start;font-size:12px;padding:4px 0}
+.diff-line .arrow{text-align:center;color:var(--ink3)}
+.diff-line .before{color:var(--ink3)}
+.diff-line .after{font-family:var(--mono);white-space:pre-wrap;word-break:break-word}
+.diff-line .nl-flag{color:var(--warn);font-size:11px}
+.review-footer{display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--line);padding-top:12px}
+.review-footer label{font-size:12px;color:var(--ink2)}
+.review-footer textarea{width:100%;padding:8px;border:1px solid var(--line);border-radius:8px;background:#fbfcfd;outline:none}
+.review-footer textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.review-result{border-left:3px solid var(--ok);padding:5px 9px;margin:5px 0;background:#f1fbf6;font-size:12px}
+.review-result.failed{border-left-color:var(--warn);background:var(--warn-soft)}
+
+/* ---------- step 6: review queue, detail drawer and decision sheet ---------- */
+.review-view{max-width:1600px;width:100%;margin:0 auto;padding:18px 20px;flex:1}
+.review-view[hidden]{display:none}
+.add-view[hidden]{display:none}
+main[hidden]{display:none}
+.review-toolbar{display:flex;justify-content:space-between;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:11px}
+.filter-chips,.review-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.chip{border:1px solid var(--line);background:var(--panel);color:var(--ink2);padding:6px 12px;border-radius:20px;font-size:12px}
+.chip:hover{border-color:#c9cfda}
+.chip.active{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:600}
+#queue td{cursor:pointer}
+#queue td:first-child{cursor:default}
+.status-pending{color:var(--warn);font-weight:600}
+.status-approved{color:var(--ok);font-weight:600}
+.status-failed{color:#b91c1c;font-weight:600}
+.status-rejected,.status-applied{color:var(--ink3)}
+.badge{display:inline-block;font-size:11px;padding:3px 9px;border-radius:20px;margin-right:5px;border:1px solid}
+.badge.stale{background:var(--warn-soft);border-color:#f0d9a8;color:var(--warn)}
+.badge.inactive{background:#f3f4f6;border-color:var(--line);color:var(--ink3)}
+.badge.own{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
+.badge.decided{background:#f1fbf6;border-color:#a7e0c6;color:var(--ok)}
+
+.drawer{
+  position:fixed;top:0;right:0;bottom:0;z-index:50;width:min(520px,100vw);
+  background:var(--panel);border-left:1px solid var(--line);
+  box-shadow:-10px 0 35px rgba(17,24,39,.12);padding:18px;overflow:auto;
+}
+.drawer[hidden]{display:none}
+.drawer-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+.drawer-head h2{margin:0;font-size:16px}
+.badges{margin-bottom:12px}
+.detail-block{border:1px solid var(--line);border-radius:9px;padding:10px;margin-bottom:10px}
+.detail-block h3{margin:0 0 7px;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink3)}
+.detail-diff{display:grid;grid-template-columns:90px 1fr 18px 1fr;gap:6px;font-size:12px;padding:4px 0}
+.detail-diff .path{font-family:var(--mono)}
+.detail-diff .before{color:var(--ink3)}
+.detail-diff .after{font-family:var(--mono);white-space:pre-wrap;word-break:break-word}
+.detail-kv{display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:3px 0}
+.detail-kv .key{color:var(--ink3)}
+.detail-kv .value{font-family:var(--mono);text-align:right;word-break:break-all}
+.drawer-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
+dialog#decision-sheet{
+  border:1px solid var(--line);border-radius:12px;padding:18px;width:min(620px,calc(100vw - 36px));
+  max-height:86vh;overflow:auto;box-shadow:0 20px 60px rgba(17,24,39,.18);color:var(--ink);background:var(--panel);
+}
+dialog#decision-sheet::backdrop{background:rgba(17,24,39,.35)}
+
+/* ---------- step 4: add-material form and proposed preview ---------- */
+.add-view{max-width:1500px;width:100%;margin:0 auto;padding:18px 20px;flex:1;overflow:auto}
+.add-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;flex-wrap:wrap}
+.add-head h2{margin:0 0 4px;font-size:18px}
+.add-head p{margin:0;max-width:760px}
+.add-head-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.add-head-actions input{width:130px}
+.add-grid{display:grid;grid-template-columns:minmax(420px,1fr) minmax(320px,0.85fr);gap:18px;margin:14px 0}
+.add-form,.add-preview{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:14px}
+.add-group{border:0;padding:0;margin:0 0 14px}
+.add-group legend{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--ink3);padding:0 0 6px}
+.add-row{display:grid;grid-template-columns:150px 1fr;gap:8px;align-items:start;margin-bottom:7px}
+.add-row label{font-size:12px;color:var(--ink2);padding-top:7px}
+.add-row input,.add-row textarea,.add-row select{width:100%}
+.add-row .req{color:var(--accent);font-weight:600}
+.add-preview{position:sticky;top:10px;align-self:start}
+.add-preview h3{margin:0 0 9px;font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink3)}
+.preview-table .detail-diff{grid-template-columns:130px 1fr}
+.preview-table .empty{color:var(--ink3);font-size:12px;font-style:italic}
+#add-json-details{margin-top:11px;border-top:1px solid var(--line);padding-top:9px}
+#add-json-details summary{cursor:pointer;font-size:12px;color:var(--ink2)}
+#add-preview-json{font-family:var(--mono);font-size:11px;white-space:pre-wrap;word-break:break-word;
+  background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:9px;margin:8px 0 0;max-height:260px;overflow:auto}
+.add-footer{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:12px}
+.add-footer label{flex:1;min-width:260px}
+.add-footer .btn{margin-bottom:2px}
+.result-block{border:1px solid var(--line);border-radius:8px;padding:10px;margin-top:10px;font-size:12px}
+.result-block.ok{background:var(--ok-soft);border-color:#a7e0c6}
+.result-block.bad{background:var(--warn-soft);border-color:#f0d9a8}
+@media (max-width:1000px){.add-grid{grid-template-columns:1fr}.add-preview{position:static}}
+
+/* ===== preview-only additions ===== */
+.preview-note{max-width:1600px;margin:0 auto;padding:9px 20px;background:var(--accent-soft);
+  border-bottom:1px solid var(--accent);color:var(--accent);font-size:12px;display:flex;
+  gap:10px;align-items:center;flex-wrap:wrap}
+.preview-note b{font-weight:700}
+.preview-note .spacer{margin-left:auto}
+.preview-note a{color:var(--accent)}
+.brand small{color:var(--accent);font-weight:600}
+td.editable{cursor:default}
+.tab{cursor:pointer}
+</style>
+</head>
+<body>
+<div class="preview-note">
+  <b>Static preview</b>
+  <span>This page is a self-contained snapshot. All data is real but frozen; buttons filter and
+    render locally - they do not call the live API or write to the database.</span>
+  <span class="spacer"></span>
+  <span id="export-stamp"></span>
+</div>
+<header>
+  <div class="hrow">
+    <div class="brand"><span class="dot"></span>Material Library <small>preview</small></div>
+    <nav class="tabs" aria-label="Sections">
+      <button type="button" class="tab active" data-tab="edit">Edit</button>
+      <button type="button" class="tab" data-tab="add">Add</button>
+      <button type="button" class="tab" data-tab="review">Review</button>
+    </nav>
+    <div class="identity">
+      <label>actor <input id="actor" type="text" value="bob" placeholder="server default"></label>
+      <span id="actor-note" class="hint">drives own badges</span>
+      <label>token <input type="password" value="preview" disabled placeholder="n/a"></label>
+      <span class="hint">not used</span>
+    </div>
+  </div>
+</header>
+
+<main id="edit-view">
+  <aside class="sidebar" aria-label="Facets">
+    <div class="side-block"><h3>Category</h3><div id="facet-category" class="facets"></div></div>
+    <div class="side-block"><h3>Brand</h3><div id="facet-brand" class="facets"></div></div>
+    <div class="side-block"><h3>Supplier</h3><div id="facet-supplier" class="facets"></div></div>
+  </aside>
+  <section class="content">
+    <div class="querybar">
+      <div class="searchwrap"><span class="icon" aria-hidden="true">&#9905;</span>
+        <input id="q" type="search" maxlength="200" placeholder="Search materials" autocomplete="off"></div>
+      <label>sort <select id="sort"><option value="">relevance</option><option value="name">name</option>
+        <option value="unit_cost">unit_cost</option><option value="updated_at">updated_at</option></select></label>
+      <label>order <select id="order"><option value="asc">asc</option><option value="desc">desc</option></select></label>
+      <button type="button" id="search" class="btn primary">Search</button>
+    </div>
+    <div class="resultbar">
+      <span id="total" class="total"></span>
+      <span id="level" class="pill">browse</span>
+      <span class="pill">level-accuracy 100%</span>
+    </div>
+    <div class="tablewrap"><table id="results">
+      <thead><tr><th>name</th><th>category</th><th>brand</th><th>supplier</th>
+        <th>unit</th><th class="num">unit_cost</th><th>updated_at</th><th class="num">variants</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table></div>
+    <div class="pager"><button type="button" class="btn" disabled>Previous</button>
+      <span id="page-label" class="hint"></span><button type="button" class="btn" disabled>Next</button></div>
+  </section>
+</main>
+
+<section id="add-view" class="add-view" hidden>
+  <div class="add-head">
+    <div><h2>Add a material</h2>
+      <p class="hint">Every new material is filed as a request. Another actor approves it before a
+        worker creates the row; nothing is written directly.</p></div>
+    <div class="add-head-actions"><label>reopen pending request
+      <input id="add-reopen-id" type="number" placeholder="request id"></label>
+      <button type="button" id="add-reopen" class="btn">Reopen</button></div>
+  </div>
+  <div class="add-grid">
+    <div class="add-form" id="add-form"><div id="add-fields"></div></div>
+    <aside class="add-preview"><h3>Preview</h3>
+      <div id="add-preview-table" class="preview-table"></div>
+      <details id="add-json-details"><summary>raw JSON</summary><pre id="add-preview-json"></pre></details>
+    </aside>
+  </div>
+  <div class="add-footer">
+    <label>reason <textarea id="add-reason" rows="2" maxlength="500"
+      placeholder="why this material is being added"></textarea></label>
+    <span id="add-status" class="hint">Submit is disabled in the static preview.</span>
+    <button type="button" class="btn primary" disabled>Submit for approval</button>
+  </div>
+</section>
+
+<section id="review-view" class="review-view" hidden>
+  <div class="review-toolbar">
+    <div class="filter-chips" aria-label="Queue type">
+      <button type="button" class="chip active" data-kind="edits">edits</button>
+      <button type="button" class="chip" data-kind="creates">creates</button>
+    </div>
+    <div class="filter-chips" aria-label="Queue status">
+      <button type="button" class="chip active" data-status="actionable">actionable</button>
+      <button type="button" class="chip" data-status="pending">pending</button>
+      <button type="button" class="chip" data-status="approved">approved</button>
+      <button type="button" class="chip" data-status="all">all</button>
+    </div>
+    <div class="review-actions"><span id="queue-total" class="total"></span>
+      <button type="button" class="btn primary" disabled>Approve selected</button>
+      <button type="button" class="btn" disabled>Reject selected</button></div>
+  </div>
+  <div class="tablewrap"><table id="queue">
+    <thead><tr><th aria-label="select"></th><th>id</th><th>material</th><th>paths</th>
+      <th>status</th><th>requested by</th><th>age</th><th>decision</th></tr></thead>
+    <tbody id="queue-rows"></tbody>
+  </table></div>
+</section>
+
+<aside id="detail-drawer" class="drawer" hidden>
+  <div class="drawer-head"><h2 id="detail-title">Request</h2>
+    <button type="button" id="detail-close" class="btn small">Close</button></div>
+  <div id="detail-badges" class="badges"></div>
+  <div id="detail-body"></div>
+  <div class="drawer-actions"><button type="button" class="btn primary" disabled>Approve</button>
+    <button type="button" class="btn" disabled>Reject</button></div>
+</aside>
+
+<footer>
+  <span id="footer-status">Ready</span>
+  <span class="hint">Static snapshot - no data was written and no API was called.</span>
+</footer>
+
+<script id="snapshot" type="application/json">{"exported_at": "2026-11-17T22:57:58.276363+00:00", "meta": {"schema_version": "2", "materials": 322, "max_sync_seq": 1421, "updated_at": "2026-11-17T21:38:17.000128Z"}, "results": [{"name": "CLIP top Screw-on hinge NI/ONS", "unit": "ea", "brand": "Blum", "score": 0.0, "category": "hardware.hinge", "supplier": "Blum", "variants": ["mat_2BC6DA76SDPVX5NJP5NGPY686E"], "family_id": "fam_643AJYGAYKCPR6K8JWP9MA40ZB", "unit_cost": null, "updated_at": "2026-11-17T20:13:21.90125+00:00", "family_name": "Blum CLIP top 110 Dual NI/ONS", "material_uid": "mat_02J13HRHHE5XP424AQWP9CY0G2", "variant_count": 2, "variant_values": {"boss": "Screw-on"}}, {"name": "CLIP top BLUMOTION INSERTA hinge NI", "unit": "ea", "brand": "Blum", "score": 0.0, "category": "hardware.hinge", "supplier": "Blum", "variants": ["mat_0PD9FW3P8PSZRWV195THSDB9FQ", "mat_253YXNQ7FC2VAJQPWXJ8FCYNR7", "mat_2XJSFWB4SBRMW1EREFQVYQANV2"], "family_id": "fam_17MGBEQ8Y6PNNPR37EX8FWKWQ1", "unit_cost": null, "updated_at": "2026-11-17T20:13:21.90125+00:00", "family_name": "Blum CLIP top BLUMOTION 110 Dual NI", "material_uid": "mat_04V9KXY06DBV621H0AW6ZXJVG7", "variant_count": 4, "variant_values": {"boss": "INSERTA"}}, {"name": "CLIP top Screw-on hinge NI", "unit": "ea", "brand": "Blum", "score": 0.0, "category": "hardware.hinge", "supplier": "Blum", "variants": ["mat_49WT219HR1HZFV3S1H5CPWT05V", "mat_66Z0VDJC23PAZA5P0ZG1PA843H"], "family_id": "fam_2A3AB9CXT5DH9W81YCJWNHP08V", "unit_cost": null, "updated_at": "2026-11-17T20:13:21.90125+00:00", "family_name": "Blum CLIP top 170 Overlay NI", "material_uid": "mat_05Z9R4T3SC462V1SKNAP6XGASG", "variant_count": 3, "variant_values": {"boss": "Screw-on"}}, {"name": "CLIP top Knock-in hinge NI", "unit": "ea", "brand": "Blum", "score": 0.0, "category": "hardware.hinge", "supplier": "Blum", "variants": ["mat_33000C3JW3BH8JV94044VZZ104", "mat_6MSSR36FYD41826771D5A8FVV0"], "family_id": "fam_5FYE1HP5FVA8YVJB10RS5NXT56", "unit_cost": null, "updated_at": "2026-11-17T20:13:21.90125+00:00", "family_name": "Blum CLIP top 100 Dual NI", "material_uid": "mat_086PM5TCNEAZGR5MEPSWWSF09P", "variant_count": 3, "variant_values": {"boss": "Knock-in"}}, {"name": "CLIP top BLUMOTION Knock-in hinge NI", "unit": "ea", "brand": "Blum", "score": 0.0, "category": "hardware.hinge", "supplier": "Blum", "variants": ["mat_14KKTVDAZ9NA25496SXWVAFGSS", "mat_5GMFC02061NWA4T9JJE4G2SVXX"], "family_id": "fam_5KMGZSHZKBJ177XE6GF0WZRYVH", "unit_cost": null, "updated_at": "2026-11-17T20:13:21.90125+00:00", "family_name": "Blum CLIP top BLUMOTION 155 Overlay NI", "material_uid": "mat_0ATTKH039BQ2S8JGPD0TGV4ERH", "variant_count": 3, "variant_values": {"boss": "Knock-in"}}, {"name": "CLIP top Screw-on hinge NI/ONS", "unit": "ea", "brand": "Blum", "score": 0.0, "category": "hardware.hinge", "supplier": "Blum", "variants": [], "family_id": "fam_3FG99VR7J3WJ05BYSHJ8R7ZPZG", "unit_cost": null, "updated_at": "2026-11-17T20:13:21.90125+00:00", "family_name": "Blum CLIP top Dual NI/ONS", "material_uid": "mat_0E55CV15DKPEFQBR4A8BRFW610", "variant_count": 1, "variant_values": {"boss": "Screw-on"}}, {"name": "CLIP top BLUMOTION INSERTA hinge NI/ONS", "unit": "ea", "brand": "Blum", "score": 0.0, "category": "hardware.hinge", "supplier": "Blum", "variants": ["mat_0P9V31W9QF3ZNS3RA02D6SF2WK", "mat_3G4WWZHH1P8794RSJQXQ27MW9E"], "family_id": "fam_1HE1MXESWRQR58JTMPFBQ0CZVW", "unit_cost": null, "updated_at": "2026-11-17T20:13:21.90125+00:00", "family_name": "Blum CLIP top BLUMOTION 110 Overlay NI/ONS", "material_uid": "mat_0GT4GJ6SKMBAS3RZJ0PQ74T01P", "variant_count": 3, "variant_values": {"boss": "INSERTA"}}, {"name": "Laminex 18mm Black MDF", "unit": "sheet", "brand": "Laminex", "score": 0.0, "category": "board.melamine.mdf", "supplier": "Laminex", "variants": ["mat_0YJPFQ73P9BZPCJED77FPJ5KBP", "mat_3H5775KSDSAH8T4MTGFRR2KYB6"], "family_id": "fam_660W4R4QFMKHMY51ZN6MW39CZ4", "unit_cost": 42.0, "updated_at": "2026-11-17T20:13:23.114561+00:00", "family_name": "Laminex Black MDF Melamine", "material_uid": "mat_0Q5NR10E34B7GVYZSMBWJFTNE5", "variant_count": 3, "variant_values": {"thickness_mm": 18.0}}, {"name": "CLIP top BLUMOTION Knock-in hinge NI", "unit": "ea", "brand": "Blum", "score": 0.0, "category": "hardware.hinge", "supplier": "Blum", "variants": ["mat_13E02GGVA5ZKFYGCH7ET6W9W9E", "mat_4DWH06ZC8P4XXTJ0CGVNT5PMVM"], "family_id": "fam_602YQRNSK7YX425KZR9K59YXB4", "unit_cost": null, "updated_at": "2026-11-17T20:13:21.90125+00:00", "family_name": "Blum CLIP top BLUMOTION Dual NI", "material_uid": "mat_0RP367TV6YBK35ESS1HZYPX37X", "variant_count": 3, "variant_values": {"boss": "Knock-in"}}, {"name": "CLIP top BLUMOTION INSERTA hinge NI/ONS", "unit": "ea", "brand": "Blum", "score": 0.0, "category": "hardware.hinge", "supplier": "Blum", "variants": ["mat_3SZPBCTJVZBWK5KW33CH5F472P", "mat_77FV46NQVWEC488NZK0NJ06SCP", "mat_7F3BE08VMNG2WMEEEFJG3S4P5G", "mat_7SMC3PH7NSMQNNSENZH54MDBQQ"], "family_id": "fam_03DRA3GP4YQVY52ZNMRARJSTQJ", "unit_cost": null, "updated_at": "2026-11-17T20:13:21.90125+00:00", "family_name": "Blum CLIP top BLUMOTION Overlay NI/ONS", "material_uid": "mat_0ST7ZA4PJNE91MQKH7BG6RZXSV", "variant_count": 5, "variant_values": {"boss": "INSERTA"}}, {"name": "CLIP top Screw-on hinge NI", "unit": "ea", "brand": "Blum", "score": 0.0, "category": "hardware.hinge", "supplier": "Blum", "variants": ["mat_1WE7WJ0H129ND9RYXB48825BZ6", "mat_41PC3ZKJ1SVEV2F56APN17XRQ8", "mat_4QZ2QTEC4YMXVXXPNB358DBJBP", "mat_4W0ENTK72TEFCNBMW8BXDBQDY1", "mat_57YARCNFWSANWZJVQ03MG5V118"], "family_id": "fam_2DC4F9TDXM2AHSFHCKVDJ7PBCV", "unit_cost": null, "updated_at": "2026-11-17T20:13:21.90125+00:00", "family_name": "Blum CLIP top 100 Overlay NI", "material_uid": "mat_0ZDT747PCW6SG3R1J82BMHTBAC", "variant_count": 6, "variant_values": {"boss": "Screw-on"}}, {"name": "CLIP top BLUMOTION INSERTA hinge NI/ONS", "unit": "ea", "brand": "Blum", "score": 0.0, "category": "hardware.hinge", "supplier": "Blum", "variants": ["mat_32X49E2Q43WE7GGS4TSNZ1CF35", "mat_7MYDE3N2RMD7VTPNPS4VPHWZE5"], "family_id": "fam_36H6WQTEHZ9TSQBC8Z15A38DHK", "unit_cost": null, "updated_at": "2026-11-17T20:13:21.90125+00:00", "family_name": "Blum CLIP top BLUMOTION 155 Dual NI/ONS", "material_uid": "mat_11FSHQ1B9GSKD49NX700JSB07M", "variant_count": 3, "variant_values": {"boss": "INSERTA"}}], "search_total": 223, "facets": [{"facet": "brand", "value": "Fixture Dup", "count": 149}, {"facet": "brand", "value": "Blum", "count": 105}, {"facet": "brand", "value": "Fixture Acme", "count": 22}, {"facet": "brand", "value": "Fixture Blum", "count": 6}, {"facet": "brand", "value": "Fixture Hettich", "count": 4}, {"facet": "brand", "value": "Laminex", "count": 4}, {"facet": "brand", "value": "Fixture Laminex", "count": 3}, {"facet": "brand", "value": "Fixture Polytec", "count": 2}, {"facet": "category", "value": "board.veneer", "count": 148}, {"facet": "category", "value": "hardware.hinge", "count": 112}, {"facet": "category", "value": "hardware", "count": 25}, {"facet": "category", "value": "board.melamine.mdf", "count": 7}, {"facet": "category", "value": "board.melamine", "count": 2}, {"facet": "category", "value": "edging", "count": 1}, {"facet": "supplier", "value": "(none)", "count": 166}, {"facet": "supplier", "value": "Blum", "count": 105}, {"facet": "supplier", "value": "Fixture Blum", "count": 6}, {"facet": "supplier", "value": "Fixture Dup", "count": 5}, {"facet": "supplier", "value": "Fixture Hettich", "count": 4}, {"facet": "supplier", "value": "Laminex", "count": 4}, {"facet": "supplier", "value": "Fixture Laminex", "count": 3}, {"facet": "supplier", "value": "Fixture Polytec", "count": 2}, {"facet": "unit", "value": "sheet", "count": 156}, {"facet": "unit", "value": "ea", "count": 135}, {"facet": "unit", "value": "box", "count": 2}, {"facet": "unit", "value": "roll", "count": 2}], "create_rows": [{"id": 97, "error": null, "reason": "x", "status": "pending", "proposed": {"name": "Demo reject board", "unit": "m2", "source_id": "demo:4", "unit_cost": 42.5, "attributes": {"finish": "oak"}, "category_code": "board", "source_system": "demo"}, "applied_at": null, "decided_at": null, "decided_by": null, "material_uid": null, "requested_at": "2026-11-17T22:57:58.228142+00:00", "requested_by": "dave", "target_system": "joineryflow"}, {"id": 96, "error": null, "reason": "requested for the new range", "status": "approved", "proposed": {"name": "Melamine board white", "unit": "m2", "source_id": "demo:3", "unit_cost": 42.5, "attributes": {"finish": "oak"}, "category_code": "board", "source_system": "demo"}, "applied_at": null, "decided_at": "2026-11-17T22:57:58.225052+00:00", "decided_by": "bob", "material_uid": null, "requested_at": "2026-11-17T22:57:58.22226+00:00", "requested_by": "alice", "target_system": "joineryflow"}, {"id": 95, "error": null, "reason": "requested for the new range", "status": "pending", "proposed": {"name": "Birch plywood 18mm", "unit": "m2", "source_id": "demo:2", "unit_cost": 42.5, "attributes": {"finish": "oak"}, "category_code": "board", "source_system": "demo"}, "applied_at": null, "decided_at": null, "decided_by": null, "material_uid": null, "requested_at": "2026-11-17T22:57:58.21928+00:00", "requested_by": "carol", "target_system": "joineryflow"}, {"id": 94, "error": null, "reason": "requested for the new range", "status": "pending", "proposed": {"name": "Acoustic panel 600x600", "unit": "m2", "source_id": "demo:1", "unit_cost": 42.5, "attributes": {"finish": "oak"}, "category_code": "board", "source_system": "demo"}, "applied_at": null, "decided_at": null, "decided_by": null, "material_uid": null, "requested_at": "2026-11-17T22:57:58.209107+00:00", "requested_by": "alice", "target_system": "joineryflow"}, {"id": 93, "error": null, "reason": "x", "status": "pending", "proposed": {"name": "Demo reject board", "unit": "m2", "brand_id": null, "source_id": "demo:4", "unit_cost": 42.5, "attributes": {"finish": "oak"}, "category_code": "board", "source_system": "demo"}, "applied_at": null, "decided_at": null, "decided_by": null, "material_uid": null, "requested_at": "2026-11-17T22:57:50.236781+00:00", "requested_by": "dave", "target_system": "joineryflow"}, {"id": 92, "error": null, "reason": "requested for the new range", "status": "approved", "proposed": {"name": "Melamine board white", "unit": "m2", "brand_id": null, "source_id": "demo:3", "unit_cost": 42.5, "attributes": {"finish": "oak"}, "category_code": "board", "source_system": "demo"}, "applied_at": null, "decided_at": "2026-11-17T22:57:50.232436+00:00", "decided_by": "bob", "material_uid": null, "requested_at": "2026-11-17T22:57:50.22678+00:00", "requested_by": "alice", "target_system": "joineryflow"}, {"id": 91, "error": null, "reason": "requested for the new range", "status": "pending", "proposed": {"name": "Birch plywood 18mm", "unit": "m2", "brand_id": null, "source_id": "demo:2", "unit_cost": 42.5, "attributes": {"finish": "oak"}, "category_code": "board", "source_system": "demo"}, "applied_at": null, "decided_at": null, "decided_by": null, "material_uid": null, "requested_at": "2026-11-17T22:57:50.223296+00:00", "requested_by": "carol", "target_system": "joineryflow"}, {"id": 90, "error": null, "reason": "requested for the new range", "status": "pending", "proposed": {"name": "Acoustic panel 600x600", "unit": "m2", "brand_id": null, "source_id": "demo:1", "unit_cost": 42.5, "attributes": {"finish": "oak"}, "category_code": "board", "source_system": "demo"}, "applied_at": null, "decided_at": null, "decided_by": null, "material_uid": null, "requested_at": "2026-11-17T22:57:50.214027+00:00", "requested_by": "alice", "target_system": "joineryflow"}], "cr_rows": [], "schema": {"categories": ["appliance", "benchtop", "board", "custom", "edging", "glass", "hardware", "hire", "timber"], "units": ["A", "box", "cm", "deg", "degC", "ea", "g", "h", "kg", "L", "m", "m2", "m3", "mm", "pair", "roll", "set", "sheet", "V", "W"], "cost_bases": ["ex_gst", "inc_gst"], "catalogs": [{"category_code": "appliance", "attributes": [{"key": "manufacturer", "editor": "text"}, {"key": "model_number", "editor": "text"}]}, {"category_code": "benchtop", "attributes": [{"key": "colour", "editor": "text"}, {"key": "underside", "editor": "text"}, {"key": "edge_details", "editor": "text"}, {"key": "laminate_supplier", "editor": "text"}, {"key": "laminate_code", "editor": "text"}, {"key": "finish", "editor": "text"}, {"key": "material_type", "editor": "text"}, {"key": "pieces", "editor": "text"}, {"key": "joins", "editor": "text"}, {"key": "cable_entry", "editor": "text"}, {"key": "shaped", "editor": "text"}, {"key": "grain_locked", "editor": "text"}, {"key": "slab_id", "editor": "text"}]}, {"category_code": "board", "attributes": [{"key": "colour", "editor": "text"}, {"key": "substrate", "editor": "text"}, {"key": "finish", "editor": "text"}, {"key": "sided", "editor": "text"}, {"key": "grain", "editor": "text"}, {"key": "rating", "editor": "text"}, {"key": "hmr", "editor": "text"}, {"key": "grain_locked", "editor": "text"}, {"key": "notes", "editor": "textarea"}]}, {"category_code": "custom", "attributes": [{"key": "vendor", "editor": "text"}, {"key": "vendor_quote_ref", "editor": "text"}, {"key": "internal_ref", "editor": "text"}]}, {"category_code": "edging", "attributes": [{"key": "colour", "editor": "text"}, {"key": "edge_type", "editor": "text"}, {"key": "glued", "editor": "text"}]}, {"category_code": "hire", "attributes": [{"key": "rate", "editor": "text"}, {"key": "rate_unit", "editor": "text"}, {"key": "total_cost", "editor": "text"}, {"key": "contract_ref", "editor": "text"}, {"key": "project_id", "editor": "text"}, {"key": "hire_start", "editor": "text"}, {"key": "hire_end", "editor": "text"}, {"key": "notes", "editor": "textarea"}]}, {"category_code": "glass", "attributes": [{"key": "colour", "editor": "text"}, {"key": "edge_finish", "editor": "text"}, {"key": "glass_type", "editor": "text"}, {"key": "power_point", "editor": "text"}, {"key": "shaped", "editor": "text"}]}, {"category_code": "hardware", "attributes": [{"key": "brand", "editor": "text"}, {"key": "hardware_type", "editor": "text"}]}, {"category_code": "timber", "attributes": [{"key": "colour", "editor": "text"}, {"key": "finish", "editor": "text"}, {"key": "grain", "editor": "text"}, {"key": "rating", "editor": "text"}]}]}, "seeded_ids": {"creates": [97, 96, 95, 94, 93, 92, 91, 90], "edits": []}}</script>
+<script>
+const SNAP = JSON.parse(document.getElementById('snapshot').textContent);
+const $ = (s) => document.querySelector(s);
+const $$ = (s) => [...document.querySelectorAll(s)];
+const esc = (v) => String(v ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+$('#export-stamp').textContent = 'Snapshot: ' + SNAP.meta.materials + ' materials, exported ' +
+  SNAP.exported_at.slice(0,16).replace('T',' ');
+
+/* ---------- tabs ---------- */
+$$('.tab').forEach(t => t.addEventListener('click', () => {
+  $$('.tab').forEach(x => x.classList.remove('active'));
+  t.classList.add('active');
+  const which = t.dataset.tab;
+  $('#edit-view').hidden = which !== 'edit';
+  $('#add-view').hidden = which !== 'add';
+  $('#review-view').hidden = which !== 'review';
+  $('#detail-drawer').hidden = true;
+}));
+
+/* ---------- Edit: facets + search ---------- */
+const rows = SNAP.results;
+const facetState = {brand:new Set(), category:new Set(), supplier:new Set()};
+function groupFacets(name){
+  const m = {};
+  SNAP.facets.filter(f => f.facet === name).forEach(f => { m[f.value]=f.count; });
+  return m;
+}
+function renderFacets(name, host){
+  const counts = groupFacets(name);
+  host.innerHTML = Object.entries(counts).map(([v,c]) =>
+    `<button type="button" class="facet" data-facet="${esc(name)}" data-value="${esc(v)}">
+       <span>${esc(v)}</span><span class="count">${c}</span></button>`).join('') || '<p class="facet-empty">none</p>';
+  host.querySelectorAll('.facet').forEach(b => b.addEventListener('click', () => {
+    const set = facetState[name], key = b.dataset.value;
+    if (set.has(key)) set.delete(key); else set.add(key);
+    b.classList.toggle('selected', set.has(key));
+    renderResults();
+  }));
+}
+renderFacets('brand', $('#facet-brand'));
+renderFacets('category', $('#facet-category'));
+renderFacets('supplier', $('#facet-supplier'));
+
+function renderResults(){
+  const q = $('#q').value.trim().toLowerCase();
+  const sort = $('#sort').value, order = $('#order').value;
+  let list = rows.filter(r => {
+    if (q && ![r.name,r.category,r.brand,r.supplier].some(v => String(v||'').toLowerCase().includes(q))) return false;
+    for (const f of ['brand','category','supplier']) {
+      if (facetState[f].size && !facetState[f].has(r[f])) return false;
+    }
+    return true;
+  });
+  if (sort) list = [...list].sort((a,b) => {
+    const x=a[sort], y=b[sort];
+    const c = (x==null?1:0)-(y==null?1:0) || (x??''<y??''?-1:x??''>y??''?1:0);
+    return order==='desc' ? -c : c;
+  });
+  $('#total').textContent = list.length + ' results of ' + SNAP.search_total + ' in the snapshot';
+  $('#page-label').textContent = 'showing ' + list.length + ' of 12 exported rows';
+  $('#rows').innerHTML = list.map(r => `<tr>
+    <td class="name">${esc(r.name)}<br><span class="uid">${esc(r.material_uid)}</span></td>
+    <td>${esc(r.category)}</td><td>${esc(r.brand)}</td><td>${esc(r.supplier)}</td>
+    <td>${esc(r.unit)}</td><td class="num">${r.unit_cost==null?'-':esc(r.unit_cost)}</td>
+    <td>${esc(String(r.updated_at).slice(0,10))}</td>
+    <td class="num">${r.variant_count||''}</td></tr>`).join('')
+    || '<tr><td colspan="8" class="empty">No materials match this filter</td></tr>';
+}
+$('#search').addEventListener('click', renderResults);
+$('#q').addEventListener('input', renderResults);
+$('#sort').addEventListener('change', renderResults);
+$('#order').addEventListener('change', renderResults);
+renderResults();
+
+/* ---------- Add: schema-driven form + proposed preview ---------- */
+const GROUPS = [
+  {title:'Required', fields:[{p:'category_code',l:'Category',e:'category'},{p:'name',l:'Name',e:'textarea',req:1}]},
+  {title:'Classification', fields:[{p:'product_type',l:'Product type',e:'text'},{p:'model_no',l:'Model no',e:'text'},
+    {p:'unit',l:'Unit',e:'unit'},{p:'lead_time_days',l:'Lead time (days)',e:'integer'}]},
+  {title:'Commercial', fields:[{p:'unit_cost',l:'Unit cost',e:'number'},{p:'currency',l:'Currency',e:'text',ph:'AUD'},
+    {p:'cost_basis',l:'Cost basis',e:'basis'}]},
+  {title:'Text', fields:[{p:'description',l:'Description',e:'textarea'},{p:'product_url',l:'Product URL',e:'text'},
+    {p:'image_url',l:'Image URL',e:'text'},{p:'synonyms',l:'Synonyms (comma separated)',e:'tokens'},
+    {p:'tags',l:'Tags (comma separated)',e:'tokens'}]},
+  {title:'Source (optional)', fields:[{p:'source_system',l:'Source system',e:'text'},{p:'source_id',l:'Source id',e:'text'}]},
+  {title:'Attributes', fields:[], dynamic:true},
+];
+function opts(e){
+  if (e==='category') return SNAP.schema.categories;
+  if (e==='unit') return SNAP.schema.units;
+  if (e==='basis') return SNAP.schema.cost_bases;
+  return null;
+}
+function attrFields(cat){
+  const c = SNAP.schema.catalogs.find(x => x.category_code === cat);
+  return (c ? c.attributes : []).map(a => ({p:'attributes.'+a.key, l:a.key, e:a.editor||'text', dyn:true}));
+}
+function inputFor(f){
+  const o=opts(f.e);
+  if (o) return `<select data-path="${f.p}"><option value="">(none)</option>${o.map(v=>`<option>${esc(v)}</option>`).join('')}</select>`;
+  if (f.e==='textarea') return `<textarea data-path="${f.p}" rows="2" maxlength="1000"></textarea>`;
+  return `<input data-path="${f.p}" type="${(f.e==='number'||f.e==='integer')?'number':'text'}" ${f.ph?`placeholder="${f.ph}"`:''}>`;
+}
+function renderAddForm(){
+  let html='';
+  for (const g of GROUPS){
+    const fields = g.dynamic ? attrFields($('#add-fields [data-path="category_code"]')?.value||'') : g.fields;
+    html += `<fieldset class="add-group"><legend>${g.title}</legend>`;
+    for (const f of fields) html += `<div class="add-row"><label>${f.l}${f.req?'<span class="req"> *</span>':''}</label>${inputFor(f)}</div>`;
+    html += '</fieldset>';
+  }
+  $('#add-fields').innerHTML = html;
+  $('#add-fields').querySelectorAll('input,textarea,select').forEach(el => el.addEventListener('input', preview));
+  const cat = $('#add-fields [data-path="category_code"]');
+  if (cat) cat.addEventListener('change', () => {
+    const vals = collect(); renderAddForm(); Object.entries(vals).forEach(([k,v])=>{const el=$(`#add-fields [data-path="${k}"]`); if(el) el.value=v;});
+    preview();
+  });
+  preview();
+}
+function collect(){ const o={}; $('#add-fields').querySelectorAll('[data-path]').forEach(el=>o[el.dataset.path]=el.value); return o; }
+function norm(p,raw,e){
+  if (e==='tokens'||p==='synonyms'||p==='tags'){const t=String(raw||'').split(',').map(x=>x.trim()).filter(Boolean);return t.length?t:null;}
+  if (e==='number'||e==='integer'){if(raw==='')return null;const n=Number(raw);return Number.isFinite(n)?n:null;}
+  const t=String(raw??''); return t.trim()===''?null:t;
+}
+function proposed(){
+  const v=collect(), out={}, attrs={};
+  for (const g of GROUPS) for (const f of g.fields){
+    if (g.dynamic) continue;
+    const val=norm(f.p,v[f.p],f.e); if (val!==null) out[f.p]=val;
+  }
+  for (const f of attrFields(v.category_code||'')){
+    const val=norm(f.p,v[f.p],f.e); if (val!==null) attrs[f.p.replace('attributes.','')]=val;
+  }
+  if (Object.keys(attrs).length) out.attributes=attrs;
+  return out;
+}
+function preview(){
+  const p=proposed();
+  const html = Object.entries(p).map(([k,val]) =>
+    `<div class="detail-block"><h3>${esc(k)}</h3><div class="detail-diff">
+      <span class="path">${esc(k)}</span><span class="after">${esc(typeof val==='object'?JSON.stringify(val):val)}</span>
+    </div></div>`).join('') || '<p class="empty">Fill a field to see the proposed row.</p>';
+  $('#add-preview-table').innerHTML = html;
+  $('#add-preview-json').textContent = JSON.stringify(p,null,2);
+}
+renderAddForm();
+
+/* ---------- Review: queues + detail drawer ---------- */
+let kind='edits', qstatus='actionable';
+const ACTIONABLE=new Set(['pending','approved','failed']);
+function age(iso){ if(!iso)return '-'; const s=Math.max(0,Math.floor((Date.now()-new Date(iso))/1000));
+  if(s<60)return s+'s'; if(s<3600)return Math.floor(s/60)+'m'; if(s<86400)return Math.floor(s/3600)+'h'; return Math.floor(s/86400)+'d'; }
+function queueRows(){
+  let src = kind==='creates' ? SNAP.create_rows : SNAP.cr_rows;
+  return src.filter(r => qstatus==='all' || (qstatus==='actionable'?ACTIONABLE.has(r.status):r.status===qstatus));
+}
+function titleOf(r){ return kind==='creates' ? (r.proposed&&r.proposed.name||'(unnamed)') : r.material_name; }
+function fieldsOf(r){ return kind==='creates' ? Object.keys(r.proposed||{}) : (r.paths||[]); }
+function renderQueue(){
+  const list=queueRows();
+  $('#queue-total').textContent=list.length+' requests';
+  $('#queue-rows').innerHTML=list.map(r=>{
+    const own = $('#actor').value.trim() && $('#actor').value.trim()===r.requested_by;
+    return `<tr data-id="${r.id}">
+      <td><input type="checkbox" ${own?'disabled title="cannot approve own request"':''}></td>
+      <td>${r.id}</td><td>${esc(titleOf(r))}</td><td>${esc(fieldsOf(r).join(', '))}</td>
+      <td class="status-${esc(r.status)}">${esc(r.status)}</td><td>${esc(r.requested_by)}</td>
+      <td>${age(r.requested_at)}</td><td>${esc(r.decision_reason||r.decided_at||'-')}</td></tr>`;
+  }).join('') || '<tr><td colspan="8" class="empty">No requests in this view</td></tr>';
+  $('#queue-rows').querySelectorAll('tr[data-id]').forEach(tr =>
+    tr.addEventListener('click',()=>openDetail(Number(tr.dataset.id))));
+}
+function openDetail(id){
+  const r=(kind==='creates'?SNAP.create_rows:SNAP.cr_rows).find(x=>x.id===id); if(!r)return;
+  $('#detail-title').textContent=`${kind==='creates'?'Create':'Request'} ${id} - ${titleOf(r)}`;
+  const badges=[];
+  if ($('#actor').value.trim()===r.requested_by) badges.push('own');
+  if (r.decision_reason||r.decided_at) badges.push('decided');
+  $('#detail-badges').innerHTML=badges.map(b=>`<span class="badge ${b}">${b}</span>`).join('');
+  let body='';
+  if (kind==='creates'){
+    body+='<div class="detail-block"><h3>Proposed</h3>';
+    for (const [k,v] of Object.entries(r.proposed||{})) body+=`<div class="detail-diff"><span class="path">${esc(k)}</span><span class="after">${esc(typeof v==='object'?JSON.stringify(v):v)}</span></div>`;
+    body+='</div>';
+  } else {
+    body+='<div class="detail-block"><h3>Request</h3><pre>'+esc(JSON.stringify(r,null,2))+'</pre></div>';
+  }
+  body+='<div class="detail-block"><h3>Decision</h3>';
+  for (const [k,v] of [['status',r.status],['decided_by',r.decided_by],['decided_at',r.decided_at],['decision_reason',r.decision_reason],['error',r.error]])
+    body+=`<div class="detail-kv"><span class="key">${k}</span><span class="value">${v==null?'-':esc(v)}</span></div>`;
+  body+='</div>';
+  $('#detail-body').innerHTML=body;
+  $('#detail-drawer').hidden=false;
+}
+$('#detail-close').addEventListener('click',()=>$('#detail-drawer').hidden=true);
+$$('.chip[data-kind]').forEach(c=>c.addEventListener('click',()=>{
+  $$('.chip[data-kind]').forEach(x=>x.classList.remove('active')); c.classList.add('active');
+  kind=c.dataset.kind; renderQueue();
+}));
+$$('.chip[data-status]').forEach(c=>c.addEventListener('click',()=>{
+  $$('.chip[data-status]').forEach(x=>x.classList.remove('active')); c.classList.add('active');
+  qstatus=c.dataset.status; renderQueue();
+}));
+$('#actor').addEventListener('input',renderQueue);
+renderQueue();
+</script>
+</body>
+</html>
