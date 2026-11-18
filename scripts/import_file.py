@@ -28,8 +28,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import yaml
 
-from ingest.auto_mapping import infer_mapping
-from ingest.importer import apply as apply_drafts, build_drafts, plan_report, read_table
+from ingest.auto_mapping import detect_header_row, infer_mapping
+from ingest.importer import (
+    apply as apply_drafts, build_drafts, list_sheets, matrix_to_table,
+    plan_report, read_matrix, read_table,
+)
 from ingest.mapping import Mapping, load_mapping
 from ingest.quality import assess, load_quality_context, print_quality
 
@@ -82,9 +85,27 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--supplier", help="auto: default supplier")
     ap.add_argument("--code-column", help="auto: force this header as the identifier")
     ap.add_argument("--save-mapping", help="auto: save the inferred mapping as YAML for later reuse")
+    ap.add_argument("--header-row", type=int, default=1,
+                    help="1-based physical row holding the headers (0 = auto-detect, with --auto)")
+    ap.add_argument("--sheet", help="XLSX worksheet name (default: active sheet)")
+    ap.add_argument("--list-sheets", action="store_true", help="print XLSX sheet names and exit")
     args = ap.parse_args(argv)
 
-    headers, rows = read_table(args.file)
+    if args.list_sheets:
+        names = list_sheets(args.file)
+        print(f"sheets in {Path(args.file).name}: {names or 'none (not an XLSX)'}")
+        return 0
+    if args.header_row == 0 and not args.auto:
+        raise SystemExit("--header-row 0 (auto-detect) requires --auto")
+    if args.header_row < 0:
+        raise SystemExit("--header-row must be >= 1 (or 0 for auto-detect)")
+
+    matrix = read_matrix(args.file, args.sheet)
+    header_row = args.header_row
+    if header_row == 0:
+        header_row = detect_header_row(matrix)
+        print(f"[auto] detected header row {header_row} of {len(matrix)}")
+    headers, rows = matrix_to_table(matrix, header_row)
     if args.limit:
         rows = rows[: args.limit]
 

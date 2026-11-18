@@ -37,6 +37,7 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 ├── ingest/quality.py                pre-import completeness / duplicate signals (read-only)
 ├── tests/test_unit_auto_mapping.py  pure tests for header -> mapping inference
 ├── tests/test_unit_quality.py       pure tests for pre-import quality signals
+├── tests/test_unit_table_reading.py pure tests for cover-row / sheet handling
 ├── scripts/export_joineryflow.py    read-only exporter for that snapshot (step 0)
 ├── scripts/check_joineryflow_mapping.py  static mapping v2 validator
 ├── scripts/import_joineryflow.py    snapshot import CLI (step 3)
@@ -242,6 +243,20 @@ numeric dimension measures (thickness/width/length/angle → mm/deg) and keeps t
 It is deliberately conservative: no family grouping is guessed, and the default category is
 `generic`. Every decision is printed for review; `--save-mapping` writes a normal mapping file that
 passes the same schema check as hand-written ones. See `ingest/auto_mapping.py` for the rules.
+
+Real supplier files often start with a title/cover block, or are one sheet in a workbook. Use
+`--header-row 0` to auto-detect the header row, or `--header-row N` (1-based) to pin it;
+`--list-sheets` shows worksheet names and `--sheet "Prices 2026"` picks one. These work with both
+explicit and `--auto` mappings:
+
+```bash
+python scripts/import_file.py --file supplier.xlsx --list-sheets
+python scripts/import_file.py --file supplier.xlsx --auto --sheet "Prices 2026" --header-row 0
+```
+
+Auto-detection scores the first 25 physical rows for label-like cells and a following data row;
+plain CSVs with a header on row 1 stay on row 1. A wrong guess is loud (the inference print shows
+the identifier column), and `--header-row N` overrides it.
 
 Every dry run also prints a **data-quality report**: completeness distribution (required fields
 from `material_profile`, the same rule as `v_material_completeness`), repeated codes within the

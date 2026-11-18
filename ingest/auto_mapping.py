@@ -97,6 +97,55 @@ def _dimension(header: str) -> tuple[str, str] | None:
     return None
 
 
+def detect_header_row(matrix: list[list[Any]], max_scan: int = 25) -> int:
+    """Guess which physical row (1-based) holds the column headers.
+
+    Covers the common supplier-file shapes: a title/cover block above the real header, and blank
+    spacer rows. Scored on: number of non-empty cells, how many look like short labels rather
+    than data values, and whether the following row has the same width (data under a header).
+    Returns 1 when nothing looks better, so the default is the historical behaviour.
+
+    Pure function - no I/O, testable with a hand-built matrix.
+    """
+    if not matrix:
+        raise ValueError("empty file - no header row to detect")
+    limit = min(len(matrix), max_scan)
+
+    def cell_text(v: Any) -> str:
+        return "" if v is None else str(v).strip()
+
+    def is_label(v: Any) -> bool:
+        s = cell_text(v)
+        if not s or len(s) > 60:
+            return False
+        if to_number(s) is not None and len(s) < 18:
+            return False          # a bare number is data, not a header
+        return len(s.split()) <= 8
+
+    best_row, best_score = 1, -1.0
+    for i in range(limit):
+        cells = [cell_text(c) for c in matrix[i]]
+        filled = [c for c in cells if c]
+        if not filled:
+            continue
+        labels = sum(1 for c in filled if is_label(c))
+        width = len(filled)
+        score = float(labels) + width * 0.5
+        # Reward a next row of the same shape (data under the header).
+        if i + 1 < len(matrix):
+            nxt = [cell_text(c) for c in matrix[i + 1]]
+            next_filled = sum(1 for c in nxt if c)
+            if next_filled >= max(1, width - 1):
+                score += 3.0
+            if width >= 2 and next_filled <= 1:
+                score -= 2.0       # a lone label followed by blanks is a cover line
+        if i == 0:
+            score += 0.25          # prefer row 1 on a tie - no need to skip anything
+        if score > best_score:
+            best_row, best_score = i + 1, score
+    return best_row
+
+
 def _sample_values(rows: list[dict], header: str, limit: int = 20) -> list[Any]:
     out = []
     for row in rows[:limit]:
