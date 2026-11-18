@@ -52,14 +52,17 @@ def _fmt(v: Any) -> str:
 # ---------------------------------------------------------------------------
 # Reading tables
 # ---------------------------------------------------------------------------
-def read_table(path: str | Path) -> tuple[list[str], list[dict]]:
+def read_matrix(path: str | Path, sheet: str | None = None) -> list[list[Any]]:
+    """Read the raw cell matrix of a CSV/XLSX. Row 0 is the first physical row, whatever it holds."""
     p = Path(path)
     if p.suffix.lower() in {".xlsx", ".xlsm"}:
-        return _read_xlsx(p)
-    return _read_csv(p)
+        return _read_xlsx_matrix(p, sheet)
+    if sheet:
+        raise ValueError("--sheet applies only to .xlsx/.xlsm files")
+    return _read_csv_matrix(p)
 
 
-def _read_csv(p: Path) -> tuple[list[str], list[dict]]:
+def _read_csv_matrix(p: Path) -> list[list[Any]]:
     with p.open("r", encoding="utf-8-sig", newline="") as f:
         sample = f.read(4096)
         f.seek(0)
@@ -67,26 +70,79 @@ def _read_csv(p: Path) -> tuple[list[str], list[dict]]:
             dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
         except csv.Error:
             dialect = csv.excel
-        reader = csv.DictReader(f, dialect=dialect)
-        rows = [dict(r) for r in reader]
-        headers = list(reader.fieldnames or [])
-    return headers, rows
+        return [list(r) for r in csv.reader(f, dialect=dialect)]
 
 
-def _read_xlsx(p: Path) -> tuple[list[str], list[dict]]:
+def _read_xlsx_matrix(p: Path, sheet: str | None = None) -> list[list[Any]]:
     from openpyxl import load_workbook
 
     wb = load_workbook(p, read_only=True, data_only=True)
-    ws = wb.active
-    it = ws.iter_rows(values_only=True)
-    headers = [str(h).strip() if h is not None else "" for h in next(it)]
-    rows = []
-    for r in it:
-        if r is None or all(v is None for v in r):
+    try:
+        if sheet:
+            if sheet not in wb.sheetnames:
+                raise ValueError(f"sheet {sheet!r} not in workbook; have {wb.sheetnames}")
+            ws = wb[sheet]
+        else:
+            ws = wb.active
+        return [list(r) for r in ws.iter_rows(values_only=True)]
+    finally:
+        wb.close()
+
+
+def list_sheets(path: str | Path) -> list[str]:
+    """Worksheet names of an XLSX (for --list-sheets). CSVs have no sheets."""
+    p = Path(path)
+    if p.suffix.lower() not in {".xlsx", ".xlsm"}:
+        return []
+    from openpyxl import load_workbook
+
+    wb = load_workbook(p, read_only=True, data_only=True)
+    try:
+        return list(wb.sheetnames)
+    finally:
+        wb.close()
+
+
+def _as_header(cell: Any) -> str:
+    return str(cell).strip() if cell is not None else ""
+
+
+def matrix_to_table(matrix: list[list[Any]], header_row: int = 1) -> tuple[list[str], list[dict]]:
+    """Turn a raw matrix into headers + row dicts. `header_row` is 1-based.
+
+    Blank physical rows are dropped from the data, never from the header position, so a header on
+    row 3 really means row 3 of the file. Trailing empty columns are trimmed; duplicate headers get
+    a numeric suffix instead of silently overwriting each other.
+    """
+    if header_row < 1 or header_row > len(matrix):
+        raise ValueError(f"header row {header_row} out of range (file has {len(matrix)} rows)")
+    raw_header = [_as_header(c) for c in matrix[header_row - 1]]
+    while raw_header and not raw_header[-1]:
+        raw_header.pop()
+    if not any(raw_header):
+        raise ValueError(f"row {header_row} has no header cells")
+
+    headers: list[str] = []
+    seen: dict[str, int] = {}
+    for name in raw_header:
+        key = name or "column"
+        count = seen.get(key, 0)
+        seen[key] = count + 1
+        headers.append(key if count == 0 else f"{key}_{count + 1}")
+
+    rows: list[dict] = []
+    for cells in matrix[header_row:]:
+        if cells is None or all(v is None or v == "" for v in cells):
             continue
-        rows.append({headers[i]: r[i] for i in range(min(len(headers), len(r)))})
-    wb.close()
+        rows.append({headers[i]: cells[i] for i in range(min(len(headers), len(cells)))})
     return headers, rows
+
+
+def read_table(
+    path: str | Path, *, header_row: int = 1, sheet: str | None = None
+) -> tuple[list[str], list[dict]]:
+    """Read a supplier table. Default behaviour (row 1, active sheet) is unchanged."""
+    return matrix_to_table(read_matrix(path, sheet), header_row)
 
 
 # ---------------------------------------------------------------------------

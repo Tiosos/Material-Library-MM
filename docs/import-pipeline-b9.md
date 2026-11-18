@@ -132,7 +132,7 @@ The Blum side is the same: the family `Blum CLIP top BLUMOTION Overlay NI` has `
 
 ## 6. Next Steps
 
-1. **Multiple sheets / multi-row headers**: price lists like Laminex's often have cover rows and merged cells, so `read_table` needs "skip the first N rows + specify the sheet".
+1. ~~**Multiple sheets / multi-row headers**~~ - **shipped, see section 9** (skip rows / choose sheet / auto-detect the header row).
 2. **Import report**: ~~add a "completeness distribution" (`v_material_completeness`) and "suspected duplicates"~~ - **shipped, see section 8** (section 6 kept for history).
 3. **Separate the price list**: import the catalogue (product facts) and the price list (commercial facts) separately, join them on `(supplier, code)`, and give prices a `valid_from`.
 4. **Generalize PDF extraction**: turn "three columns + Boss/Hinge/Spring/Colour/Part no." into configurable column anchors so other sections can reuse them.
@@ -199,3 +199,35 @@ The implementation is read-only: `ingest/quality.py` calls no write SQL, and the
 `apply()` in `scripts/import_file.py`. Verified with the Blum / Laminex / 25haw samples (clean) and
 a synthetic batch with a repeated code and missing `substrate` (flagged, and rejected under
 `--strict`). 12 pure tests in `tests/test_unit_quality.py`.
+
+## 9. Cover rows, header position and worksheets (shipped)
+
+The first entry in the section 6 next-step list. `read_table` used to take row 1 as the header and
+the active worksheet only; a supplier price list with a title block or a workbook where "Prices" is
+not the first sheet could not be read at all. It now splits reading into a raw cell matrix
+(`read_matrix`) and a header/data split (`matrix_to_table`), both reusable:
+
+```bash
+python scripts/import_file.py --file supplier.xlsx --list-sheets
+python scripts/import_file.py --file supplier.xlsx --auto --sheet "Prices 2026" --header-row 0
+python scripts/import_file.py --file supplier.csv --auto --header-row 4   # pin the row, 1-based
+```
+
+- `--header-row N` is the 1-based physical row holding the headers. Blank spacer rows before it do
+  not shift the count. The default `1` keeps every existing import unchanged.
+- `--header-row 0` auto-detects with `detect_header_row()` (`ingest/auto_mapping.py`), a pure
+  heuristic over the first 25 rows: it scores label-like non-empty cells and rewards a following
+  row of the same width, so a title line ("Acme Pty Ltd - Price List 2026") followed by a data row
+  loses to the real header. Requires `--auto`, and prints the chosen row. A wrong guess is visible
+  in the inference report (the identifier column becomes nonsense); pin it with `--header-row N`.
+- `--sheet NAME` selects an XLSX worksheet; `--list-sheets` prints the names and exits. Both work
+  with CSV too, except `--sheet` (CSV has no sheets and says so).
+- `matrix_to_table` trims trailing empty header columns, gives duplicate headers a numeric suffix,
+  and drops blank data rows.
+
+This fixes the input before mapping inference and the quality report run, so the two previous
+features now work on real supplier files instead of only clean CSVs. 13 pure tests in
+`tests/test_unit_table_reading.py` cover detection, one-based positioning, blank rows, duplicate
+headers, CSV/XLSX integration and sheet listing. Verified on a generated cover-row CSV (detected
+row 4 of 6) and a two-sheet workbook (selected "Prices 2026", detected row 3 of 5), both producing
+clean 2/2-row auto-mappings.
