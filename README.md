@@ -34,6 +34,7 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 ├── fixtures/
 │   └── joineryflow-hartwood.jsonl   committed 18-row snapshot, the ETL's only input
 ├── ingest/auto_mapping.py           infer a supplier mapping from CSV/XLSX headers (no YAML)
+├── ingest/pdf_antaro.py             TANDEMBOX antaro catalogue PDF -> product CSV extractor
 ├── ingest/quality.py                pre-import completeness / duplicate signals (read-only)
 ├── ingest/price_import.py           price-list import: (supplier, code) join + valid_from history
 ├── scripts/import_prices.py         CLI for price lists (dry-run / --apply)
@@ -41,6 +42,7 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 ├── tests/test_unit_quality.py       pure tests for pre-import quality signals
 ├── tests/test_unit_table_reading.py pure tests for cover-row / sheet handling
 ├── tests/test_unit_price_import.py  pure tests for price-list parsing
+├── tests/test_unit_pdf_antaro.py    pure tests for antaro PDF part extraction
 ├── scripts/export_joineryflow.py    read-only exporter for that snapshot (step 0)
 ├── scripts/check_joineryflow_mapping.py  static mapping v2 validator
 ├── scripts/import_joineryflow.py    snapshot import CLI (step 3)
@@ -302,7 +304,21 @@ set ML_DSN=postgresql://postgres:postgres@127.0.0.1:55432/ml
 python scripts/import_file.py --file ingest/samples/blum_hinges.csv --mapping mappings/blum.yaml --dsn %ML_DSN% --apply
 ```
 
-For mapping syntax, header matching order, and idempotency rules see [`docs/import-pipeline-b9.md`](docs/import-pipeline-b9.md). Measured: 122 rows of real Blum catalogue data → 105 materials (a re-run adds 0); three Laminex thicknesses → 1 family with 3 records.
+The **TANDEMBOX antaro drawer catalogue** uses a different "Order information" layout, so it has
+its own extractor. It produces a catalogue-only product list (no prices, no dates), imported with
+`--no-price`:
+
+```bash
+python -m ingest.pdf_antaro "Antaro Drawers - from Blum Catalogue.pdf" \
+       -o ingest/samples/antaro_products.csv
+python scripts/import_file.py --file ingest/samples/antaro_products.csv \
+       --mapping mappings/antaro.yaml --dsn %ML_DSN% --apply --no-price
+```
+
+The catalogue has no prices; add them later from a separate price list with
+`scripts/import_prices.py` (joined on supplier + part number).
+
+For mapping syntax, header matching order, and idempotency rules see [`docs/import-pipeline-b9.md`](docs/import-pipeline-b9.md). Measured: 122 rows of real Blum catalogue data → 105 materials (a re-run adds 0); three Laminex thicknesses → 1 family with 3 records; the Antaro extractor found 83 unique parts from 23 order pages (58 with a spec), all 83 imported as complete `hardware` records with zero price rows.
 
 Every mapping is validated against [`schema/mapping.schema.json`](schema/mapping.schema.json). The CI `static` job runs `scripts/check_mappings.py` (the schema plus cross-field rules such as template placeholders and family keys naming real fields) together with the pure-Python unit tests for `ingest.mapping` and `ingest.importer`. Both run locally without a database:
 

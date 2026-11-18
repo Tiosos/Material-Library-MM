@@ -135,7 +135,7 @@ The Blum side is the same: the family `Blum CLIP top BLUMOTION Overlay NI` has `
 1. ~~**Multiple sheets / multi-row headers**~~ - **shipped, see section 9** (skip rows / choose sheet / auto-detect the header row).
 2. **Import report**: ~~add a "completeness distribution" (`v_material_completeness`) and "suspected duplicates"~~ - **shipped, see section 8** (section 6 kept for history).
 3. ~~**Separate the price list**~~ - **shipped, see section 10** (catalogue `--no-price` + `import_prices.py`, joined on `(supplier, code)` with explicit `valid_from`).
-4. **Generalize PDF extraction**: turn "three columns + Boss/Hinge/Spring/Colour/Part no." into configurable column anchors so other sections can reuse them.
+4. ~~**Generalize PDF extraction**~~ - a second layout-specific extractor now exists: `ingest/pdf_antaro.py` for the TANDEMBOX antaro drawer section, **shipped, see section 11**. A single configurable anchor engine is still future work; the pattern is one extractor per vendor/section.
 
 ## 7. Auto-mapping for a fast first import
 
@@ -268,3 +268,35 @@ a price list then wrote 1 matched row, reported an unknown code as unmatched, an
 distinct `valid_from` dates for one material (2026-01-01 / 2026-11-18 / 2026-12-01). Re-importing
 the newest date reported `inserted=0, unchanged=1`. Importing an older date left the cache
 unchanged; importing a newer date updated it. 14 pure tests in `tests/test_unit_price_import.py`.
+
+## 11. TANDEMBOX antaro drawer catalogue (shipped)
+
+The fourth next-step item, driven by a real 46-page Blum *TANDEMBOX antaro* catalogue. Its
+"Order information" layout differs from the hinge section (numbered component rows
+1 Cabinet profiles / 2 Drawer side set / 3 Chipboard back fixings / 4 Front fixing bracket /
+5 Front piece / 7 Cross gallery, plus accessory tables), so it gets its own extractor:
+
+```bash
+python -m ingest.pdf_antaro "Antaro Drawers - from Blum Catalogue.pdf" \
+       -o ingest/samples/antaro_products.csv
+python scripts/import_file.py --file ingest/samples/antaro_products.csv \
+       --mapping mappings/antaro.yaml --dsn "$ML_DSN" --apply --no-price
+```
+
+`ingest/pdf_antaro.py` walks 23 order pages, matches part-number shapes (`378N4002SA`,
+`578.4001M`, `Z30N000S.04`, `ZRG.207RSIC`, `609.1500`, `661.1000.HG`, `M01.ZZ03.01`, ...),
+excludes web codes (DQC..), colour codes (R9006) and placeholder codes (`xxx`), pairs each part
+with the nearest nominal-length/diameter on its row, and records drawer type, component and page.
+**Globally deduplicated**: 83 unique parts from 344 occurrences.
+
+`mappings/antaro.yaml` maps them to `category_code: hardware` (the `Component` column fills the
+required `hardware_type`), with part number as the `supplier_code` identifier and specification /
+colour / drawer type / page / system as attributes. Because the catalogue carries **no prices and
+no supply dates**, the import uses `--no-price`: 83 products written, 0 price rows, all 83 score
+full completeness on the `hardware` profile. A re-run is idempotent (new=0, updated=83). Prices
+can be added later from a separate price list through `scripts/import_prices.py`.
+
+This is a second layout-specific extractor, not a generic anchor engine: B9's stated limitation
+still holds ("one extractor per supplier per section, or ask for Excel first"). A configurable
+anchor engine remains future work. 10 pure tests in `tests/test_unit_pdf_antaro.py` cover part
+shapes, noise rejection, spec pairing, drawer/colour/component detection and global dedupe.
