@@ -71,6 +71,8 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--auto", action="store_true", help="infer the mapping from the headers")
     ap.add_argument("--dsn", default=os.environ.get("ML_DSN"))
     ap.add_argument("--apply", action="store_true", help="write to the database (dry-run by default)")
+    ap.add_argument("--no-price", action="store_true",
+                    help="catalogue-only import: skip material_price history rows (use import_prices.py)")
     ap.add_argument("--strict", action="store_true",
                     help="refuse --apply when the quality report shows collisions, duplicates or incomplete rows")
     ap.add_argument("--limit", type=int, default=0)
@@ -171,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit("--strict: quality signals found; fix the mapping/data or drop --strict to apply")
         import psycopg
         with psycopg.connect(args.dsn) as conn:
-            stats = apply_drafts(conn, drafts, mapping)
+            stats = apply_drafts(conn, drafts, mapping, write_prices=not args.no_price)
             conn.commit()
         print("applied:", stats)
         report["stats"] = stats

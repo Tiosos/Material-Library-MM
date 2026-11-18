@@ -388,7 +388,11 @@ def valid_from_for(d: Draft) -> date:
 # ---------------------------------------------------------------------------
 # Applying
 # ---------------------------------------------------------------------------
-def apply(conn, drafts: list[Draft], m: Mapping) -> dict:
+def apply(conn, drafts: list[Draft], m: Mapping, *, write_prices: bool = True) -> dict:
+    """Write drafts. `write_prices=False` is the catalogue-only mode for a separated price list:
+    material.unit_cost (the current-price cache) is still set from the sheet, but no
+    material_price history row is written - that becomes import_prices.py's job.
+    """
     stats = {"new": 0, "updated": 0, "skipped": 0, "measures": 0, "identifiers": 0, "families": 0}
     with conn.cursor() as cur:
         cur.execute("SELECT set_config('ml.actor', %s, true)", (f"import:{m.vendor}",))
@@ -446,7 +450,7 @@ def apply(conn, drafts: list[Draft], m: Mapping) -> dict:
                 )
                 stats["measures"] += 1
 
-            if d.unit_cost is not None:
+            if d.unit_cost is not None and write_prices:
                 cur.execute(
                     """INSERT INTO material_price
                            (material_uid, supplier_id, unit_cost, currency, valid_from,
