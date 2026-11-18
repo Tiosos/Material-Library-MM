@@ -136,3 +136,37 @@ The Blum side is the same: the family `Blum CLIP top BLUMOTION Overlay NI` has `
 2. **Import report**: `--json` can already export per-row results; add a "completeness distribution" (`v_material_completeness`) and "suspected duplicates" (`material_duplicate_candidate`, generated automatically).
 3. **Separate the price list**: import the catalogue (product facts) and the price list (commercial facts) separately, join them on `(supplier, code)`, and give prices a `valid_from`.
 4. **Generalize PDF extraction**: turn "three columns + Boss/Hinge/Spring/Colour/Part no." into configurable column anchors so other sections can reuse them.
+
+## 7. Auto-mapping for a fast first import
+
+A permanent vendor gets a reviewed `mappings/<vendor>.yaml` (section 2). For a **first, fast load**
+of a new supplier table there is a second entry path that needs no YAML at all:
+
+```bash
+python scripts/import_file.py --file new_supplier.csv --auto --vendor acme
+python scripts/import_file.py --file new_supplier.csv --auto --vendor acme \
+       --category board --save-mapping mappings/acme.yaml --dsn "$ML_DSN" --apply
+```
+
+`ingest/auto_mapping.py` reads the headers and a few sample rows and produces a normal mapping dict
+from alias dictionaries. Match order: an explicit `--code-column` wins, then a code-like header
+(Part no. / SKU / Artikelnummer / PCode ...), then the first non-name/non-dimension column with a
+warning. Each remaining header is classified as price, name, brand, supplier, category, unit,
+currency, a numeric dimension measure, or an attribute. Unmatched columns go to attributes, so a
+supplier adding a column cannot break the import.
+
+Two deliberate limits:
+
+- **No family grouping is guessed.** A wrong family key is worse than none; add `family:` to the
+  saved YAML when the grouping is understood. The auto name template is the name column when one
+  exists, otherwise the code plus the first attribute.
+- **The default category is `generic`** (valid in `material_category`, see `seed.sql`). Pass
+  `--category board` etc. for a real classification. Numeric dimensions need numeric sample
+  values to become measures; a text-only column stays an attribute.
+
+The generated dict validates against `schema/mapping.schema.json` and the same cross-field rules
+as hand-written mappings. The CLI always prints the inferred roles and warnings before `--apply`
+or `--save-mapping`, so the guess is reviewable; `--save-mapping` produces a normal YAML that
+`scripts/check_mappings.py` accepts. From then on the vendor is a normal B9 import and the
+`--auto` flag is unnecessary. Idempotency, UID generation and the single-transaction apply are
+unchanged (sections 3-4).

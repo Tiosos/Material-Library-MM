@@ -33,6 +33,8 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 │   └── joineryflow.yaml        executable v2 rules: 9 catalog tables → UMR (ETL step 1)
 ├── fixtures/
 │   └── joineryflow-hartwood.jsonl   committed 18-row snapshot, the ETL's only input
+├── ingest/auto_mapping.py           infer a supplier mapping from CSV/XLSX headers (no YAML)
+├── tests/test_unit_auto_mapping.py  pure tests for header -> mapping inference
 ├── scripts/export_joineryflow.py    read-only exporter for that snapshot (step 0)
 ├── scripts/check_joineryflow_mapping.py  static mapping v2 validator
 ├── scripts/import_joineryflow.py    snapshot import CLI (step 3)
@@ -218,7 +220,28 @@ Design and decisions: [`docs/mcp-server.md`](docs/mcp-server.md). Implementation
 
 ## Importing supplier catalogues (B9)
 
-Without changing the supplier's table, give each vendor a `mappings/<vendor>.yaml` (free-form header → UMR fields):
+**No YAML needed for a new supplier** - let the headers infer a mapping, review it, then import:
+
+```bash
+# 1) see what was inferred and what would be written (no DB needed)
+python scripts/import_file.py --file new_supplier.csv --auto --vendor acme
+
+# 2) optional overrides when the guess needs help (category defaults to 'generic')
+python scripts/import_file.py --file new_supplier.csv --auto --vendor acme \
+       --category board --unit sheet --brand Acme --code-column "Artikelnummer"
+
+# 3) keep the inferred mapping for repeat imports, then write to the DB
+python scripts/import_file.py --file new_supplier.csv --auto --vendor acme \
+       --save-mapping mappings/acme.yaml --dsn "$ML_DSN" --apply
+```
+
+The inference identifies the code column, price, name/brand/supplier/category/unit/currency columns,
+numeric dimension measures (thickness/width/length/angle → mm/deg) and keeps the rest as attributes.
+It is deliberately conservative: no family grouping is guessed, and the default category is
+`generic`. Every decision is printed for review; `--save-mapping` writes a normal mapping file that
+passes the same schema check as hand-written ones. See `ingest/auto_mapping.py` for the rules.
+
+For a permanent vendor, give it a curated `mappings/<vendor>.yaml` (free-form header → UMR fields):
 
 ```bash
 pip install -r ingest/requirements.txt

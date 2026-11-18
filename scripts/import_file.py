@@ -4,6 +4,10 @@
     # check the mapping first, without connecting to the DB
     python scripts/import_file.py --file ingest/samples/blum_hinges.csv --mapping mappings/blum.yaml
 
+    # NEW: no YAML needed - infer the mapping from the headers, then review the dry run
+    python scripts/import_file.py --file new_supplier.csv --auto
+    python scripts/import_file.py --file new_supplier.csv --auto --save-mapping mappings/new.yaml
+
     # dry run against the DB (reads the DB to decide new/update, but does not commit)
     python scripts/import_file.py --file ... --mapping ... --dsn "$env:ML_DSN"
 
@@ -22,27 +26,86 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import yaml
+
+from ingest.auto_mapping import infer_mapping
 from ingest.importer import apply as apply_drafts, build_drafts, plan_report, read_table
-from ingest.mapping import load_mapping
+from ingest.mapping import Mapping, load_mapping
+
+
+def _auto_options(args) -> dict:
+    return {
+        "vendor": args.vendor or Path(args.file).stem.lower(),
+        "source_system": args.source_system,
+        "category_code": args.category,
+        "unit": args.unit,
+        "currency": args.currency,
+        "brand": args.brand,
+        "supplier": args.supplier,
+        "code_column": args.code_column,
+    }
+
+
+def _print_inference(report: dict) -> None:
+    print(f"[auto] vendor={report['vendor']} identifier={report['identifier']!r}")
+    print(f"[auto] name template: {report['name_template']}")
+    for row in report["resolved"]:
+        print(f"  {row['header']!r:26s} -> {row['role']:14s} ({row['target']}, {row['field']})")
+    for row in report["unresolved"]:
+        print(f"  {row['header']!r:26s} -> skipped ({row['reason']})")
+    for warning in report["warnings"]:
+        print(f"  WARNING: {warning}")
+    if report["warnings"]:
+        print("[auto] review the guesses above; fix with --code-column/--category/--brand or edit the saved YAML")
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--file", required=True, help="CSV / XLSX")
-    ap.add_argument("--mapping", required=True, help="mappings/<vendor>.yaml")
+    source = ap.add_mutually_exclusive_group(required=True)
+    source.add_argument("--mapping", help="mappings/<vendor>.yaml (explicit)")
+    source.add_argument("--auto", action="store_true", help="infer the mapping from the headers")
     ap.add_argument("--dsn", default=os.environ.get("ML_DSN"))
     ap.add_argument("--apply", action="store_true", help="write to the database (dry-run by default)")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--json", dest="json_out", help="write the report as JSON")
+    # auto-mode overrides (ignored with --mapping)
+    ap.add_argument("--vendor", help="auto: vendor id (default: file stem)")
+    ap.add_argument("--source-system", help="auto: source_system (default: vendor)")
+    ap.add_argument("--category", help="auto: default category_code (default: generic)")
+    ap.add_argument("--unit", help="auto: default UCUM unit")
+    ap.add_argument("--currency", default="AUD", help="auto: default currency (default: AUD)")
+    ap.add_argument("--brand", help="auto: default brand")
+    ap.add_argument("--supplier", help="auto: default supplier")
+    ap.add_argument("--code-column", help="auto: force this header as the identifier")
+    ap.add_argument("--save-mapping", help="auto: save the inferred mapping as YAML for later reuse")
     args = ap.parse_args(argv)
 
-    mapping = load_mapping(args.mapping)
     headers, rows = read_table(args.file)
     if args.limit:
         rows = rows[: args.limit]
-    drafts, meta = build_drafts(headers, rows, mapping)
 
+    if args.auto:
+        mapping_dict, inference = infer_mapping(headers, rows, **_auto_options(args))
+        _print_inference(inference)
+        mapping = Mapping(mapping_dict)
+        if args.save_mapping:
+            target = Path(args.save_mapping)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                "# Auto-generated mapping - review and commit if this supplier is permanent.\n"
+                + yaml.safe_dump(mapping_dict, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+            print(f"[auto] mapping saved -> {target}")
+    else:
+        mapping = load_mapping(args.mapping)
+
+    drafts, meta = build_drafts(headers, rows, mapping)
     report = plan_report(drafts, meta)
+    report["auto"] = bool(args.auto)
+    if args.auto:
+        report["inference"] = inference
     print(f"vendor={mapping.vendor} source={mapping.source_system} file={Path(args.file).name}")
     print(f"rows={report['rows']} ok={report['ok']} errors={report['errors']} warnings={report['warnings']}")
     print(f"headers matched: {len(meta['resolved'])}/{len(headers)}")
