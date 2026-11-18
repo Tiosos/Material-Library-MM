@@ -38,11 +38,14 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 ├── ingest/quality.py                pre-import completeness / duplicate signals (read-only)
 ├── ingest/price_import.py           price-list import: (supplier, code) join + valid_from history
 ├── scripts/import_prices.py         CLI for price lists (dry-run / --apply)
+├── scripts/verify_e2e.py            real-data acceptance: clean DB + import + read-path checks
+├── scripts/export_snapshot.py       export a live DB to preview_snapshot.json for the static page
 ├── tests/test_unit_auto_mapping.py  pure tests for header -> mapping inference
 ├── tests/test_unit_quality.py       pure tests for pre-import quality signals
 ├── tests/test_unit_table_reading.py pure tests for cover-row / sheet handling
 ├── tests/test_unit_price_import.py  pure tests for price-list parsing
 ├── tests/test_unit_pdf_antaro.py    pure tests for antaro PDF part extraction
+├── tests/test_unit_verify_e2e.py    pure tests for acceptance result aggregation
 ├── scripts/export_joineryflow.py    read-only exporter for that snapshot (step 0)
 ├── scripts/check_joineryflow_mapping.py  static mapping v2 validator
 ├── scripts/import_joineryflow.py    snapshot import CLI (step 3)
@@ -319,6 +322,29 @@ The catalogue has no prices; add them later from a separate price list with
 `scripts/import_prices.py` (joined on supplier + part number).
 
 For mapping syntax, header matching order, and idempotency rules see [`docs/import-pipeline-b9.md`](docs/import-pipeline-b9.md). Measured: 122 rows of real Blum catalogue data → 105 materials (a re-run adds 0); three Laminex thicknesses → 1 family with 3 records; the Antaro extractor found 83 unique parts from 23 order pages (58 with a spec), all 83 imported as complete `hardware` records with zero price rows.
+
+### End-to-end acceptance on real data
+
+Importing correctly is only half the contract — the data must also come back out. `scripts/verify_e2e.py` builds a fresh database in CI schema order, loads the fixture plus the real Blum / Laminex / Antaro imports (Antaro with `--no-price`), and then asserts every read path against that live data:
+
+```bash
+python scripts/verify_e2e.py \
+       --admin-dsn postgresql://postgres:postgres@127.0.0.1:5432/postgres --db ml_e2e
+# prints one PASS/FAIL line per check and exits non-zero if any fail
+```
+
+It checks: Antaro part numbers (`ZRG.207RSIC`, `661.1000.HG`) hit the **exact** search tier, a known hinge still hits, facets include the hardware categories, `category=hardware` lists the imported rows, a material detail opens by uid, all 83 Antaro rows are complete in `v_material_completeness` with **zero price rows**, JSONL/CSV/JSON exports have consistent counts and a schema-valid JSON envelope, and the `/ui` shell is served. Every check runs even if an earlier one fails, so one pass reports all problems. Use `--dsn <existing> --skip-prepare` to check a prepared database without rebuilding it. It needs `psycopg` and the API stack (`api/requirements.txt`); it is an on-demand command, not a CI step (it deliberately creates/drops its own database).
+
+Verified result: **11/11 checks passed** on a fresh database (`seed` + 3 real imports, 235 materials total). The first run exposed only mistakes in the harness's own assertions (response field is `results`, not `items`; the completeness check had to be scoped to the Antaro rows because the fixture's own `hardware` rows are intentionally incomplete) — no product bug.
+
+**Refreshing the published page.** The snapshot is now reproducible in two steps. `scripts/export_snapshot.py` exports a live database through the read API plus a few direct queries into `preview_snapshot.json`; `scripts/build_preview.py` turns it into the self-contained `material-library-preview.html`:
+
+```bash
+python scripts/export_snapshot.py --dsn %ML_DSN% -o preview_snapshot.json
+python scripts/build_preview.py
+```
+
+The current page is a frozen export from `2026-11-18T21:38:42Z`: **192 materials** (105 Blum hinges, 4 Laminex boards, 83 Antaro parts), 12 listed results of 125, 9 facets, no price rows. Publishing the refreshed page is still an explicit decision — building the files does not change the live link. The export is timestamped and the page's banner always says the data is frozen.
 
 Every mapping is validated against [`schema/mapping.schema.json`](schema/mapping.schema.json). The CI `static` job runs `scripts/check_mappings.py` (the schema plus cross-field rules such as template placeholders and family keys naming real fields) together with the pure-Python unit tests for `ingest.mapping` and `ingest.importer`. Both run locally without a database:
 
