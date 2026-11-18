@@ -39,6 +39,7 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 ├── ingest/price_import.py           price-list import: (supplier, code) join + valid_from history
 ├── scripts/import_prices.py         CLI for price lists (dry-run / --apply)
 ├── scripts/verify_e2e.py            real-data acceptance: clean DB + import + read-path checks
+├── scripts/export_snapshot.py       export a live DB to preview_snapshot.json for the static page
 ├── tests/test_unit_auto_mapping.py  pure tests for header -> mapping inference
 ├── tests/test_unit_quality.py       pure tests for pre-import quality signals
 ├── tests/test_unit_table_reading.py pure tests for cover-row / sheet handling
@@ -336,7 +337,14 @@ It checks: Antaro part numbers (`ZRG.207RSIC`, `661.1000.HG`) hit the **exact** 
 
 Verified result: **11/11 checks passed** on a fresh database (`seed` + 3 real imports, 235 materials total). The first run exposed only mistakes in the harness's own assertions (response field is `results`, not `items`; the completeness check had to be scoped to the Antaro rows because the fixture's own `hardware` rows are intentionally incomplete) — no product bug.
 
-**Snapshot freshness.** The published static page is a frozen export from `2026-11-17T22:57:58Z` (12 listed results, search_total 223). The acceptance database now holds 235 materials including the 83 Antaro parts, so the live data has moved on. Refreshing the published page is a **separate, explicit decision**: regenerate with `scripts/build_preview.py` from a fresh snapshot and re-publish only when asked — nothing here changes the live link.
+**Refreshing the published page.** The snapshot is now reproducible in two steps. `scripts/export_snapshot.py` exports a live database through the read API plus a few direct queries into `preview_snapshot.json`; `scripts/build_preview.py` turns it into the self-contained `material-library-preview.html`:
+
+```bash
+python scripts/export_snapshot.py --dsn %ML_DSN% -o preview_snapshot.json
+python scripts/build_preview.py
+```
+
+The current page is a frozen export from `2026-11-18T21:38:42Z`: **192 materials** (105 Blum hinges, 4 Laminex boards, 83 Antaro parts), 12 listed results of 125, 9 facets, no price rows. Publishing the refreshed page is still an explicit decision — building the files does not change the live link. The export is timestamped and the page's banner always says the data is frozen.
 
 Every mapping is validated against [`schema/mapping.schema.json`](schema/mapping.schema.json). The CI `static` job runs `scripts/check_mappings.py` (the schema plus cross-field rules such as template placeholders and family keys naming real fields) together with the pure-Python unit tests for `ingest.mapping` and `ingest.importer`. Both run locally without a database:
 
