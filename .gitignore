@@ -21,6 +21,10 @@ Thumbs.db
 .env
 *.local
 
+# WorkBuddy publish state (local app card + deployment records, not source)
+.wbapp_*.genie
+.workbuddy/
+
 # Local development scratch space (not part of the repository)
 .tmp/
 .pylibs/
