@@ -26,7 +26,11 @@ import re
 import sys
 from pathlib import Path
 
-import pymupdf
+# pymupdf is imported lazily in main(): the pure helpers below (part matching,
+# spec pairing, drawer/colour/component detection) and extract_page() need no
+# PDF library, so importing this module must not require it. The extractor CLI
+# itself needs pymupdf (see ingest/requirements.txt), but test/CI environments
+# without it can still import the module and exercise the pure logic.
 
 # Part numbers in this catalogue. Covers drawer sides 378N4002SA, profiles
 # 578.4001M, fixings Z30N000S.04, galleries ZRG.207RSIC, handles ZIF.80M5,
@@ -163,6 +167,8 @@ def extract_page(page, seen: set[str] | None = None) -> list[dict]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    import pymupdf  # lazy: only the CLI needs a PDF engine
+
     ap = argparse.ArgumentParser(description="TANDEMBOX antaro catalogue -> product CSV")
     ap.add_argument("pdf")
     ap.add_argument("-o", "--out", default="ingest/samples/antaro_products.csv")
