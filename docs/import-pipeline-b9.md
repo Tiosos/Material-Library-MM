@@ -133,7 +133,7 @@ The Blum side is the same: the family `Blum CLIP top BLUMOTION Overlay NI` has `
 ## 6. Next Steps
 
 1. **Multiple sheets / multi-row headers**: price lists like Laminex's often have cover rows and merged cells, so `read_table` needs "skip the first N rows + specify the sheet".
-2. **Import report**: `--json` can already export per-row results; add a "completeness distribution" (`v_material_completeness`) and "suspected duplicates" (`material_duplicate_candidate`, generated automatically).
+2. **Import report**: ~~add a "completeness distribution" (`v_material_completeness`) and "suspected duplicates"~~ - **shipped, see section 8** (section 6 kept for history).
 3. **Separate the price list**: import the catalogue (product facts) and the price list (commercial facts) separately, join them on `(supplier, code)`, and give prices a `valid_from`.
 4. **Generalize PDF extraction**: turn "three columns + Boss/Hinge/Spring/Colour/Part no." into configurable column anchors so other sections can reuse them.
 
@@ -170,3 +170,32 @@ or `--save-mapping`, so the guess is reviewable; `--save-mapping` produces a nor
 `scripts/check_mappings.py` accepts. From then on the vendor is a normal B9 import and the
 `--auto` flag is unnecessary. Idempotency, UID generation and the single-transaction apply are
 unchanged (sections 3-4).
+
+## 8. Pre-import quality report (shipped)
+
+Every dry run - explicit or `--auto` mapping - prints a quality section, and `--json` writes the
+same data under `report["quality"]`. It answers "can I trust this batch before it upserts live
+materials?" using the database objects this design already defines:
+
+- **Completeness distribution**: for each row, how many of its category's `material_profile.required`
+  fields are present. The rule matches `v_material_completeness` (section 6): a required key counts
+  when it is in `attributes` **or** in `material_measure`. Buckets are `full` / `partial` / `none` /
+  `unknown` (the last when the category has no profile). Checking happens only with `--dsn`, since
+  the required-field list comes from the DB.
+- **Within-batch duplicate codes**: the same `(kind, value, source_system)` used by two rows. On
+  apply those rows would overwrite each other; this is the main guard for an auto-inferred code
+  column.
+- **Identifier collisions**: codes already present in `material_identifier`, reported as
+  informational ("apply will UPDATE, not insert"). Upsert-on-code is the designed idempotency path
+  (section 3), so a re-run is expected to collide and is never treated as an error.
+- **Open duplicate candidates**: `count(*) FROM material_duplicate_candidate WHERE status='open'`
+  - DB-wide context from T2, printed but not attributed to this batch.
+
+`--strict` refuses `--apply` only when **this batch** has duplicate codes, incomplete rows or an
+unknown category. Existing-identifier collisions and DB-wide T2 candidates never gate a re-run.
+Without `--dsn` only batch-local checks run and completeness is reported as "not checked".
+
+The implementation is read-only: `ingest/quality.py` calls no write SQL, and the checks run before
+`apply()` in `scripts/import_file.py`. Verified with the Blum / Laminex / 25haw samples (clean) and
+a synthetic batch with a repeated code and missing `substrate` (flagged, and rejected under
+`--strict`). 12 pure tests in `tests/test_unit_quality.py`.
