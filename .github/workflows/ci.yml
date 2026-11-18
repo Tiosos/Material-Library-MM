@@ -23,7 +23,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install static-check dependencies
-        run: pip install --quiet pyyaml jsonschema
+        run: pip install --quiet pyyaml jsonschema openpyxl
 
       - name: No CJK text anywhere in the repository
         run: python scripts/check_english.py

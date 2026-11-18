@@ -5,6 +5,7 @@ Run in the CI static job with:
 """
 from __future__ import annotations
 
+import importlib.util
 import sys
 import tempfile
 import unittest
@@ -103,6 +104,7 @@ class ReadTableIntegrationTests(unittest.TestCase):
         p = self._csv("Code,Name\nP1,Panel\n")
         self.assertEqual(list_sheets(p), [])
 
+    @unittest.skipUnless(importlib.util.find_spec("openpyxl"), "openpyxl is an optional ingest dependency")
     def test_xlsx_sheet_selection(self):
         from openpyxl import Workbook
 
