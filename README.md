@@ -35,9 +35,12 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 │   └── joineryflow-hartwood.jsonl   committed 18-row snapshot, the ETL's only input
 ├── ingest/auto_mapping.py           infer a supplier mapping from CSV/XLSX headers (no YAML)
 ├── ingest/quality.py                pre-import completeness / duplicate signals (read-only)
+├── ingest/price_import.py           price-list import: (supplier, code) join + valid_from history
+├── scripts/import_prices.py         CLI for price lists (dry-run / --apply)
 ├── tests/test_unit_auto_mapping.py  pure tests for header -> mapping inference
 ├── tests/test_unit_quality.py       pure tests for pre-import quality signals
 ├── tests/test_unit_table_reading.py pure tests for cover-row / sheet handling
+├── tests/test_unit_price_import.py  pure tests for price-list parsing
 ├── scripts/export_joineryflow.py    read-only exporter for that snapshot (step 0)
 ├── scripts/check_joineryflow_mapping.py  static mapping v2 validator
 ├── scripts/import_joineryflow.py    snapshot import CLI (step 3)
@@ -253,6 +256,22 @@ explicit and `--auto` mappings:
 python scripts/import_file.py --file supplier.xlsx --list-sheets
 python scripts/import_file.py --file supplier.xlsx --auto --sheet "Prices 2026" --header-row 0
 ```
+
+**Catalogue and prices can be imported separately.** A catalogue import with `--no-price` writes
+materials/identifiers/measures but no `material_price` rows; a separate price list is then loaded
+with an explicit effective date, joined by `(supplier, code)`:
+
+```bash
+python scripts/import_file.py --file catalogue.csv --mapping mappings/acme.yaml --dsn "$ML_DSN" --apply --no-price
+python scripts/import_prices.py --file prices.xlsx --sheet "Prices 2026" --header-row 0 \
+       --source-system acme_catalogue --valid-from 2026-01-01 --dsn "$ML_DSN" --apply
+```
+
+`import_prices.py` never creates materials: an unknown code is reported as unmatched. Prices are
+idempotent on `(material, supplier, valid_from, qty_break, cost_basis)` and different dates are
+kept as history. `--valid-from` is required (or a per-row date column), so a back-dated list cannot
+silently replace the current price. The `material.unit_cost` cache is refreshed only from the
+newest price on record. Without `--no-price`, a catalogue import still writes prices as before.
 
 Auto-detection scores the first 25 physical rows for label-like cells and a following data row;
 plain CSVs with a header on row 1 stay on row 1. A wrong guess is loud (the inference print shows

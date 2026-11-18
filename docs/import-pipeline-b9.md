@@ -134,7 +134,7 @@ The Blum side is the same: the family `Blum CLIP top BLUMOTION Overlay NI` has `
 
 1. ~~**Multiple sheets / multi-row headers**~~ - **shipped, see section 9** (skip rows / choose sheet / auto-detect the header row).
 2. **Import report**: ~~add a "completeness distribution" (`v_material_completeness`) and "suspected duplicates"~~ - **shipped, see section 8** (section 6 kept for history).
-3. **Separate the price list**: import the catalogue (product facts) and the price list (commercial facts) separately, join them on `(supplier, code)`, and give prices a `valid_from`.
+3. ~~**Separate the price list**~~ - **shipped, see section 10** (catalogue `--no-price` + `import_prices.py`, joined on `(supplier, code)` with explicit `valid_from`).
 4. **Generalize PDF extraction**: turn "three columns + Boss/Hinge/Spring/Colour/Part no." into configurable column anchors so other sections can reuse them.
 
 ## 7. Auto-mapping for a fast first import
@@ -231,3 +231,40 @@ features now work on real supplier files instead of only clean CSVs. 13 pure tes
 headers, CSV/XLSX integration and sheet listing. Verified on a generated cover-row CSV (detected
 row 4 of 6) and a two-sheet workbook (selected "Prices 2026", detected row 3 of 5), both producing
 clean 2/2-row auto-mappings.
+
+## 10. Catalogue / price-list separation (shipped)
+
+Item 3 of the section 6 next-step list. Product facts and commercial facts are now loaded by two
+independent commands:
+
+```bash
+python scripts/import_file.py --file catalogue.csv --mapping mappings/acme.yaml \
+       --dsn "$ML_DSN" --apply --no-price
+python scripts/import_prices.py --file prices.xlsx --sheet "Prices 2026" --header-row 0 \
+       --source-system acme_catalogue --valid-from 2026-01-01 --dsn "$ML_DSN" --apply
+```
+
+- `import_file.py --no-price` writes materials / identifiers / measures / the `unit_cost` cache but
+  **no `material_price` history row**. Without the flag the old combined behaviour is unchanged, so
+  existing imports (Blum, Laminex, joineryflow) are unaffected.
+- `scripts/import_prices.py` reads a price list (reusing `read_matrix`, `matrix_to_table`,
+  `detect_header_row`, `--sheet`, `--list-sheets`), resolves supplier / code / price / currency /
+  cost_basis / qty_break / date columns by alias, and writes only `material_price`.
+- Join rule: `party` (canonical name or alias, kind supplier/both) gives `supplier_id`;
+  `material_identifier(value=code, source_system=--source-system)` gives `material_uid`; the
+  material's `default_supplier_id` must match (or be NULL) to guard same-code clashes across
+  suppliers. An unmatched code is reported, **never inserted** - a price list cannot invent
+  product records.
+- `--valid-from` is required unless the file has a per-row date column. Every price therefore has
+  an explicit effective date and different dates coexist as history (the unique key is
+  `(material_uid, supplier_id, valid_from, qty_break, cost_basis)`). Re-importing the same dated
+  price is a no-op (`ON CONFLICT DO NOTHING`).
+- `material.unit_cost` (the current-price cache) is refreshed only when the batch's date is the
+  newest price on record for that material, so a back-dated price list cannot overwrite today's
+  cached price.
+
+Verified end to end: a catalogue imported with `--no-price` produced 4 materials and 0 price rows;
+a price list then wrote 1 matched row, reported an unknown code as unmatched, and kept three
+distinct `valid_from` dates for one material (2026-01-01 / 2026-11-18 / 2026-12-01). Re-importing
+the newest date reported `inserted=0, unchanged=1`. Importing an older date left the cache
+unchanged; importing a newer date updated it. 14 pure tests in `tests/test_unit_price_import.py`.
