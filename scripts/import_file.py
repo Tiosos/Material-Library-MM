@@ -31,6 +31,7 @@ import yaml
 from ingest.auto_mapping import infer_mapping
 from ingest.importer import apply as apply_drafts, build_drafts, plan_report, read_table
 from ingest.mapping import Mapping, load_mapping
+from ingest.quality import assess, load_quality_context, print_quality
 
 
 def _auto_options(args) -> dict:
@@ -67,6 +68,8 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--auto", action="store_true", help="infer the mapping from the headers")
     ap.add_argument("--dsn", default=os.environ.get("ML_DSN"))
     ap.add_argument("--apply", action="store_true", help="write to the database (dry-run by default)")
+    ap.add_argument("--strict", action="store_true",
+                    help="refuse --apply when the quality report shows collisions, duplicates or incomplete rows")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--json", dest="json_out", help="write the report as JSON")
     # auto-mode overrides (ignored with --mapping)
@@ -123,9 +126,28 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  [{s['row']}] {s['part_no']} | {s['name']} | family={s['family_name']} | "
               f"measures={[m['key'] for m in s['measures']]}")
 
+    # --- data-quality gate (SELECT only; never writes) -----------------------
+    quality_ctx = {}
+    if args.dsn:
+        import psycopg
+        with psycopg.connect(args.dsn) as conn:
+            quality_ctx = load_quality_context(conn, drafts)
+    quality = assess(
+        drafts,
+        required_by_category=quality_ctx.get("required_by_category") if args.dsn else None,
+        existing_identifiers=quality_ctx.get("existing_identifiers"),
+        open_duplicate_candidates=quality_ctx.get("open_duplicate_candidates"),
+    )
+    report["quality"] = quality
+    print_quality(quality)
+    if not args.dsn:
+        print("  (batch-only checks: pass --dsn to include DB collisions and profile completeness)")
+
     if args.apply:
         if not args.dsn:
             raise SystemExit("--apply requires --dsn (or the ML_DSN environment variable)")
+        if args.strict and quality["has_signals"]:
+            raise SystemExit("--strict: quality signals found; fix the mapping/data or drop --strict to apply")
         import psycopg
         with psycopg.connect(args.dsn) as conn:
             stats = apply_drafts(conn, drafts, mapping)

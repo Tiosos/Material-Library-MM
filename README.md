@@ -34,7 +34,9 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 ├── fixtures/
 │   └── joineryflow-hartwood.jsonl   committed 18-row snapshot, the ETL's only input
 ├── ingest/auto_mapping.py           infer a supplier mapping from CSV/XLSX headers (no YAML)
+├── ingest/quality.py                pre-import completeness / duplicate signals (read-only)
 ├── tests/test_unit_auto_mapping.py  pure tests for header -> mapping inference
+├── tests/test_unit_quality.py       pure tests for pre-import quality signals
 ├── scripts/export_joineryflow.py    read-only exporter for that snapshot (step 0)
 ├── scripts/check_joineryflow_mapping.py  static mapping v2 validator
 ├── scripts/import_joineryflow.py    snapshot import CLI (step 3)
@@ -240,6 +242,14 @@ numeric dimension measures (thickness/width/length/angle → mm/deg) and keeps t
 It is deliberately conservative: no family grouping is guessed, and the default category is
 `generic`. Every decision is printed for review; `--save-mapping` writes a normal mapping file that
 passes the same schema check as hand-written ones. See `ingest/auto_mapping.py` for the rules.
+
+Every dry run also prints a **data-quality report**: completeness distribution (required fields
+from `material_profile`, the same rule as `v_material_completeness`), repeated codes within the
+batch, and how many identifiers already exist in the DB (those rows will be updated, not inserted).
+With `--dsn` the DB-side checks run; without it only the batch-local checks do. Add `--strict` to
+refuse `--apply` when the batch itself has duplicate codes, incomplete rows or an unknown category;
+existing-identifier upserts and DB-wide T2 duplicate candidates are informational and never gate a
+re-run. The same data lands in the `--json` report under `quality`.
 
 For a permanent vendor, give it a curated `mappings/<vendor>.yaml` (free-form header → UMR fields):
 
