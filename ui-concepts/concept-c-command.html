@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Concept C — Command Bar</title>
+<style>
+:root{
+  --bg:#0d1016; --bg-2:#12161f; --surface:#171c27; --surface-2:#1d2431;
+  --line:#272e3d; --line-2:#212837;
+  --ink:#e8ecf3; --ink-2:#a2adbf; --ink-3:#6b7688;
+  --accent:#7c9cff; --accent-2:#a7bcff; --accent-soft:#1c2740;
+  --mint:#5fd0a6; --mint-soft:#143029;
+  --amber:#e0b25c; --amber-soft:#2e2718;
+  --rose:#e07a8c; --rose-soft:#331c23;
+  --mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace;
+  --shadow:0 20px 60px rgba(0,0,0,.45);
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;height:100%;background:var(--bg)}
+body{font:13.5px/1.45 Inter,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;-webkit-font-smoothing:antialiased;color:var(--ink);overflow:hidden}
+.app{display:grid;grid-template-rows:54px minmax(0,1fr) 40px;height:100vh;width:100vw}
+
+/* top */
+.top{display:flex;align-items:center;gap:16px;padding:0 22px;border-bottom:1px solid var(--line-2);background:var(--bg-2)}
+.brand{display:flex;align-items:center;gap:9px}
+.logo{width:26px;height:26px;border-radius:7px;background:linear-gradient(145deg,#7c9cff,#4f6fe0);display:grid;place-items:center;box-shadow:0 2px 10px rgba(124,156,255,.3)}
+.logo svg{width:15px;height:15px}
+.brand b{font-size:13.5px;letter-spacing:-.01em}
+.brand small{font:10px var(--mono);color:var(--ink-3);margin-left:3px}
+.modes{display:flex;gap:3px;margin-left:24px;background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:3px}
+.mode{display:flex;align-items:center;gap:8px;border:0;background:none;color:var(--ink-3);padding:6px 12px;border-radius:7px;font-size:12.5px;font-weight:600;cursor:pointer}
+.mode.active{background:var(--accent-soft);color:var(--accent-2)}
+.mode .kbd{font:10px var(--mono);border:1px solid var(--line);border-radius:4px;padding:0 5px;color:var(--ink-3)}
+.mode.active .kbd{border-color:#3a4a72;color:var(--accent-2)}
+.top .right{margin-left:auto;display:flex;align-items:center;gap:14px;color:var(--ink-3);font-size:11.5px}
+.top .right .k{font:10.5px var(--mono);border:1px solid var(--line);border-radius:5px;padding:2px 6px;color:var(--ink-2)}
+.avatar{width:30px;height:30px;border-radius:50%;background:linear-gradient(145deg,#4a6bd8,#3350a8);color:#fff;display:grid;place-items:center;font-weight:700;font-size:11px}
+
+/* body */
+.body{display:grid;grid-template-columns:minmax(0,1fr) 320px;min-height:0}
+.stage{overflow:hidden;padding:30px 40px;display:flex;flex-direction:column;align-items:center}
+.stage-inner{width:100%;max-width:840px;display:flex;flex-direction:column;min-height:0}
+.eyebrow{font:10.5px var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:8px}
+.hero-title{font-size:22px;font-weight:700;letter-spacing:-.03em;margin:0}
+.hero-sub{color:var(--ink-3);font-size:12.5px;margin:5px 0 0}
+
+/* command input */
+.cmd{display:flex;align-items:center;gap:12px;margin-top:20px;background:var(--surface);border:1px solid #33405f;border-radius:14px;padding:15px 18px;box-shadow:0 0 0 4px rgba(124,156,255,.08),var(--shadow)}
+.cmd .prompt{font:16px var(--mono);color:var(--accent);font-weight:700}
+.cmd input{border:0;outline:0;background:transparent;color:var(--ink);font-size:16px;flex:1;min-width:0}
+.cmd input::selection{background:var(--accent-soft)}
+.cmd .esc{font:10.5px var(--mono);border:1px solid var(--line);border-radius:6px;padding:3px 7px;color:var(--ink-3)}
+
+/* filters */
+.filters{display:flex;align-items:center;gap:7px;margin-top:14px;flex-wrap:wrap}
+.fchip{display:flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:5px 10px;font-size:11.5px;color:var(--ink-2);cursor:pointer}
+.fchip.on{background:var(--accent-soft);border-color:#3a4a72;color:var(--accent-2)}
+.fchip .x{color:var(--ink-3)}
+.fchip.on .x{color:var(--accent-2)}
+.fchip.add{border-style:dashed;color:var(--ink-3)}
+.fcount{margin-left:auto;font:11px var(--mono);color:var(--ink-3)}
+
+/* results */
+.results{margin-top:16px;background:var(--surface);border:1px solid var(--line);border-radius:13px;overflow:hidden;flex:1;min-height:0;display:flex;flex-direction:column}
+.rhead{display:flex;align-items:center;padding:9px 14px;border-bottom:1px solid var(--line-2);font:10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)}
+.rhead .c1{width:26px}
+.rhead .c2{flex:1}
+.rhead .c3{width:130px}
+.rhead .c4{width:96px}
+.rhead .c5{width:80px;text-align:right}
+.row{display:flex;align-items:center;padding:9px 14px;border-bottom:1px solid var(--line-2);gap:0;cursor:pointer}
+.row:last-child{border-bottom:0}
+.row:hover{background:var(--surface-2)}
+.row.sel{background:var(--accent-soft);box-shadow:inset 3px 0 0 var(--accent)}
+.row .c1{width:26px}
+.row .key{display:inline-grid;place-items:center;width:19px;height:19px;border:1px solid var(--line);border-radius:5px;font:10.5px var(--mono);color:var(--ink-3)}
+.row.sel .key{border-color:#3a4a72;color:var(--accent-2);background:var(--bg-2)}
+.row .c2{flex:1;min-width:0}
+.row .nm{font-size:12.8px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .meta{font:10.5px var(--mono);color:var(--ink-3);margin-top:2px}
+.row .nm mark{background:rgba(124,156,255,.22);color:var(--accent-2);border-radius:3px;padding:0 1px}
+.row .c3{width:130px}
+.row .c4{width:96px}
+.row .c5{width:80px;text-align:right;font-variant-numeric:tabular-nums}
+.tag{font:10.5px var(--mono);color:var(--ink-2);background:var(--surface-2);border:1px solid var(--line);border-radius:5px;padding:2px 7px}
+.st{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:650;border-radius:20px;padding:3px 9px}
+.st i{width:6px;height:6px;border-radius:50%;background:currentColor}
+.st.ok{color:var(--mint);background:var(--mint-soft)}
+.st.warn{color:var(--amber);background:var(--amber-soft)}
+.st.rose{color:var(--rose);background:var(--rose-soft)}
+.price{font-size:12px;font-weight:650;color:var(--ink);font-variant-numeric:tabular-nums}
+.price.n{color:var(--ink-3);font-weight:500}
+.rfoot{display:flex;align-items:center;gap:8px;padding:9px 14px;border-top:1px solid var(--line-2);font:10.5px var(--mono);color:var(--ink-3)}
+.rfoot .kb{border:1px solid var(--line);border-radius:4px;padding:2px 6px;color:var(--ink-2)}
+
+/* side */
+.side{border-left:1px solid var(--line-2);background:var(--bg-2);padding:22px 18px;overflow:hidden}
+.side h4{margin:0 0 12px;font:10px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3)}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:16px}
+.panel .pt{font-size:12px;font-weight:700;margin-bottom:10px;display:flex;align-items:center;gap:7px}
+.panel .pt .d{width:7px;height:7px;border-radius:50%;background:var(--accent)}
+.kbrow{display:flex;align-items:center;justify-content:space-between;padding:5px 0;font-size:11.5px;color:var(--ink-2)}
+.kbrow .keys{display:flex;gap:3px}
+.kbrow kbd{font:10px var(--mono);background:var(--surface-2);border:1px solid var(--line);border-radius:5px;padding:2px 6px;color:var(--ink);min-width:20px;text-align:center}
+.recent{display:flex;flex-direction:column;gap:2px}
+.recent a{display:flex;align-items:center;gap:8px;padding:6px 0;color:var(--ink-2);font-size:11.5px;text-decoration:none}
+.recent a:hover{color:var(--accent-2)}
+.recent a .tm{margin-left:auto;font:10px var(--mono);color:var(--ink-3)}
+.recent a .ic{color:var(--ink-3)}
+.quickstat{display:flex;gap:8px}
+.quickstat .q{flex:1;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:10px;text-align:center}
+.quickstat .q .v{font-size:17px;font-weight:750;letter-spacing:-.02em}
+.quickstat .q .v.a{color:var(--accent-2)}
+.quickstat .q .v.m{color:var(--mint)}
+.quickstat .q .k{font:9.5px var(--mono);color:var(--ink-3);margin-top:2px}
+
+/* statusbar */
+.status{display:flex;align-items:center;gap:16px;padding:0 22px;border-top:1px solid var(--line-2);background:var(--bg-2);font:10.5px var(--mono);color:var(--ink-3)}
+.status .b{color:var(--mint)}
+.status .r{margin-left:auto;display:flex;gap:16px}
+
+::-webkit-scrollbar{width:0;height:0}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header class="top">
+    <div class="brand">
+      <div class="logo"><svg viewBox="0 0 24 24" fill="none"><path d="M4 7l8-4 8 4-8 4-8-4z" fill="#fff"/><path d="M4 12l8 4 8-4M4 17l8 4 8-4" stroke="#fff" stroke-width="1.8" stroke-linejoin="round"/></svg></div>
+      <b>Material Library</b><small>cmd</small>
+    </div>
+    <div class="modes">
+      <button class="mode active">Search <span class="kbd">⌘1</span></button>
+      <button class="mode">Add <span class="kbd">⌘2</span></button>
+      <button class="mode">Review <span class="kbd">⌘3</span></button>
+    </div>
+    <div class="right">
+      <span>stable · v2.4</span>
+      <span class="k">⌘ K</span>
+      <div class="avatar">AL</div>
+    </div>
+  </header>
+
+  <div class="body">
+    <section class="stage">
+      <div class="stage-inner">
+        <div class="eyebrow">// material master data</div>
+        <h1 class="hero-title">Quick find</h1>
+        <p class="hero-sub">Type to search 322 materials across brands, categories and suppliers — keyboard first.</p>
+
+        <div class="cmd">
+          <span class="prompt">&gt;</span>
+          <input value="clip top hinge" readonly>
+          <span class="esc">esc to clear</span>
+        </div>
+
+        <div class="filters">
+          <span class="fchip on">brand:Blum <span class="x">×</span></span>
+          <span class="fchip on">cat:hardware.hinge <span class="x">×</span></span>
+          <span class="fchip">supplier:*</span>
+          <span class="fchip add">+ filter</span>
+          <span class="fcount">8 results · 8 ms</span>
+        </div>
+
+        <div class="results">
+          <div class="rhead">
+            <span class="c1"></span>
+            <span class="c2">Material</span>
+            <span class="c3">Category</span>
+            <span class="c4">Status</span>
+            <span class="c5">Unit cost</span>
+          </div>
+
+          <div class="row sel">
+            <span class="c1"><span class="key">1</span></span>
+            <span class="c2"><div class="nm"><mark>CLIP top</mark> BLUMOTION INSERTA hinge NI</div><div class="meta">mat_7f3a9c21d8e4b056 · boss: INSERTA</div></span>
+            <span class="c3"><span class="tag">hardware.hinge</span></span>
+            <span class="c4"><span class="st ok"><i></i>Active</span></span>
+            <span class="c5"><span class="price n">—</span></span>
+          </div>
+          <div class="row">
+            <span class="c1"><span class="key">2</span></span>
+            <span class="c2"><div class="nm"><mark>CLIP top</mark> Screw-on hinge NI/ONS</div><div class="meta">mat_b12e7d40a6f39c81 · boss: Screw-on</div></span>
+            <span class="c3"><span class="tag">hardware.hinge</span></span>
+            <span class="c4"><span class="st ok"><i></i>Active</span></span>
+            <span class="c5"><span class="price n">—</span></span>
+          </div>
+          <div class="row">
+            <span class="c1"><span class="key">3</span></span>
+            <span class="c2"><div class="nm"><mark>CLIP top</mark> Knock-in hinge NI</div><div class="meta">mat_4c88f019e2b7a6d3 · boss: Knock-in</div></span>
+            <span class="c3"><span class="tag">hardware.hinge</span></span>
+            <span class="c4"><span class="st warn"><i></i>Review</span></span>
+            <span class="c5"><span class="price">$8.90</span></span>
+          </div>
+          <div class="row">
+            <span class="c1"><span class="key">4</span></span>
+            <span class="c2"><div class="nm"><mark>CLIP top</mark> BLUMOTION Knock-in hinge NI</div><div class="meta">mat_6e2b90d3f14a8c77 · boss: Knock-in</div></span>
+            <span class="c3"><span class="tag">hardware.hinge</span></span>
+            <span class="c4"><span class="st ok"><i></i>Active</span></span>
+            <span class="c5"><span class="price">$9.40</span></span>
+          </div>
+          <div class="row">
+            <span class="c1"><span class="key">5</span></span>
+            <span class="c2"><div class="nm"><mark>CLIP top</mark> Screw-on hinge 110° NI/ONS</div><div class="meta">mat_d3f7018a5b6c24e9 · boss: Screw-on</div></span>
+            <span class="c3"><span class="tag">hardware.hinge</span></span>
+            <span class="c4"><span class="st ok"><i></i>Active</span></span>
+            <span class="c5"><span class="price">$8.90</span></span>
+          </div>
+          <div class="row">
+            <span class="c1"><span class="key">6</span></span>
+            <span class="c2"><div class="nm">BLUMOTION clip for <mark>hinge</mark> arm NI</div><div class="meta">mat_a84c2e10b7d63f95 · finish: NI</div></span>
+            <span class="c3"><span class="tag">hardware.hinge</span></span>
+            <span class="c4"><span class="st ok"><i></i>Active</span></span>
+            <span class="c5"><span class="price n">—</span></span>
+          </div>
+          <div class="row">
+            <span class="c1"><span class="key">7</span></span>
+            <span class="c2"><div class="nm"><mark>CLIP top</mark> BLUMOTION INSERTA hinge NI/ONS</div><div class="meta">mat_91d4e6b7c0352fa8 · boss: INSERTA</div></span>
+            <span class="c3"><span class="tag">hardware.hinge</span></span>
+            <span class="c4"><span class="st rose"><i></i>Duplicate</span></span>
+            <span class="c5"><span class="price n">—</span></span>
+          </div>
+          <div class="row">
+            <span class="c1"><span class="key">8</span></span>
+            <span class="c2"><div class="nm">Sensys <mark>hinge</mark> 110° clip-on (Hettich)</div><div class="meta">mat_1d6a4f93c02b8e57 · opening: 110°</div></span>
+            <span class="c3"><span class="tag">hardware.hinge</span></span>
+            <span class="c4"><span class="st warn"><i></i>Review</span></span>
+            <span class="c5"><span class="price">$8.90</span></span>
+          </div>
+
+          <div class="rfoot">
+            <span><span class="kb">↑</span> <span class="kb">↓</span> navigate</span>
+            <span><span class="kb">↵</span> open</span>
+            <span><span class="kb">⌘E</span> edit field</span>
+            <span><span class="kb">⌘D</span> mark duplicate</span>
+            <span style="margin-left:auto">⋮ more actions</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <aside class="side">
+      <div class="quickstat">
+        <div class="q"><div class="v a">322</div><div class="k">RECORDS</div></div>
+        <div class="q"><div class="v m">98.4%</div><div class="k">HEALTH</div></div>
+      </div>
+
+      <div class="panel" style="margin-top:16px">
+        <div class="pt"><span class="d"></span>Keyboard shortcuts</div>
+        <div class="kbrow"><span>Focus search</span><span class="keys"><kbd>⌘</kbd><kbd>K</kbd></span></div>
+        <div class="kbrow"><span>Move selection</span><span class="keys"><kbd>↑</kbd><kbd>↓</kbd></span></div>
+        <div class="kbrow"><span>Open material</span><span class="keys"><kbd>↵</kbd></span></div>
+        <div class="kbrow"><span>Quick edit</span><span class="keys"><kbd>⌘</kbd><kbd>E</kbd></span></div>
+        <div class="kbrow"><span>Add filter</span><span class="keys"><kbd>⌘</kbd><kbd>F</kbd></span></div>
+        <div class="kbrow"><span>New material</span><span class="keys"><kbd>⌘</kbd><kbd>N</kbd></span></div>
+      </div>
+
+      <div class="panel">
+        <div class="pt"><span class="d" style="background:var(--mint)"></span>Recent</div>
+        <div class="recent">
+          <a href="#"><span class="ic">↗</span> Laminex 18mm Black MDF <span class="tm">2m</span></a>
+          <a href="#"><span class="ic">↗</span> Blum Tandem runner 500mm <span class="tm">18m</span></a>
+          <a href="#"><span class="ic">↗</span> Polytec Natural Oak 16mm <span class="tm">1h</span></a>
+          <a href="#"><span class="ic">↗</span> Matt Black edging 22mm <span class="tm">3h</span></a>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="pt"><span class="d" style="background:var(--amber)"></span>Needs attention</div>
+        <div class="kbrow"><span>Pending reviews</span><span><b style="color:var(--amber)">3</b></span></div>
+        <div class="kbrow"><span>Possible duplicates</span><span><b style="color:var(--rose)">4</b></span></div>
+        <div class="kbrow"><span>Missing price</span><span><b>166</b></span></div>
+      </div>
+    </aside>
+  </div>
+
+  <footer class="status">
+    <span class="b">● ready</span>
+    <span>master.catalogue / hardware.hinge</span>
+    <div class="r">
+      <span>schema v2</span>
+      <span>AUD · ex GST</span>
+      <span>⌘K to search</span>
+    </div>
+  </footer>
+
+</div>
+</body>
+</html>

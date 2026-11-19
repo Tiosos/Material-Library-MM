@@ -55,6 +55,14 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
 ├── scripts/build_preview.py         rebuild the static HTML snapshot from the JSON below
 ├── preview_snapshot.json            exported data behind material-library-preview.html
 ├── material-library-preview.html    self-contained static snapshot of the UI (double-click to view)
+├── ui-concepts/                     three English concept drafts + decision comparison
+│   ├── COMPARISON.md                three versions, details, pros/cons, decision guidance
+│   └── concept-*.html / .png        editable sources and rendered 1600×1000 drafts
+├── prototype/                       fused A+B clickable prototype + English handbook
+│   ├── index.html                   entry point: Admin / Browse / Suppliers
+│   ├── HANDBOOK.html                full user and handover manual (printable)
+│   ├── data.js / styles.css / app.js / workflows.js   shared source, design system, logic, approvals
+│   └── *.png                        verification screenshots used by the handbook
 ├── ingest/joineryflow.py            pure snapshot reader and draft builder (step 2)
 ├── docs/etl-joineryflow.md          ETL design (final)
 ├── docs/etl-joineryflow-progress.md ETL implementation log and verification
@@ -69,6 +77,18 @@ Reference source: [`github.com/Tiosos/joineryflow`](https://github.com/Tiosos/jo
     ├── data/materials.jsonl    UMR exchange-format samples
     └── web/index.html          search UI
 ```
+
+---
+
+## UI design package (concepts + prototype + handbook)
+
+A self-contained UI workstream lives alongside the database/API stack. It is a static design and prototype layer, not part of the PostgreSQL service.
+
+- **Concept drafts** — `ui-concepts/`: three English static designs (A Flagship Workbench, B Material Gallery, C Command Bar) plus [`COMPARISON.md`](ui-concepts/COMPARISON.md) with the full decision record. The chosen direction was **A + B**.
+- **Clickable prototype** — [`prototype/index.html`](prototype/index.html): the fused A+B app with an Admin workspace, a Browse & select end and a Suppliers view sharing one data source. Double-click to open it; no server or dependency installation is needed.
+- **Handbook** — [`prototype/HANDBOOK.html`](prototype/HANDBOOK.html): a full English user and handover guide covering every iteration, workflow, the data dictionary, shortcuts and a screenshot gallery. Use the browser's Print → Save as PDF to export it.
+
+All prototype changes live in browser memory; a refresh restores the initial data. Edit `prototype/data.js` to change the shared material/supplier pool.
 
 ---
 
@@ -535,6 +555,7 @@ Edit the material pool at the top of `proto/build_db.py` (`BOARDS` / `HARDWARE` 
 - [x] **Write-back executor (T3)**: SQL-owned approval state machine with a five-minute lease and `FOR UPDATE SKIP LOCKED`, dry-run-first PATCH worker with a fake upstream in CI, five HTTP review routes, SQL contract and a dedicated `writeback` CI job
 - [x] **Manual query and bulk edit UI**: no-build ES-module screen at `/ui` with facets, structured filters, saved views, a staging grid with schema-driven editors, a review sheet that files batches, and a Review tab with stale / inactive / own badges and single or bulk decisions; 23 decisions and seven merged steps (PRs #22-#27)
 - [x] **Approval-based new materials**: `material_create_request` table and submit / update / decide / apply SQL, a `--apply-creates` worker pass and 90-day retention, five HTTP routes, an Add tab with a schema-driven form and grouped preview, and a Review `creates` chip; six merged steps (PRs #29-#34)
+- [x] **UI design package**: three English concept drafts, a fused A+B clickable prototype (Admin / Browse / Suppliers) and a full English handover handbook (`prototype/HANDBOOK.html`)
 
 **Next step: operational hardening, not another structural gap.** The model layer now covers design, search, supplier imports, duplicate merge, MCP, real-data ETL, approval-based write-back, the manual edit UI and approval-based creation of new materials, and the four T3 consistency follow-ups are merged. `docs/ui-create-material.md` records all six shipped steps (PRs #29-#34): a proposed row is filed from the Add tab, decided by a second actor in Review, and turned into a material by `--apply-creates` - there is deliberately no `POST /v1/materials`. Every state in the five-state machine now has a way out: `--apply` for `approved`, `--retry` for a known failure, and `--verify` for an outcome nobody could see. What remains depends on the live source system: incremental sync needs joineryflow's `updated_at` and real credentials, while `Idempotency-Key` support, the exact workspace guard, the `GET` response shape and a read-scoped token are open questions recorded in [`docs/t3-writeback.md`](docs/t3-writeback.md) §16 and [`docs/t3-progress.md`](docs/t3-progress.md). Request retention is no longer open: the 90-day prune CLI and the watermark are shipped. Who schedules the worker and the prune job is an operations choice. ETIM/eCl@ss codes and EPD collection stay reserved slots until real supplier classification data arrives. T1b closed the two gaps the read API used to advertise: families collapse by default (`expand=variants` returns the records) and `format=json` exports the versioned envelope validated by `schema/export.schema.json`. `docs/t2-merge.md` §9 explains recovery without an `unmerge()`.
 

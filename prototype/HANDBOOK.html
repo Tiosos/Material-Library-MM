@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Material Library — UI Design Delivery & User Handbook</title>
+<style>
+:root{
+  --bg:#f6f4f0; --panel:#fffdfa; --panel-2:#faf7f2; --line:#e8e1d6; --line-2:#efe9df;
+  --ink:#26221c; --ink-2:#6b6458; --ink-3:#9d9487;
+  --accent:#4f46e5; --accent-d:#4338ca; --accent-soft:#eef0ff; --accent-line:#d5d8ff;
+  --ok:#12805c; --ok-soft:#e6f4ee; --warn:#a9670f; --warn-soft:#fbefda;
+  --rose:#c0455f; --rose-soft:#fbe9ee; --teal:#0e8a7a;
+  --shadow:0 1px 2px rgba(38,34,28,.04),0 8px 26px rgba(38,34,28,.06);
+  --mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.7 Inter,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;-webkit-font-smoothing:antialiased}
+.layout{display:grid;grid-template-columns:270px minmax(0,1fr);max-width:1500px;margin:0 auto}
+
+/* sidebar TOC */
+.toc{position:sticky;top:0;height:100vh;overflow-y:auto;padding:26px 18px;border-right:1px solid var(--line);background:var(--panel)}
+.toc .brand{display:flex;align-items:center;gap:9px;margin-bottom:4px}
+.toc .logo{width:30px;height:30px;border-radius:9px;background:linear-gradient(145deg,#6366f1,#4338ca);display:grid;place-items:center;box-shadow:0 3px 10px rgba(79,70,229,.3);flex:none}
+.toc .logo svg{width:18px;height:18px}
+.toc .bt{font-weight:750;font-size:14px;letter-spacing:-.02em}
+.toc .bs{font-size:11px;color:var(--ink-3);margin:2px 0 20px}
+.toc h5{margin:16px 0 6px;font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-3)}
+.toc a{display:block;padding:6px 10px;border-radius:7px;color:var(--ink-2);text-decoration:none;font-size:12.5px;margin:1px 0}
+.toc a:hover{background:var(--panel-3,var(--line-2));color:var(--ink)}
+.toc a.active{background:var(--accent-soft);color:var(--accent-d);font-weight:650}
+.toc .ver{margin-top:22px;padding-top:14px;border-top:1px solid var(--line);font:10.5px var(--mono);color:var(--ink-3);line-height:1.7}
+
+/* content */
+.content{padding:40px 52px 100px;min-width:0}
+.hero{padding:34px 36px;background:linear-gradient(135deg,#fffdfa,#f3efff);border:1px solid var(--line);border-radius:18px;margin-bottom:34px;position:relative;overflow:hidden}
+.hero:after{content:"";position:absolute;right:-60px;top:-60px;width:240px;height:240px;border-radius:50%;background:radial-gradient(circle,rgba(79,70,229,.12),transparent 70%)}
+.hero .tag{display:inline-block;font:10.5px var(--mono);letter-spacing:.08em;color:var(--accent-d);background:var(--accent-soft);border:1px solid var(--accent-line);border-radius:20px;padding:4px 11px;margin-bottom:14px}
+.hero h1{margin:0;font-size:30px;letter-spacing:-.035em;line-height:1.2}
+.hero p{margin:10px 0 0;color:var(--ink-2);font-size:14px;max-width:720px}
+.hero .meta{display:flex;gap:22px;margin-top:20px;flex-wrap:wrap}
+.hero .meta div{display:flex;flex-direction:column}
+.hero .meta .k{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-3)}
+.hero .meta .v{font-size:13px;font-weight:650;color:var(--ink)}
+
+section{margin-bottom:44px;scroll-margin-top:20px}
+section > h2{font-size:22px;letter-spacing:-.03em;margin:0 0 6px;display:flex;align-items:center;gap:10px}
+section > h2 .num{font:11px var(--mono);color:var(--accent-d);background:var(--accent-soft);border-radius:7px;padding:3px 8px;flex:none}
+.lead{color:var(--ink-2);margin:0 0 20px;font-size:13.5px;max-width:820px}
+h3{font-size:15px;letter-spacing:-.01em;margin:24px 0 9px}
+p{margin:0 0 12px}
+a.inline{color:var(--accent-d);text-decoration:none;border-bottom:1px solid var(--accent-line)}
+
+.card{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:18px 20px;margin:14px 0;box-shadow:var(--shadow)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.card h4{margin:0 0 8px;font-size:13.5px}
+.card p{font-size:12.5px;color:var(--ink-2);margin:0}
+.pill{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:700;border-radius:20px;padding:3px 10px}
+.pill.acc{background:var(--accent-soft);color:var(--accent-d)}
+.pill.ok{background:var(--ok-soft);color:var(--ok)}
+.pill.warn{background:var(--warn-soft);color:var(--warn)}
+.pill.rose{background:var(--rose-soft);color:var(--rose)}
+
+table.doc{width:100%;border-collapse:collapse;font-size:12.5px;background:var(--panel);border:1px solid var(--line);border-radius:11px;overflow:hidden;margin:12px 0}
+table.doc th{background:var(--panel-2);text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-3);padding:10px 13px;border-bottom:1px solid var(--line)}
+table.doc td{padding:10px 13px;border-bottom:1px solid var(--line-2);vertical-align:top;color:var(--ink-2)}
+table.doc tr:last-child td{border-bottom:0}
+table.doc code{font:11px var(--mono);color:var(--accent-d);background:var(--accent-soft);padding:1px 6px;border-radius:5px;white-space:nowrap}
+
+.pre{background:#26221c;color:#e8e2d8;border-radius:11px;padding:16px 18px;font:12px/1.7 var(--mono);overflow-x:auto;margin:12px 0}
+.pre .c{color:#8f897e}
+.pre .k{color:#a7bcff}
+.pre .s{color:#8fd9b4}
+
+.steps{counter-reset:st;margin:14px 0;padding:0;list-style:none}
+.steps li{position:relative;padding:10px 0 10px 44px;border-bottom:1px solid var(--line-2);font-size:13px;color:var(--ink-2)}
+.steps li:last-child{border-bottom:0}
+.steps li:before{counter-increment:st;content:counter(st);position:absolute;left:0;top:10px;width:26px;height:26px;border-radius:8px;background:var(--accent-soft);color:var(--accent-d);font:700 12px var(--mono);display:grid;place-items:center}
+.steps li b{color:var(--ink)}
+
+.kbd{font:10.5px var(--mono);border:1px solid var(--line);background:#fff;border-radius:5px;padding:2px 7px;color:var(--ink-2);box-shadow:0 1px 0 var(--line)}
+
+figure{margin:18px 0}
+figure img{width:100%;border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);display:block}
+figcaption{font-size:11.5px;color:var(--ink-3);margin-top:8px;text-align:center}
+
+.note{border-left:3px solid var(--accent);background:var(--accent-soft);border-radius:0 9px 9px 0;padding:11px 15px;font-size:12.5px;color:var(--ink-2);margin:14px 0}
+.note.warn{border-color:var(--warn);background:var(--warn-soft)}
+.note.ok{border-color:var(--ok);background:var(--ok-soft)}
+.note b{color:var(--ink)}
+
+.timeline{border-left:1.5px solid var(--line);margin-left:8px;padding-left:20px}
+.timeline .it{position:relative;padding:0 0 18px}
+.timeline .it:before{content:"";position:absolute;left:-26px;top:6px;width:9px;height:9px;border-radius:50%;background:#fff;border:2px solid var(--accent)}
+.timeline .it h4{margin:0 0 3px;font-size:13px}
+.timeline .it p{margin:0;font-size:12.5px;color:var(--ink-2)}
+
+@media(max-width:1000px){.layout{grid-template-columns:1fr}.toc{position:static;height:auto;border-right:0;border-bottom:1px solid var(--line)}.content{padding:26px 20px 70px}.grid2,.grid3{grid-template-columns:1fr}}
+@media print{
+  .toc{display:none}.layout{display:block}.content{padding:0}
+  body{background:#fff;font-size:11px}
+  section{page-break-inside:avoid;margin-bottom:24px}
+  .hero{background:#fff}
+  figure img{max-height:420px;object-fit:contain}
+  a{color:inherit;text-decoration:none}
+}
+</style>
+</head>
+<body>
+<div class="layout">
+
+<!-- ============ TOC ============ -->
+<aside class="toc">
+  <div class="brand"><div class="logo"><svg viewBox="0 0 24 24" fill="none"><path d="M4 7l8-4 8 4-8 4-8-4z" fill="#fff"/><path d="M4 12l8 4 8-4M4 17l8 4 8-4" stroke="#fff" stroke-width="1.8" stroke-linejoin="round"/></svg></div><div><div class="bt">Material Library</div><div class="bs">UI design delivery · User handbook</div></div></div>
+  <h5>Getting started</h5>
+  <a href="#overview">01 · Delivery overview</a>
+  <a href="#design">02 · Design decisions &amp; evolution</a>
+  <a href="#quickstart">03 · Quick start</a>
+  <h5>Using the features</h5>
+  <a href="#modes">04 · Dual-mode workspace</a>
+  <a href="#search">05 · Search &amp; filtering</a>
+  <a href="#detail">06 · Material details</a>
+  <a href="#edit">07 · Edit &amp; create forms</a>
+  <a href="#approval">08 · Approval workflow</a>
+  <a href="#suppliers">09 · Supplier management</a>
+  <h5>Handover reference</h5>
+  <a href="#files">10 · File structure &amp; edits</a>
+  <a href="#data">11 · Data dictionary</a>
+  <a href="#shortcuts">12 · Shortcuts &amp; rules</a>
+  <a href="#screens">13 · Screenshot gallery</a>
+  <a href="#handoff">14 · Handover checklist</a>
+  <div class="ver">Version v1.0 · 2026-11-20<br>English UI / warm neutrals + indigo<br>Material master data (no live inventory)</div>
+</aside>
+
+<!-- ============ CONTENT ============ -->
+<main class="content">
+
+<div class="hero">
+  <span class="tag">DELIVERY HANDBOOK · v1.0</span>
+  <h1>Material Library UI Design Delivery</h1>
+  <p>A master-data interface for the cabinetmaking and woodworking industry. This handbook brings the entire design iteration together into one user and handover guide: from the three concept directions and the A+B fusion to every interaction in the clickable prototype (editing, approvals and supplier management).</p>
+  <div class="meta">
+    <div><span class="k">Prototype entry</span><span class="v">index.html</span></div>
+    <div><span class="k">UI language</span><span class="v">English</span></div>
+    <div><span class="k">Data scope</span><span class="v">36 materials · 5 suppliers</span></div>
+    <div><span class="k">Scope</span><span class="v">Material master data · no live inventory</span></div>
+  </div>
+</div>
+
+<!-- 01 -->
+<section id="overview">
+  <h2><span class="num">01</span>Delivery overview</h2>
+  <p class="lead">Two kinds of deliverables were produced: three static concept-stage design drafts (PNG) and one continuously iterated high-fidelity clickable prototype (HTML). <b>The prototype is the only active deliverable</b>; the concept drafts record the design process.</p>
+  <div class="grid3">
+    <div class="card"><span class="pill acc">Concept stage</span><h4 style="margin-top:10px">3 design drafts</h4><p>In ui-concepts/: A Flagship Workbench, B Material Gallery and C Command Bar as PNGs, plus the comparison document COMPARISON.md.</p></div>
+    <div class="card"><span class="pill ok">Active delivery</span><h4 style="margin-top:10px">Clickable prototype</h4><p>In prototype/: 5 source files + 15 verification screenshots. Dual modes, shared data, complete editing/approval flow and supplier management.</p></div>
+    <div class="card"><span class="pill warn">Scope boundary</span><h4 style="margin-top:10px">Master data only</h4><p>Price is reference-only (it changes over time) and is not shown in the main UI. Live inventory is handled by a separate system and is out of scope here.</p></div>
+  </div>
+  <div class="note"><b>Handover key point:</b> every feature lives in <code>prototype/index.html</code> — open it directly in a browser (no server and no dependency installation required). Data, styles, structure and logic are separated into files, so changing one place updates both modes.</div>
+</section>
+
+<!-- 02 -->
+<section id="design">
+  <h2><span class="num">02</span>Design decisions &amp; evolution</h2>
+  <p class="lead">After comparing the three concepts, the user selected the <b>A + B combination</b> — A as the admin workbench and B as the browse/selection end, unified under one colour system. The prototype was then iterated round by round.</p>
+  <div class="grid3">
+    <div class="card"><h4>A · Flagship Workbench</h4><p>Four-column data workbench: icon rail + facets + table + detail. High information density, suited to bulk governance and approvals. <span class="pill ok" style="margin-top:8px">→ Admin end</span></p></div>
+    <div class="card"><h4>B · Material Gallery</h4><p>Swatch card grid for selecting by appearance; touch-friendly. <span class="pill ok" style="margin-top:8px">→ Selection end</span></p></div>
+    <div class="card"><h4>C · Command Bar</h4><p>Dark keyboard-driven command palette for power users. Kept as a comparison option; not merged into the prototype.</p></div>
+  </div>
+  <h3>Iteration timeline</h3>
+  <div class="timeline">
+    <div class="it"><h4>v1 · A+B fusion</h4><p>One app with a top-bar mode switch; warm off-white base + indigo accent unify the look; 36 shared material records.</p></div>
+    <div class="it"><h4>v2 · Price demoted to Size</h4><p>Main UI Unit Cost → Size (boards show dimensions, hardware shows model + key spec); price kept in details and labelled "reference only"; product URL field added.</p></div>
+    <div class="it"><h4>v3 · Edit form + approval workflow</h4><p>Real field editing, validation, draft/submission; approval modal with request list, field-level diff and approve/reject/batch actions.</p></div>
+    <div class="it"><h4>v4 · Diff and reasons</h4><p>Live before/after preview in the form; rejection reasons recorded in the audit trail.</p></div>
+    <div class="it"><h4>v5 · Authors and presets</h4><p>Diff labelled "who changed what &amp; when"; six common rejection reasons added to a dropdown.</p></div>
+    <div class="it"><h4>v6 · Summaries + suppliers</h4><p>Approval list shows field count / last modifier; Suppliers view, stats and add/edit actions added.</p></div>
+    <div class="it"><h4>v7 · Search + quick card</h4><p>Suppliers integrated into global search; material details show a supplier contact quick card with a one-click jump.</p></div>
+  </div>
+</section>
+
+<!-- 03 -->
+<section id="quickstart">
+  <h2><span class="num">03</span>Quick start</h2>
+  <ol class="steps">
+    <li><b>Open:</b> double-click <code>prototype/index.html</code> (Chrome or Edge). No server needs to be started.</li>
+    <li><b>Switch modes:</b> the <span class="kbd">Admin workspace</span> / <span class="kbd">Browse &amp; select</span> buttons in the top bar switch between the workbench and the selection end.</li>
+    <li><b>Open suppliers:</b> the <span class="kbd">Suppliers</span> tab in the top bar opens supplier management.</li>
+    <li><b>Approval entry:</b> click <span class="pill rose">Review changes →</span> at the bottom or <span class="kbd">Review</span> in the top bar.</li>
+    <li><b>Deep link:</b> <code>index.html?mode=browse</code> goes straight to the selection end.</li>
+  </ol>
+  <div class="note warn"><b>Data behaviour:</b> all changes live in browser memory and a refresh restores the initial data. This is a design prototype with no backend — in a real system the approval and write-back are performed by backend APIs (the full semantics are represented in the prototype).</div>
+</section>
+
+<!-- 04 -->
+<section id="modes">
+  <h2><span class="num">04</span>Dual-mode workspace</h2>
+  <p class="lead">Admin and Browse read the same data source; filters, search, selection and favourites persist across modes. Switching does not lose state.</p>
+  <div class="grid2">
+    <div class="card"><span class="pill acc">Mode A</span><h4 style="margin-top:10px">Admin workspace</h4><p>Icon rail + facet sidebar + data table + right detail panel + bottom staging bar. For lookup, bulk selection, editing and approvals.</p></div>
+    <div class="card"><span class="pill ok">Mode B</span><h4 style="margin-top:10px">Browse &amp; select</h4><p>Swatch card grid + category pills + favourites + right slide-out detail drawer. For selecting by appearance, checking samples and browsing by non-technical colleagues.</p></div>
+  </div>
+  <h3>Admin table columns</h3>
+  <p>Checkbox · Material (swatch + name + UID) · Category · Brand · <b>Size</b> · Confidence (progress bar) · Status (badge) · Updated. Click a row to open details; tick a checkbox to stage it.</p>
+</section>
+
+<!-- 05 -->
+<section id="search">
+  <h2><span class="num">05</span>Search &amp; filtering</h2>
+  <h3>Three search entry points</h3>
+  <table class="doc">
+    <thead><tr><th>Entry point</th><th>Scope</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>Top global search</td><td>Current view</td><td>In Admin/Browse it searches materials; in Suppliers it searches suppliers (name / ID / contact / email / country / payment terms / notes)</td></tr>
+      <tr><td>Admin in-page search</td><td>Materials</td><td>Kept in sync with the global search in both directions</td></tr>
+      <tr><td>Facet sidebar</td><td>Materials</td><td>Category / Brand / Supplier / Data quality — single-select within a group, AND across groups</td></tr>
+    </tbody>
+  </table>
+  <p>Material search matches name, brand, supplier, category, tags and variant values; the keyword is highlighted in results. When supplier search has no matches it shows a "No suppliers match …" message.</p>
+  <div class="note"><b>Filter chips:</b> selected conditions appear as removable chips above the table — click × to remove one; <code>Clear all</code> resets every filter and the search.</div>
+</section>
+
+<!-- 06 -->
+<section id="detail">
+  <h2><span class="num">06</span>Material details</h2>
+  <p class="lead">Each mode has a detail view with the same fields, organised into the blocks below.</p>
+  <table class="doc">
+    <thead><tr><th>Block</th><th>Contents</th></tr></thead>
+    <tbody>
+      <tr><td>Classification</td><td>Category, brand, model, family</td></tr>
+      <tr><td>Variants</td><td>Variant key/value pairs (e.g. thickness 18 mm, boss INSERTA)</td></tr>
+      <tr><td>Size &amp; supply</td><td><b>Smart size</b> + supplier + unit + reference price (hatched "reference only" label)</td></tr>
+      <tr><td>Supplier contact</td><td>Supplier avatar/name/ID/country, View button, contact, lead time, email (mailto), payment terms</td></tr>
+      <tr><td>Product link</td><td>Product web link showing the domain; opens in a new tab</td></tr>
+      <tr><td>Provenance / activity</td><td>Source, confidence, updated time, activity trail</td></tr>
+    </tbody>
+  </table>
+  <div class="note ok"><b>Smart size rule:</b> boards/edging → thickness + sheet size (e.g. <code>18 mm · 2440 × 1220</code>); hardware → model + key spec (e.g. <code>70.7550 · 110°</code>). Implemented in <code>sizeLabel()</code>.</div>
+  <p>Clicking <b>View →</b> in the Supplier contact card jumps to the Suppliers view and filters to that supplier; if the material has no matching supplier record, an "Add supplier" entry is shown.</p>
+</section>
+
+<!-- 07 -->
+<section id="edit">
+  <h2><span class="num">07</span>Edit &amp; create forms</h2>
+  <p class="lead">Entry points: <span class="kbd">Edit</span> / <span class="kbd">Create change request</span> in the detail panel and <span class="kbd">Add material</span> in the page header. All three open the same form; the difference is the action after submission.</p>
+  <h3>Form structure</h3>
+  <ul class="steps">
+    <li><b>Identity &amp; classification:</b> name (required), brand, category, model, family</li>
+    <li><b>Commercial &amp; reference:</b> supplier, unit, reference price, cost basis, product URL (must be a valid URL)</li>
+    <li><b>Data quality:</b> status, confidence</li>
+    <li><b>Variants:</b> dynamic key/value rows that can be added or removed</li>
+    <li><b>Description</b> and <b>Change preview</b> (live before/after comparison)</li>
+  </ul>
+  <h3>Live before/after comparison</h3>
+  <p>The <b>Change preview (updates as you type)</b> at the bottom of the form refreshes instantly: Before (old value struck through) → After (new value highlighted green) → Changed by (author badge + time). Reverting to the original value removes that row automatically and the counter stays in sync.</p>
+  <h3>Three actions</h3>
+  <table class="doc">
+    <thead><tr><th>Button</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td><code>Cancel</code></td><td>Discard the changes</td></tr>
+      <tr><td><code>Save as draft</code></td><td>Stage the material in the bottom staging bar; no change request is created</td></tr>
+      <tr><td><code>Submit for approval</code></td><td>Create a change request with a field-level diff and add it to the pending queue</td></tr>
+    </tbody>
+  </table>
+  <div class="note warn"><b>Validation:</b> an empty name is highlighted and blocks submission; an invalid product URL is highlighted; submitting with no changes shows "No changes to submit".</div>
+</section>
+
+<!-- 08 -->
+<section id="approval">
+  <h2><span class="num">08</span>Approval workflow</h2>
+  <p class="lead">Entry points: <span class="kbd">Review changes</span> at the bottom and <span class="kbd">Review</span> in the top bar (with a pending badge). Core semantics: <b>edits are not written directly — they take effect only after approval</b>.</p>
+  <h3>List (left)</h3>
+  <p>Four tabs — Pending / Approved / Rejected / All — with count badges. Each request shows a status badge, ID, time and a summary line: <b>field change count</b> (e.g. <code>2 fields</code>) + <b>last by</b> modifier + time. Checkboxes allow batch approval.</p>
+  <h3>Detail (right)</h3>
+  <table class="doc">
+    <thead><tr><th>Block</th><th>Contents</th></tr></thead>
+    <tbody>
+      <tr><td>Proposed changes</td><td>Field-level diff table: Field / Current / → / Proposed / <b>Changed by</b> (author badge + time). Your own changes are highlighted in indigo.</td></tr>
+      <tr><td>Reason</td><td>Reason entered by the requester</td></tr>
+      <tr><td>Self-approval warning</td><td>Requests submitted by yourself show a "Self-approval restricted" notice (a real system requires another approver)</td></tr>
+      <tr><td>Audit trail</td><td>Requester, approver, timestamps; when rejected, an additional pink <b>REJECTION REASON</b> block</td></tr>
+    </tbody>
+  </table>
+  <h3>Actions</h3>
+  <ul class="steps">
+    <li><b>Approve:</b> changes are written to shared data → Admin table and Browse cards update together → the request moves to Approved and the pending count drops by 1</li>
+    <li><b>Reject:</b> the reason box expands; pick a common reason or write your own (an empty reason is blocked); confirming writes it to the audit trail → the request moves to Rejected</li>
+    <li><b>Approve selected:</b> batch-approve the ticked pending requests</li>
+  </ul>
+  <div class="note"><b>Six preset rejection reasons:</b> Duplicate of an existing material / Price needs supplier re-quote / Category or attributes are incorrect / Missing or invalid product link / Supplier details not confirmed / Not aligned with master data standard. There is also an "Other" custom option.</div>
+  <p>Five requests are seeded (3 Pending + 1 Approved + 1 Rejected) so the queue can be explored immediately; approving a create-type request actually adds the material to the catalogue.</p>
+</section>
+
+<!-- 09 -->
+<section id="suppliers">
+  <h2><span class="num">09</span>Supplier management</h2>
+  <p class="lead">Open with the <span class="kbd">Suppliers</span> tab in the top bar. Supplier changes <b>take effect directly and do not go through approval</b> (per the agreed requirement).</p>
+  <h3>Stats cards (computed live)</h3>
+  <div class="grid2">
+    <div class="card"><h4>Suppliers / Linked materials</h4><p>Total number of suppliers; the linked material count is computed live from the supplier field in the catalogue (currently 36).</p></div>
+    <div class="card"><h4>Unassigned / Avg. lead time</h4><p>Materials without a supplier; average lead time in days and number of covered countries.</p></div>
+  </div>
+  <h3>Table and form</h3>
+  <p>Table columns: supplier (name + ID), contact + email, country, lead time, payment terms, <b>linked material count badge</b>, Edit. <span class="kbd">Add supplier</span> opens the form with fields: name (required), contact, email, country, lead time, payment terms, website, notes; defaults are Country=Australia and Payment terms=30 days.</p>
+  <div class="note ok"><b>Rename propagation:</b> changing a supplier name automatically updates the supplier field of all linked materials and the filter options, so the counts stay accurate. Current distribution: Blum AU 14 / Laminex 11 / Polytec 6 / Hettich AU 3 / Trade Supplies 2.</div>
+</section>
+
+<!-- 10 -->
+<section id="files">
+  <h2><span class="num">10</span>File structure &amp; edits</h2>
+  <p class="lead">The <code>prototype/</code> folder contains 5 source files with separated responsibilities — edit the file that matches what you want to change.</p>
+  <table class="doc">
+    <thead><tr><th>File</th><th>Responsibility</th><th>Common changes</th></tr></thead>
+    <tbody>
+      <tr><td><code>data.js</code></td><td>Shared data source: 36 materials + 5 suppliers + metadata</td><td>Edit material/supplier content, add fields, replace with real productUrl</td></tr>
+      <tr><td><code>styles.css</code></td><td>Unified design system: colour tokens, both mode styles, modals, approval, suppliers</td><td>Change the <code>:root</code> variables to retheme</td></tr>
+      <tr><td><code>index.html</code></td><td>Page skeleton: top bar, both mode panes, supplier pane, modals</td><td>Adjust structure and copy</td></tr>
+      <tr><td><code>app.js</code></td><td>State and interaction: search, facets, details, suppliers, staging</td><td>Change filter logic, supplier form</td></tr>
+      <tr><td><code>workflows.js</code></td><td>Edit form and approval flow, communicating with app.js through ctx</td><td>Change form fields, approval rules, rejection presets</td></tr>
+    </tbody>
+  </table>
+  <div class="pre"><span class="c">// Colour tokens (styles.css :root) — edit here to update the whole app</span>
+<span class="k">--bg</span>:#f6f4f0;      <span class="c">/* warm off-white base */</span>
+<span class="k">--accent</span>:#4f46e5;   <span class="c">/* indigo primary */</span>
+<span class="k">--ok</span>:#12805c;       <span class="c">/* normal / approved */</span>
+<span class="k">--warn</span>:#a9670f;     <span class="c">/* pending / reminder */</span>
+<span class="k">--danger</span>:#c0455f;   <span class="c">/* rejected / duplicate */</span></div>
+  <div class="note"><b>Adding a material:</b> copy one entry in the MATERIALS array in data.js and change the values; both modes update automatically. Change the product link via <code>productUrl</code>; Size is derived automatically from <code>variants</code>, so there is no need to write it by hand.</div>
+</section>
+
+<!-- 11 -->
+<section id="data">
+  <h2><span class="num">11</span>Data dictionary</h2>
+  <h3>Material</h3>
+  <table class="doc">
+    <thead><tr><th>Field</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td><code>uid</code></td><td>Permanent stable ID (mat_ prefix)</td></tr>
+      <tr><td><code>name / brand / supplier</code></td><td>Name / brand / supplier name (linked to Supplier.name)</td></tr>
+      <tr><td><code>category / categoryLabel</code></td><td>Category code / display label</td></tr>
+      <tr><td><code>variants</code></td><td>Variant key/value object (Size is derived from this)</td></tr>
+      <tr><td><code>unit / unitCost / costBasis</code></td><td>Unit / reference price (may be null) / cost basis</td></tr>
+      <tr><td><code>confidence / status</code></td><td>Confidence / active|review|duplicate</td></tr>
+      <tr><td><code>modelNo / family / tags / description</code></td><td>Model / family / tags / description</td></tr>
+      <tr><td><code>productUrl</code></td><td>Product web link (currently a brand homepage placeholder)</td></tr>
+      <tr><td><code>source / updated / swatch</code></td><td>Source / updated time / material swatch style</td></tr>
+    </tbody>
+  </table>
+  <h3>Supplier</h3>
+  <table class="doc">
+    <thead><tr><th>Field</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td><code>id / name</code></td><td>Supplier ID / name (materials link by name)</td></tr>
+      <tr><td><code>contact / email / country</code></td><td>Contact / email / country (shown in the detail quick card)</td></tr>
+      <tr><td><code>leadTimeDays / paymentTerms</code></td><td>Lead time in days / payment terms</td></tr>
+      <tr><td><code>website / notes</code></td><td>Website / notes</td></tr>
+    </tbody>
+  </table>
+  <h3>Change Request (in workflows.js)</h3>
+  <p>Fields: <code>id, type(update|create), uid, name, requestedBy, requestedAt, status(pending|approved|rejected|all), reason, changes[], rejectReason, payload, decidedBy, decidedAt</code>. Each change contains <code>field, from, to, by, at</code> (author and time).</p>
+</section>
+
+<!-- 12 -->
+<section id="shortcuts">
+  <h2><span class="num">12</span>Shortcuts &amp; rules</h2>
+  <table class="doc">
+    <thead><tr><th>Shortcut</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td><span class="kbd">⌘K</span> / <span class="kbd">Ctrl+K</span></td><td>Focus the top global search</td></tr>
+      <tr><td><span class="kbd">/</span></td><td>Focus the Admin in-page search</td></tr>
+      <tr><td><span class="kbd">Esc</span></td><td>Close the detail drawer / supplier form / modal</td></tr>
+    </tbody>
+  </table>
+  <h3>Business rules at a glance</h3>
+  <ul class="steps">
+    <li><b>Approval semantics:</b> edit → stage or submit a request → write-back only after approval; until refresh, changes exist only in memory</li>
+    <li><b>Price positioning:</b> no price in the main UI; retained in details but labelled "reference only · subject to change"</li>
+    <li><b>Supplier changes:</b> take effect directly and never enter the approval queue</li>
+    <li><b>Self-approval restriction:</b> your own requests show a restriction notice (the prototype still allows approval for demo purposes)</li>
+    <li><b>Status counts:</b> top-bar Review badge = pending request count; Browse "To review" = materials whose data-quality status is review</li>
+  </ul>
+</section>
+
+<!-- 13 -->
+<section id="screens">
+  <h2><span class="num">13</span>Screenshot gallery</h2>
+  <p class="lead">All screenshots below are actual prototype renders (1600×1000) and can be used as acceptance references.</p>
+  <div class="grid2">
+    <figure><img src="admin.png" alt="Admin"><figcaption>Admin workspace · four columns + Size column + detail + staging bar</figcaption></figure>
+    <figure><img src="browse.png" alt="Browse"><figcaption>Browse &amp; select · swatch card grid</figcaption></figure>
+    <figure><img src="sheet.png" alt="Sheet"><figcaption>Browse detail drawer · hardware model/size + product link</figcaption></figure>
+    <figure><img src="wf-form.png" alt="Form"><figcaption>Edit form · grouped fields</figcaption></figure>
+    <figure><img src="wf-livediff.png" alt="Live diff"><figcaption>Form live diff · Changed by column</figcaption></figure>
+    <figure><img src="wf-review.png" alt="Review"><figcaption>Approval modal · list + diff + audit</figcaption></figure>
+    <figure><img src="wf-author.png" alt="Author"><figcaption>Approval diff · who changed it and when</figcaption></figure>
+    <figure><img src="wf-rejreason.png" alt="Reject reason"><figcaption>Rejection reason in the audit trail</figcaption></figure>
+    <figure><img src="wf-preset.png" alt="Preset"><figcaption>Rejection preset dropdown</figcaption></figure>
+    <figure><img src="wf-crsummary.png" alt="Summary"><figcaption>Approval list summary · field count + last modifier</figcaption></figure>
+    <figure><img src="wf-sup.png" alt="Suppliers"><figcaption>Suppliers view · stats + table</figcaption></figure>
+    <figure><img src="wf-supform.png" alt="Supplier form"><figcaption>Supplier form</figcaption></figure>
+    <figure><img src="wf-supquick.png" alt="Supplier quick"><figcaption>Supplier contact quick card in material detail</figcaption></figure>
+    <figure><img src="wf-supsearch.png" alt="Supplier search"><figcaption>Supplier global search</figcaption></figure>
+  </div>
+</section>
+
+<!-- 14 -->
+<section id="handoff">
+  <h2><span class="num">14</span>Handover checklist</h2>
+  <h3>Confirm before handing to development</h3>
+  <table class="doc">
+    <thead><tr><th>Item</th><th>Notes / current placeholder</th></tr></thead>
+    <tbody>
+      <tr><td>Real product links</td><td>All 36 <code>productUrl</code> values are currently brand homepages as placeholders; replace them with real product pages</td></tr>
+      <tr><td>Price data source</td><td>Reference prices are static values; live prices should come from another system — this UI only displays a reference</td></tr>
+      <tr><td>Inventory fields</td><td>If on-hand quantities are needed later, add a read-only slot in details/cards without affecting the current structure</td></tr>
+      <tr><td>Approval identity</td><td>The current user is fixed to AL; a real system needs SSO/accounts and must enforce self-approval restrictions</td></tr>
+      <tr><td>Supplier approval</td><td>Currently direct-write; if approval is required, reuse the workflows request mechanism</td></tr>
+    </tbody>
+  </table>
+  <h3>Acceptance self-check</h3>
+  <ul class="steps">
+    <li>Open <code>index.html</code>; both modes switch correctly and state is preserved</li>
+    <li>Search "Blum AU" returns 14 materials; the Suppliers view search by contact/country works</li>
+    <li>Click Edit, change a field → the live diff updates → submit → the request appears in Review</li>
+    <li>After Approve the material name changes everywhere; after Reject with a preset reason the audit shows the reason</li>
+    <li>Add supplier works, and renaming keeps linked material counts intact</li>
+    <li>"View →" in material detail jumps to the supplier and filters the list</li>
+  </ul>
+  <div class="note ok"><b>History:</b> detailed changes and verification results for each iteration are in <code>.workbuddy-ai/memory/2026-11-20.md</code>; the three-concept comparison is in <code>ui-concepts/COMPARISON.md</code>.</div>
+</section>
+
+</main>
+</div>
+</body>
+</html>

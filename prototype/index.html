@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Material Library — Interactive Prototype</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ===== TOP BAR (shared) ===== -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo"><svg viewBox="0 0 24 24" fill="none"><path d="M4 7l8-4 8 4-8 4-8-4z" fill="#fff"/><path d="M4 12l8 4 8-4M4 17l8 4 8-4" stroke="#fff" stroke-width="1.8" stroke-linejoin="round"/></svg></div>
+      <b>Material Library</b>
+    </div>
+    <div class="modeSwitch" id="modeSwitch">
+      <button data-mode="admin" class="active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg>Admin workspace</button>
+      <button data-mode="browse"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Browse &amp; select</button>
+    </div>
+    <div class="topsearch">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <input id="globalSearch" placeholder="Search materials, brands, suppliers…" autocomplete="off">
+      <span class="kbd">⌘K</span>
+    </div>
+    <nav class="topnav">
+      <a href="#" class="active" data-nav="Materials">Materials</a>
+      <a href="#" data-nav="Suppliers">Suppliers</a>
+      <a href="#" data-nav="Review">Review <span class="nb" id="reviewCount">3</span></a>
+      <a href="#" data-nav="Activity">Activity</a>
+    </nav>
+    <div class="iconbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 8a6 6 0 00-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9z"/><path d="M10 21h4"/></svg><span class="dot"></span></div>
+    <div class="avatar">AL</div>
+  </header>
+
+  <!-- ===== ADMIN WORKSPACE ===== -->
+  <section class="pane admin active" id="pane-admin">
+    <aside class="rail">
+      <a href="#" class="active" title="Materials"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></a>
+      <a href="#" title="Review"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2h9"/></svg></a>
+      <a href="#" title="Families"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M7.5 8l3.5 8M16.5 8L13 16"/></svg></a>
+      <a href="#" title="Suppliers"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 9l1-5h16l1 5M4 9v10a1 1 0 001 1h14a1 1 0 001-1V9"/></svg></a>
+      <div class="sp"></div>
+      <a href="#" title="Help"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 115 1c0 1.5-2.5 1.5-2.5 3M12 17h.01"/></svg></a>
+    </aside>
+
+    <aside class="sidebar" id="facets">
+      <div class="side-head"><h3>Refine</h3><button id="clearFilters">Clear all</button></div>
+      <div id="facetGroups"></div>
+    </aside>
+
+    <main class="adminMain">
+      <div class="pagehead">
+        <div>
+          <h1>Materials</h1>
+          <p id="adminSubtitle">Master catalogue · 36 records · last synced 2 h ago</p>
+        </div>
+        <div class="health">
+          <div class="metric"><span class="k">Valid records</span><span class="v good" id="healthVal">97.2%</span></div>
+          <div class="metric"><span class="k">Pending approvals</span><span class="v" id="openReviews">3</span></div>
+          <button class="btn primary" id="addMaterial"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>Add material</button>
+        </div>
+      </div>
+      <div class="toolrow">
+        <div class="search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+          <input id="adminSearch" placeholder="Search within materials…" autocomplete="off">
+          <span class="kbd">/</span>
+        </div>
+        <select class="sortsel" id="adminSort">
+          <option value="relevance">Sort: Relevance</option>
+          <option value="name">Sort: Name A–Z</option>
+          <option value="cost">Sort: By size</option>
+          <option value="confidence">Sort: Confidence</option>
+          <option value="updated">Sort: Recently updated</option>
+        </select>
+      </div>
+      <div class="chips" id="adminChips"></div>
+      <div class="tablewrap">
+        <div class="tbar">
+          <span class="cnt"><b id="adminCount">0</b> results</span>
+          <span class="sel" id="selPill">0 selected</span>
+          <div class="r"><button class="mini" id="exportBtn">Export</button></div>
+        </div>
+        <div class="tableScroll">
+          <table>
+            <thead><tr>
+              <th style="width:34px"></th>
+              <th>Material</th><th>Category</th><th>Brand</th>
+              <th>Size</th><th>Confidence</th><th>Status</th><th>Updated</th>
+            </tr></thead>
+            <tbody id="adminRows"></tbody>
+          </table>
+        </div>
+        <div class="pager"><span id="adminRange">—</span><button>‹</button><button class="on">1</button><button>2</button><button>›</button></div>
+      </div>
+    </main>
+
+    <aside class="detail" id="detailPanel">
+      <div class="dhead"><b>Material detail</b><button class="x" id="closeDetail">×</button></div>
+      <div class="dbody" id="detailBody"></div>
+      <div class="dfoot">
+        <button class="btn" id="editBtn">Edit</button>
+        <button class="btn primary" id="crBtn">Create change request</button>
+      </div>
+    </aside>
+
+    <div class="stagebar" id="stagebar">
+      <span class="pill" id="stageCount">0 selected</span>
+      <span>Edits are staged — nothing is written until a change request is approved.</span>
+      <div class="acts"><button id="clearStage">Clear</button><button class="go" id="reviewChanges">Review changes →</button></div>
+    </div>
+  </section>
+
+  <!-- ===== BROWSE & SELECT ===== -->
+  <section class="pane browse" id="pane-browse">
+    <div class="bmain">
+      <div class="hero">
+        <div>
+          <h1>Explore materials</h1>
+          <p>Browse the catalogue visually — colours, textures and finishes at a glance.</p>
+        </div>
+        <div class="stats">
+          <div class="stat"><div class="v" id="bTotal">36</div><div class="k">Materials</div></div>
+          <div class="stat"><div class="v" style="color:var(--ok)" id="bHealth">97.2%</div><div class="k">Data health</div></div>
+          <div class="stat"><div class="v" style="color:var(--danger)" id="bReview">3</div><div class="k">To review</div></div>
+          <div class="stat"><div class="v" id="bPending" style="color:var(--accent)">3</div><div class="k">Pending CRs</div></div>
+        </div>
+      </div>
+      <div class="cats" id="browseCats"></div>
+      <div class="btools">
+        <span class="res"><b id="browseCount">0</b> materials</span>
+        <div id="browseChips" style="display:flex;gap:7px;flex-wrap:wrap"></div>
+        <div class="spacer"></div>
+        <select class="sortsel" id="browseSort">
+          <option value="relevance">Sort: Featured</option>
+          <option value="name">Sort: Name A–Z</option>
+          <option value="cost">Sort: By size</option>
+          <option value="confidence">Sort: Confidence</option>
+        </select>
+      </div>
+      <div class="gallery" id="gallery"></div>
+    </div>
+  </section>
+
+  <!-- ===== SUPPLIERS ===== -->
+  <section class="pane suppliers" id="pane-suppliers">
+    <div class="supWrap">
+      <div class="supHead">
+        <div><h1>Suppliers</h1><p>Supplier master data · linked counts are computed from the material catalogue</p></div>
+        <button class="btn primary" id="addSupplier"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>Add supplier</button>
+      </div>
+      <div class="supStats" id="supStats"></div>
+      <div class="supTableWrap">
+        <div class="tbar"><span class="cnt"><b id="supCount">0</b> suppliers</span><div class="r"><button class="mini" id="supExport">Export</button></div></div>
+        <div class="tableScroll">
+          <table><thead><tr><th>Supplier</th><th>Contact</th><th>Country</th><th>Lead time</th><th>Payment</th><th>Linked materials</th><th></th></tr></thead>
+          <tbody id="supRows"></tbody></table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- detail sheet shared by browse -->
+  <aside class="sheet" id="sheet">
+    <div class="sh-head"><b>Material detail</b><button class="x" id="closeSheet">×</button></div>
+    <div class="sh-body" id="sheetBody"></div>
+    <div class="sh-foot">
+      <button class="btn" id="sheetFav">♡ Save</button>
+      <button class="btn primary" id="sheetRequest">Create change request</button>
+    </div>
+  </aside>
+
+</div>
+<!-- supplier form (direct edit, no approval) -->
+<div class="modal" id="supModal" role="dialog" aria-modal="true">
+  <div class="mhead"><div class="mi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l1-5h16l1 5M4 9v10a1 1 0 001 1h14a1 1 0 001-1V9"/></svg></div>
+    <div class="mt"><b id="supModalTitle">Add supplier</b><small>Changes take effect immediately</small></div>
+    <button class="mx" id="supModalX">×</button></div>
+  <div class="mbody" id="supFormBody"></div>
+  <div class="mfoot"><span class="spacer"></span><button class="btn" id="supCancel">Cancel</button>
+    <button class="btn primary" id="supSave">Save supplier</button></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script src="data.js"></script>
+<script src="workflows.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

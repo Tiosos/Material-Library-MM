@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Concept B — Material Gallery</title>
+<style>
+:root{
+  --bg:#f6f3ee; --surface:#fffdfa; --surface-2:#f1ece4;
+  --line:#e7e0d5; --line-2:#efeae1;
+  --ink:#2b2620; --ink-2:#6b6155; --ink-3:#a2978a;
+  --accent:#b1552e; --accent-d:#97431f; --accent-soft:#f9ebe2; --accent-line:#efd2c0;
+  --sage:#5a7355; --sage-soft:#e8efe4;
+  --gold:#a97b1f; --gold-soft:#f8f0d9;
+  --shadow:0 1px 2px rgba(43,38,32,.05),0 10px 30px rgba(90,70,50,.07);
+  --mono:"SFMono-Regular",Consolas,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;height:100%;background:var(--bg)}
+body{font:13.5px/1.45 Inter,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;-webkit-font-smoothing:antialiased;color:var(--ink);overflow:hidden}
+.app{display:flex;flex-direction:column;height:100vh;width:100vw}
+.mainwrap{flex:1;min-height:0;display:flex;flex-direction:column;margin-right:430px}
+
+/* top */
+.top{flex:none;display:flex;align-items:center;gap:22px;padding:0 26px;background:var(--surface);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:10px}
+.logo{width:32px;height:32px;border-radius:10px;background:linear-gradient(145deg,#c26a3c,#97431f);display:grid;place-items:center;box-shadow:0 3px 10px rgba(177,85,46,.3)}
+.logo svg{width:19px;height:19px}
+.brand b{font-size:15px;letter-spacing:-.02em}
+.brand small{font-size:10.5px;letter-spacing:.14em;color:var(--accent);font-weight:700;margin-left:2px}
+.nav{display:flex;gap:4px;margin-left:26px}
+.nav a{color:var(--ink-2);text-decoration:none;padding:8px 14px;border-radius:9px;font-size:13px;font-weight:600}
+.nav a.active{background:var(--accent-soft);color:var(--accent-d)}
+.topsearch{display:flex;align-items:center;gap:9px;margin-left:auto;width:min(420px,32vw);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:8px 12px;color:var(--ink-3)}
+.topsearch svg{width:16px;height:16px;flex:none}
+.topsearch span{flex:1;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kbd{font:11px var(--mono);border:1px solid var(--line);background:#fff;border-radius:5px;padding:1px 6px;color:var(--ink-2)}
+.iconbtn{width:36px;height:36px;border:1px solid var(--line);background:#fff;border-radius:10px;display:grid;place-items:center;color:var(--ink-2);position:relative}
+.iconbtn svg{width:17px;height:17px}
+.iconbtn .dot{position:absolute;top:6px;right:7px;width:6px;height:6px;border-radius:50%;background:var(--accent);border:1.5px solid #fff}
+.avatar{width:36px;height:36px;border-radius:50%;background:linear-gradient(145deg,#c98a5e,#a25f36);color:#fff;display:grid;place-items:center;font-weight:700;font-size:12px}
+
+/* hero */
+.hero{flex:none;padding:22px 26px 14px;display:flex;align-items:flex-end;gap:16px}
+.hero h1{margin:0;font-size:24px;letter-spacing:-.03em;font-weight:750}
+.hero p{margin:4px 0 0;color:var(--ink-3);font-size:12.5px}
+.hero .stats{margin-left:auto;display:flex;gap:9px}
+.stat{background:var(--surface);border:1px solid var(--line);border-radius:11px;padding:9px 14px;text-align:center;min-width:88px}
+.stat .v{font-size:17px;font-weight:750;letter-spacing:-.02em}
+.stat .k{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-3);margin-top:1px}
+.btn{border:1px solid var(--line);background:#fff;color:var(--ink-2);padding:9px 14px;border-radius:10px;font-size:12.5px;font-weight:650;cursor:pointer;display:inline-flex;align-items:center;gap:7px}
+.btn svg{width:15px;height:15px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;box-shadow:0 3px 10px rgba(177,85,46,.25)}
+
+/* category strip */
+.cats{flex:none;display:flex;gap:8px;padding:0 26px 14px;overflow:hidden}
+.cat{display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:8px 13px;font-size:12.5px;font-weight:600;color:var(--ink-2);white-space:nowrap}
+.cat .ic{width:26px;height:26px;border-radius:8px;display:grid;place-items:center;font-size:13px}
+.cat.on{border-color:var(--accent);background:var(--accent-soft);color:var(--accent-d);box-shadow:0 0 0 1px var(--accent)}
+.cat .n{color:var(--ink-3);font-size:11px;font-variant-numeric:tabular-nums}
+.cat.on .n{color:var(--accent)}
+
+/* toolbar */
+.tools{flex:none;display:flex;align-items:center;gap:10px;padding:0 26px 14px}
+.tools .res{font-size:12.5px;color:var(--ink-2)}
+.tools .res b{color:var(--ink)}
+.chip{display:inline-flex;align-items:center;gap:6px;background:var(--accent-soft);border:1px solid var(--accent-line);color:var(--accent-d);border-radius:20px;padding:4px 6px 4px 11px;font-size:11.5px;font-weight:600}
+.chip svg{width:12px;height:12px;cursor:pointer}
+.seg{margin-left:auto;display:flex;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:3px;gap:2px}
+.seg button{border:0;background:none;padding:6px 10px;border-radius:7px;color:var(--ink-3);cursor:pointer}
+.seg button.on{background:var(--accent-soft);color:var(--accent-d)}
+.seg svg{width:15px;height:15px}
+.sortsel{border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:8px 11px;color:var(--ink-2);font-size:12.5px;font-weight:600}
+
+/* gallery */
+.gallery{flex:1;min-height:0;padding:0 26px 18px;overflow:hidden;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));grid-auto-rows:max-content;gap:14px;align-content:start}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:15px;overflow:hidden;box-shadow:var(--shadow);position:relative;transition:transform .15s}
+.card.sel{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent),var(--shadow)}
+.swatch{height:92px;position:relative;overflow:hidden}
+.swatch:after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(255,255,255,.14),rgba(0,0,0,.06))}
+.wood1{background:repeating-linear-gradient(96deg,#8a5a2b 0,#8a5a2b 3px,#9c6a38 4px,#7d5025 9px,#a1703f 11px)}
+.wood2{background:repeating-linear-gradient(92deg,#c9a878 0,#c9a878 2px,#d6b98c 5px,#b89768 10px,#dcc099 12px)}
+.wood3{background:repeating-linear-gradient(100deg,#3b3833 0,#3b3833 3px,#48443e 6px,#34312c 10px)}
+.metal1{background:linear-gradient(135deg,#e6eaee,#aab2bd 45%,#d7dce2 70%,#9aa4b0)}
+.metal2{background:linear-gradient(135deg,#cfd4da,#7f8a97)}
+.black{background:linear-gradient(160deg,#3a3f47,#11151b)}
+.edge{background:repeating-linear-gradient(90deg,#26292e 0,#26292e 6px,#3a3e45 7px)}
+.swatch .badge{position:absolute;top:9px;left:9px;z-index:2;background:rgba(255,255,255,.92);border-radius:20px;padding:3px 9px;font-size:10.5px;font-weight:700;color:var(--ink);backdrop-filter:blur(4px)}
+.swatch .fav{position:absolute;top:8px;right:9px;z-index:2;width:26px;height:26px;border-radius:50%;background:rgba(255,255,255,.9);display:grid;place-items:center;color:var(--ink-3)}
+.swatch .fav.on{color:var(--accent)}
+.swatch .fav svg{width:14px;height:14px}
+.cbody{padding:9px 11px 10px}
+.cbody .br{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);font-weight:750}
+.cbody h3{margin:3px 0 0;font-size:12.5px;font-weight:700;line-height:1.3;letter-spacing:-.01em;min-height:32px}
+.cmeta{display:flex;align-items:center;gap:6px;margin-top:9px;flex-wrap:wrap}
+.cmeta .v{font-size:10.5px;background:var(--surface-2);border-radius:6px;padding:3px 7px;color:var(--ink-2)}
+.cfoot{display:flex;align-items:flex-end;justify-content:space-between;margin-top:11px;padding-top:10px;border-top:1px solid var(--line-2)}
+.cfoot .p{font-size:14px;font-weight:750;letter-spacing:-.02em}
+.cfoot .p small{font-size:10.5px;color:var(--ink-3);font-weight:500}
+.cfoot .p.none{font-size:12px;color:var(--ink-3);font-weight:500}
+.cfoot .conf{font-size:10.5px;color:var(--sage);font-weight:650;display:flex;align-items:center;gap:4px}
+.cfoot .conf i{width:6px;height:6px;border-radius:50%;background:var(--sage)}
+.cfoot .conf.warn{color:var(--gold)}
+.cfoot .conf.warn i{background:var(--gold)}
+
+/* detail sheet */
+.sheet{position:fixed;top:0;right:0;height:100vh;width:430px;background:var(--surface);border-left:1px solid var(--line);box-shadow:-16px 0 48px rgba(43,38,32,.13);z-index:10;display:flex;flex-direction:column}
+.sh-head{display:flex;align-items:center;padding:14px 18px;border-bottom:1px solid var(--line)}
+.sh-head b{font-size:12.5px}
+.sh-head .x{margin-left:auto;border:0;background:none;color:var(--ink-3);font-size:20px;cursor:pointer;line-height:1}
+.sh-body{padding:18px;flex:1;overflow:hidden}
+.bigsw{height:150px;border-radius:14px;position:relative;overflow:hidden;margin-bottom:16px}
+.bigsw:after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(255,255,255,.12),rgba(0,0,0,.08))}
+.bigsw .tagn{position:absolute;bottom:10px;left:12px;z-index:2;color:#fff;font-weight:700;font-size:13px;text-shadow:0 1px 5px rgba(0,0,0,.5)}
+.sh-body h2{margin:0 0 3px;font-size:18px;letter-spacing:-.025em;line-height:1.3}
+.sh-body .u{font:10.5px var(--mono);color:var(--ink-3)}
+.pillrow{display:flex;gap:6px;margin-top:10px}
+.pill{font-size:10.5px;border-radius:20px;padding:4px 10px;font-weight:650}
+.pill.g{background:var(--sage-soft);color:var(--sage)}
+.pill.o{background:var(--gold-soft);color:var(--gold)}
+.sh-sec{margin-top:18px}
+.sh-sec h4{margin:0 0 10px;font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-3)}
+.kv{display:grid;grid-template-columns:100px 1fr;gap:9px 10px;font-size:12px}
+.kv .k{color:var(--ink-3)}
+.kv .v{color:var(--ink);font-weight:600}
+.pricebig{background:var(--surface-2);border-radius:12px;padding:13px 14px;display:flex;justify-content:space-between;align-items:center;margin-top:14px}
+.pricebig .amt{font-size:22px;font-weight:750;letter-spacing:-.03em}
+.pricebig .amt small{font-size:11px;color:var(--ink-3);font-weight:500}
+.pricebig .lbl{font-size:11px;color:var(--ink-3);text-align:right}
+.sh-foot{padding:14px 18px;border-top:1px solid var(--line);display:flex;gap:8px}
+.sh-foot .btn{flex:1;justify-content:center}
+
+::-webkit-scrollbar{width:0;height:0}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header class="top">
+    <div class="brand">
+      <div class="logo"><svg viewBox="0 0 24 24" fill="none"><path d="M4 7l8-4 8 4-8 4-8-4z" fill="#fff"/><path d="M4 12l8 4 8-4M4 17l8 4 8-4" stroke="#fff" stroke-width="1.8" stroke-linejoin="round"/></svg></div>
+      <b>Material Library</b><small>GALLERY</small>
+    </div>
+    <nav class="nav">
+      <a href="#" class="active">Explore</a>
+      <a href="#">Collections</a>
+      <a href="#">Review <span style="background:var(--accent);color:#fff;font-size:10px;border-radius:9px;padding:1px 6px;margin-left:4px">3</span></a>
+      <a href="#">Settings</a>
+    </nav>
+    <div class="topsearch">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <span>Search by look, brand or code…</span><span class="kbd">⌘ K</span>
+    </div>
+    <div class="iconbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 21s-8-4.5-8-10a4.5 4.5 0 018-2.8A4.5 4.5 0 0120 11c0 5.5-8 10-8 10z"/></svg></div>
+    <div class="iconbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 8a6 6 0 00-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9z"/><path d="M10 21h4"/></svg><span class="dot"></span></div>
+    <div class="avatar">AL</div>
+  </header>
+
+  <div class="mainwrap">
+  <section class="hero">
+    <div>
+      <h1>Explore materials</h1>
+      <p>Browse the catalogue visually — colours, textures and finishes at a glance.</p>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="v">322</div><div class="k">Materials</div></div>
+      <div class="stat"><div class="v" style="color:var(--sage)">98.4%</div><div class="k">Data health</div></div>
+      <div class="stat"><div class="v" style="color:var(--accent)">3</div><div class="k">To review</div></div>
+    </div>
+  </section>
+
+  <div class="cats">
+    <div class="cat on"><span class="ic" style="background:var(--accent-soft)">▦</span>All materials <span class="n">322</span></div>
+    <div class="cat"><span class="ic" style="background:#f3e6d2">▤</span>Boards <span class="n">156</span></div>
+    <div class="cat"><span class="ic" style="background:var(--accent-soft)">⚙</span>Hardware <span class="n">137</span></div>
+    <div class="cat"><span class="ic" style="background:#e8efe4">▭</span>Edging <span class="n">8</span></div>
+    <div class="cat"><span class="ic" style="background:var(--gold-soft)">◈</span>Adhesives <span class="n">6</span></div>
+    <div class="cat"><span class="ic" style="background:#eeeae2">＋</span>More <span class="n"></span></div>
+  </div>
+
+  <div class="tools">
+    <span class="res"><b>137</b> materials</span>
+    <span class="chip">Brand: Blum <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3l6 6M9 3l-6 6"/></svg></span>
+    <span class="chip">Available <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3l6 6M9 3l-6 6"/></svg></span>
+    <div class="seg">
+      <button class="on" title="Grid"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></button>
+      <button title="List"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+    </div>
+    <select class="sortsel"><option>Sort: Featured</option></select>
+  </div>
+
+  <section class="gallery">
+    <div class="card" onclick="void(0)">
+      <div class="swatch wood2"><span class="badge">BOARD</span><span class="fav on"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 21s-8-4.5-8-10a4.5 4.5 0 018-2.8A4.5 4.5 0 0120 11c0 5.5-8 10-8 10z"/></svg></span></div>
+      <div class="cbody"><div class="br">Laminex</div><h3>18mm Natural Oak Melamine</h3>
+        <div class="cmeta"><span class="v">18 mm</span><span class="v">2440 × 1220</span></div>
+        <div class="cfoot"><div class="p">$42.00 <small>/sheet</small></div><div class="conf"><i></i>Verified</div></div>
+      </div>
+    </div>
+    <div class="card sel">
+      <div class="swatch metal1"><span class="badge">HARDWARE</span><span class="fav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 21s-8-4.5-8-10a4.5 4.5 0 018-2.8A4.5 4.5 0 0120 11c0 5.5-8 10-8 10z"/></svg></span></div>
+      <div class="cbody"><div class="br">Blum</div><h3>CLIP top BLUMOTION INSERTA hinge</h3>
+        <div class="cmeta"><span class="v">INSERTA</span><span class="v">NI finish</span></div>
+        <div class="cfoot"><div class="p none">Price on request</div><div class="conf"><i></i>Verified</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="swatch wood1"><span class="badge">BOARD</span><span class="fav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 21s-8-4.5-8-10a4.5 4.5 0 018-2.8A4.5 4.5 0 0120 11c0 5.5-8 10-8 10z"/></svg></span></div>
+      <div class="cbody"><div class="br">Polytec</div><h3>16mm Walnut Melamine MDF</h3>
+        <div class="cmeta"><span class="v">16 mm</span><span class="v">MR core</span></div>
+        <div class="cfoot"><div class="p">$38.50 <small>/sheet</small></div><div class="conf warn"><i></i>Review</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="swatch wood3"><span class="badge">BOARD</span><span class="fav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 21s-8-4.5-8-10a4.5 4.5 0 018-2.8A4.5 4.5 0 0120 11c0 5.5-8 10-8 10z"/></svg></span></div>
+      <div class="cbody"><div class="br">Laminex</div><h3>18mm Black MDF</h3>
+        <div class="cmeta"><span class="v">18 mm</span><span class="v">Matt</span></div>
+        <div class="cfoot"><div class="p">$42.00 <small>/sheet</small></div><div class="conf"><i></i>Verified</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="swatch metal2"><span class="badge">HARDWARE</span><span class="fav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 21s-8-4.5-8-10a4.5 4.5 0 018-2.8A4.5 4.5 0 0120 11c0 5.5-8 10-8 10z"/></svg></span></div>
+      <div class="cbody"><div class="br">Blum</div><h3>CLIP top Screw-on hinge NI/ONS</h3>
+        <div class="cmeta"><span class="v">Screw-on</span><span class="v">110°</span></div>
+        <div class="cfoot"><div class="p none">Price on request</div><div class="conf"><i></i>Verified</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="swatch black"><span class="badge">HARDWARE</span><span class="fav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 21s-8-4.5-8-10a4.5 4.5 0 018-2.8A4.5 4.5 0 0120 11c0 5.5-8 10-8 10z"/></svg></span></div>
+      <div class="cbody"><div class="br">Blum</div><h3>BLUMOTION clip for hinge arm</h3>
+        <div class="cmeta"><span class="v">Nickel</span></div>
+        <div class="cfoot"><div class="p none">Price on request</div><div class="conf"><i></i>Verified</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="swatch edge"><span class="badge">EDGING</span><span class="fav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 21s-8-4.5-8-10a4.5 4.5 0 018-2.8A4.5 4.5 0 0120 11c0 5.5-8 10-8 10z"/></svg></span></div>
+      <div class="cbody"><div class="br">Laminex</div><h3>Edging Matt Black 22mm × 50m</h3>
+        <div class="cmeta"><span class="v">22 mm</span><span class="v">50 m roll</span></div>
+        <div class="cfoot"><div class="p">$12.00 <small>/roll</small></div><div class="conf"><i></i>Verified</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="swatch wood1" style="filter:hue-rotate(-12deg)"><span class="badge">BOARD</span><span class="fav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 21s-8-4.5-8-10a4.5 4.5 0 018-2.8A4.5 4.5 0 0120 11c0 5.5-8 10-8 10z"/></svg></span></div>
+      <div class="cbody"><div class="br">Hettich</div><h3>Sensys hinge 110° with BLUMOTION</h3>
+        <div class="cmeta"><span class="v">110°</span><span class="v">Clip-on</span></div>
+        <div class="cfoot"><div class="p">$8.90 <small>/ea</small></div><div class="conf warn"><i></i>Review</div></div>
+      </div>
+    </div>
+  </section>
+  </div>
+
+  <!-- detail sheet -->
+  <aside class="sheet">
+    <div class="sh-head"><b>Material detail</b><button class="x">×</button></div>
+    <div class="sh-body">
+      <div class="bigsw metal1"><span class="tagn">CLIP top BLUMOTION INSERTA hinge · Nickel</span></div>
+      <h2>CLIP top BLUMOTION INSERTA hinge NI</h2>
+      <div class="u">mat_7f3a9c21d8e4b056</div>
+      <div class="pillrow"><span class="pill g">● Active</span><span class="pill g">✓ Verified 100%</span><span class="pill o">Hardware / Hinge</span></div>
+
+      <div class="sh-sec">
+        <h4>Options &amp; variants</h4>
+        <div class="kv">
+          <span class="k">Fixing</span><span class="v">INSERTA</span>
+          <span class="k">Finish</span><span class="v">Nickel (NI)</span>
+          <span class="k">Opening</span><span class="v">110°</span>
+        </div>
+      </div>
+      <div class="sh-sec">
+        <h4>Supply</h4>
+        <div class="kv">
+          <span class="k">Supplier</span><span class="v">Blum AU</span>
+          <span class="k">Unit</span><span class="v">each (ea)</span>
+          <span class="k">Lead time</span><span class="v">5–7 days</span>
+        </div>
+        <div class="pricebig">
+          <div><div class="amt">—</div><div style="font-size:10.5px;color:var(--ink-3)">AUD · ex GST</div></div>
+          <div class="lbl">Price on<br>request</div>
+        </div>
+      </div>
+      <div class="sh-sec">
+        <h4>Where it's used</h4>
+        <div class="kv">
+          <span class="k">Family</span><span class="v">CLIP top BLUMOTION</span>
+          <span class="k">Related</span><span class="v">4 linked materials</span>
+        </div>
+      </div>
+    </div>
+    <div class="sh-foot"><button class="btn">✎ Edit</button><button class="btn primary">Create change request</button></div>
+  </aside>
+
+</div>
+</body>
+</html>
