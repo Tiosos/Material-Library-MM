@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Concept A — Flagship Workbench</title>
+<style>
+:root{
+  --canvas:#f4f5f7; --panel:#ffffff; --panel-2:#fbfcfd;
+  --line:#e6e8ec; --line-2:#eef0f3;
+  --ink:#141923; --ink-2:#576270; --ink-3:#929cab;
+  --accent:#4f46e5; --accent-2:#4338ca; --accent-soft:#eef0ff; --accent-line:#d9dcff;
+  --teal:#0e9384; --teal-soft:#e7f7f4;
+  --ok:#15956b; --ok-soft:#e8f7f0;
+  --warn:#b4690e; --warn-soft:#fdf3e2;
+  --rose:#c0365b; --rose-soft:#fdeef2;
+  --shadow:0 1px 2px rgba(20,25,35,.04),0 8px 28px rgba(20,25,35,.06);
+  --mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--canvas);color:var(--ink);height:100%}
+body{font:13.5px/1.45 Inter,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;-webkit-font-smoothing:antialiased;overflow:hidden}
+.app{display:grid;grid-template-columns:64px 248px minmax(0,1fr) 380px;grid-template-rows:56px minmax(0,1fr) 46px;height:100vh;width:100vw}
+
+/* ---------- topbar ---------- */
+.topbar{grid-column:1/5;grid-row:1;display:flex;align-items:center;gap:20px;padding:0 20px;background:var(--panel);border-bottom:1px solid var(--line);z-index:5}
+.brand{display:flex;align-items:center;gap:10px;width:296px;flex:none}
+.logo{width:30px;height:30px;border-radius:9px;background:linear-gradient(145deg,#6366f1,#4338ca);display:grid;place-items:center;box-shadow:0 3px 10px rgba(79,70,229,.35)}
+.logo svg{width:18px;height:18px}
+.brand b{font-size:14.5px;letter-spacing:-.02em}
+.brand small{font-size:11px;color:var(--ink-3);border:1px solid var(--line);border-radius:5px;padding:1px 6px;margin-left:2px;font-weight:600}
+.gsearch{display:flex;align-items:center;gap:9px;width:min(460px,34vw);background:var(--panel-2);border:1px solid var(--line);border-radius:9px;padding:7px 10px;color:var(--ink-3)}
+.gsearch svg{width:15px;height:15px;flex:none}
+.gsearch span.ph{flex:1;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.kbd{font:11px var(--mono);border:1px solid var(--line);background:#fff;border-radius:5px;padding:1px 6px;color:var(--ink-2)}
+.topnav{display:flex;gap:2px;margin-left:auto}
+.topnav a{color:var(--ink-2);text-decoration:none;padding:7px 13px;border-radius:8px;font-size:13px;font-weight:550}
+.topnav a.active{background:var(--accent-soft);color:var(--accent-2)}
+.topnav a .badge{background:var(--rose);color:#fff;font-size:10px;border-radius:9px;padding:1px 6px;margin-left:5px;font-weight:700}
+.iconbtn{width:34px;height:34px;border:1px solid var(--line);background:#fff;border-radius:9px;display:grid;place-items:center;color:var(--ink-2);position:relative}
+.iconbtn svg{width:17px;height:17px}
+.iconbtn .dot{position:absolute;top:6px;right:7px;width:6px;height:6px;border-radius:50%;background:var(--rose);border:1.5px solid #fff}
+.avatar{width:34px;height:34px;border-radius:50%;background:linear-gradient(145deg,#0e9384,#0b766c);color:#fff;display:grid;place-items:center;font-weight:700;font-size:12px}
+
+/* ---------- icon rail ---------- */
+.rail{grid-column:1;grid-row:2;background:var(--panel-2);border-right:1px solid var(--line);display:flex;flex-direction:column;align-items:center;gap:6px;padding-top:14px}
+.rail a{width:40px;height:40px;border-radius:10px;display:grid;place-items:center;color:var(--ink-3)}
+.rail a.active{background:var(--accent-soft);color:var(--accent-2)}
+.rail a svg{width:19px;height:19px}
+.rail .sp{flex:1}
+
+/* ---------- facet sidebar ---------- */
+.sidebar{grid-column:2;grid-row:2;background:var(--panel);border-right:1px solid var(--line);overflow:hidden;padding:18px 16px}
+.side-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+.side-head h3{margin:0;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-3)}
+.side-head button{border:0;background:none;color:var(--accent);font-size:11.5px;font-weight:600;cursor:pointer}
+.fgroup{margin-bottom:18px}
+.fgroup h4{margin:0 0 8px;font-size:12px;color:var(--ink-2);font-weight:650;display:flex;justify-content:space-between}
+.facet{display:flex;align-items:center;gap:8px;padding:5px 7px;border-radius:7px;color:var(--ink-2);font-size:12.5px;cursor:pointer}
+.facet:hover{background:var(--line-2)}
+.facet.on{background:var(--accent-soft);color:var(--accent-2);font-weight:600}
+.facet .cb{width:14px;height:14px;border:1.5px solid #c7cdd6;border-radius:4px;flex:none;display:grid;place-items:center}
+.facet.on .cb{background:var(--accent);border-color:var(--accent)}
+.facet.on .cb svg{width:10px;height:10px}
+.facet .nm{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.facet .ct{color:var(--ink-3);font-variant-numeric:tabular-nums;font-size:11.5px}
+.facet.on .ct{color:var(--accent-2)}
+.sw{width:12px;height:12px;border-radius:3px;flex:none;border:1px solid rgba(0,0,0,.08)}
+
+/* ---------- main ---------- */
+.main{grid-column:3;grid-row:2;overflow:hidden;display:flex;flex-direction:column;background:var(--panel-2)}
+.pagehead{display:flex;align-items:flex-start;gap:14px;padding:20px 24px 14px}
+.pagehead h1{margin:0;font-size:21px;letter-spacing:-.025em}
+.pagehead p{margin:3px 0 0;color:var(--ink-3);font-size:12.5px}
+.health{display:flex;gap:8px;margin-left:auto;align-items:center}
+.metric{background:#fff;border:1px solid var(--line);border-radius:10px;padding:8px 12px;display:flex;flex-direction:column;gap:2px;min-width:96px}
+.metric .k{font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-3)}
+.metric .v{font-size:16px;font-weight:700;letter-spacing:-.02em}
+.metric .v.good{color:var(--ok)}
+.btn{border:1px solid var(--line);background:#fff;color:var(--ink-2);padding:8px 13px;border-radius:9px;font-size:12.5px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:7px}
+.btn svg{width:15px;height:15px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;box-shadow:0 2px 8px rgba(79,70,229,.25)}
+.btn.primary:hover{background:var(--accent-2)}
+.toolrow{padding:0 24px 12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.search{display:flex;align-items:center;gap:9px;flex:1;min-width:260px;background:#fff;border:1px solid var(--line);border-radius:9px;padding:8px 11px}
+.search svg{width:15px;height:15px;color:var(--ink-3)}
+.search input{border:0;outline:0;flex:1;font-size:13px;color:var(--ink);background:transparent}
+.search .kbd{margin-left:4px}
+.seg{display:flex;background:#fff;border:1px solid var(--line);border-radius:9px;padding:2px}
+.seg button{border:0;background:none;padding:6px 10px;border-radius:7px;color:var(--ink-3);font-size:12px;font-weight:600;cursor:pointer;display:flex;gap:6px;align-items:center}
+.seg button svg{width:14px;height:14px}
+.seg button.on{background:var(--accent-soft);color:var(--accent-2)}
+.sortsel{border:1px solid var(--line);background:#fff;border-radius:9px;padding:8px 10px;color:var(--ink-2);font-size:12.5px;font-weight:550}
+.chips{padding:0 24px 12px;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;gap:6px;background:var(--accent-soft);border:1px solid var(--accent-line);color:var(--accent-2);border-radius:20px;padding:4px 6px 4px 11px;font-size:11.5px;font-weight:600}
+.chip svg{width:12px;height:12px;cursor:pointer}
+.chip.add{border-style:dashed;background:#fff;color:var(--ink-3);padding:4px 10px;border-color:var(--line)}
+
+.tablewrap{margin:0 24px;background:#fff;border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);overflow:hidden;display:flex;flex-direction:column;min-height:0;flex:1}
+.tbar{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line-2)}
+.tbar .cnt{font-size:12.5px;color:var(--ink-2)}
+.tbar .cnt b{color:var(--ink)}
+.tbar .sel{margin-left:8px;background:var(--accent-soft);color:var(--accent-2);border-radius:16px;padding:3px 10px;font-size:11.5px;font-weight:650}
+.tbar .r{margin-left:auto;display:flex;gap:8px}
+.tbar .mini{border:1px solid var(--line);background:#fff;border-radius:7px;padding:5px 9px;font-size:11.5px;color:var(--ink-2);cursor:pointer;font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+thead th{background:var(--panel-2);text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.055em;color:var(--ink-3);font-weight:700;padding:9px 12px;border-bottom:1px solid var(--line);white-space:nowrap;position:relative}
+thead th .sort{opacity:.5}
+tbody td{padding:10px 12px;border-bottom:1px solid var(--line-2);white-space:nowrap;color:var(--ink-2);vertical-align:middle}
+tbody tr{cursor:pointer}
+tbody tr:hover{background:var(--panel-2)}
+tbody tr.active{background:var(--accent-soft)}
+tbody tr.active td:first-child{box-shadow:inset 3px 0 0 var(--accent)}
+.cb2{width:15px;height:15px;border:1.5px solid #c7cdd6;border-radius:4px;display:inline-block;position:relative}
+tr.active .cb2,tr.sel2 .cb2{background:var(--accent);border-color:var(--accent)}
+tr.active .cb2:after,tr.sel2 .cb2:after{content:"";position:absolute;left:4px;top:1px;width:4px;height:8px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg)}
+.mat{display:flex;align-items:center;gap:10px;min-width:0}
+.thumb{width:34px;height:34px;border-radius:8px;flex:none;border:1px solid rgba(0,0,0,.08);box-shadow:inset 0 0 0 1px rgba(255,255,255,.3)}
+.mat .txt{min-width:0}
+.mat .nm{font-weight:650;color:var(--ink);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:300px}
+.mat .uid{font:10.5px var(--mono);color:var(--ink-3);margin-top:1px}
+.tag{display:inline-block;background:var(--line-2);color:var(--ink-2);border-radius:5px;padding:2px 7px;font-size:11px}
+.tag.v{background:#fff;border:1px solid var(--line)}
+.tag.dim{color:var(--ink-3)}
+.badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:650;border-radius:20px;padding:3px 9px}
+.badge i{width:6px;height:6px;border-radius:50%;background:currentColor}
+.badge.ok{background:var(--ok-soft);color:var(--ok)}
+.badge.warn{background:var(--warn-soft);color:var(--warn)}
+.badge.rose{background:var(--rose-soft);color:var(--rose)}
+.price{font-variant-numeric:tabular-nums;font-weight:650;color:var(--ink)}
+.price small{color:var(--ink-3);font-weight:500}
+.emptyprice{color:var(--ink-3)}
+.conf{display:flex;align-items:center;gap:6px;font-variant-numeric:tabular-nums}
+.conf .bar{width:42px;height:5px;border-radius:3px;background:var(--line-2);overflow:hidden}
+.conf .bar i{display:block;height:100%;background:var(--teal);border-radius:3px}
+.pager{display:flex;align-items:center;justify-content:flex-end;gap:6px;padding:10px 14px;border-top:1px solid var(--line-2);color:var(--ink-3);font-size:11.5px}
+.pager button{border:1px solid var(--line);background:#fff;border-radius:6px;padding:3px 9px;color:var(--ink-2);cursor:pointer}
+
+/* ---------- detail panel ---------- */
+.detail{grid-column:4;grid-row:2;background:#fff;border-left:1px solid var(--line);overflow:hidden;display:flex;flex-direction:column}
+.dhead{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--line)}
+.dhead b{font-size:12.5px}
+.dhead .x{margin-left:auto;border:0;background:none;color:var(--ink-3);cursor:pointer;font-size:18px;line-height:1}
+.dbody{overflow:hidden;padding:16px;flex:1}
+.dhero{display:flex;gap:12px;align-items:flex-start}
+.dhero .thumb{width:52px;height:52px;border-radius:10px}
+.dhero h2{margin:0;font-size:15px;letter-spacing:-.02em;line-height:1.3;word-break:break-word}
+.dhero .u{font:10.5px var(--mono);color:var(--ink-3);margin-top:3px}
+.dhero .badge{margin-top:8px}
+.dtabs{display:flex;gap:18px;border-bottom:1px solid var(--line);margin:16px 0 0}
+.dtabs a{font-size:12px;color:var(--ink-3);padding:8px 0;text-decoration:none;border-bottom:2px solid transparent;font-weight:600}
+.dtabs a.active{color:var(--accent-2);border-color:var(--accent)}
+.sec{margin-top:16px}
+.sec h4{margin:0 0 9px;font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-3)}
+.kv{display:grid;grid-template-columns:96px 1fr;gap:8px 10px;font-size:12px}
+.kv .k{color:var(--ink-3)}
+.kv .v{color:var(--ink);font-weight:550}
+.kv .v .sw{display:inline-block;vertical-align:-2px;margin-right:6px}
+.vgroup{display:flex;gap:6px;flex-wrap:wrap}
+.vgroup .vchip{border:1px solid var(--line);border-radius:7px;padding:5px 9px;font-size:11.5px;color:var(--ink-2)}
+.vgroup .vchip b{color:var(--ink-3);font-weight:500}
+.pricebox{background:var(--panel-2);border:1px solid var(--line);border-radius:10px;padding:11px 12px;display:flex;align-items:flex-end;justify-content:space-between}
+.pricebox .lbl{font-size:11px;color:var(--ink-3)}
+.pricebox .amt{font-size:20px;font-weight:750;letter-spacing:-.03em;color:var(--ink)}
+.pricebox .amt small{font-size:11px;color:var(--ink-3);font-weight:500}
+.timeline{border-left:1.5px solid var(--line);margin-left:5px;padding-left:14px;display:flex;flex-direction:column;gap:11px;position:relative}
+.timeline div{position:relative;font-size:11.5px;color:var(--ink-2)}
+.timeline div:before{content:"";position:absolute;left:-19px;top:4px;width:8px;height:8px;border-radius:50%;background:#fff;border:2px solid var(--teal)}
+.timeline div span{color:var(--ink-3)}
+.dfoot{padding:12px 16px;border-top:1px solid var(--line);display:flex;gap:8px}
+.dfoot .btn{flex:1;justify-content:center}
+
+/* ---------- bottom staging bar ---------- */
+.stagebar{grid-column:1/5;grid-row:3;background:#141923;color:#d9dee7;display:flex;align-items:center;gap:14px;padding:0 20px;font-size:12px}
+.stagebar .pill{background:rgba(255,255,255,.1);border-radius:6px;padding:3px 9px;font-weight:650;color:#fff}
+.stagebar .acts{margin-left:auto;display:flex;gap:8px}
+.stagebar .acts button{border:1px solid rgba(255,255,255,.18);background:transparent;color:#e6eaf0;border-radius:7px;padding:5px 12px;font-size:11.5px;font-weight:600;cursor:pointer}
+.stagebar .acts button.go{background:var(--accent);border-color:var(--accent);color:#fff}
+
+/* scrollbar hide */
+::-webkit-scrollbar{width:0;height:0}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- TOP BAR -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo"><svg viewBox="0 0 24 24" fill="none"><path d="M4 7l8-4 8 4-8 4-8-4z" fill="#fff"/><path d="M4 12l8 4 8-4M4 17l8 4 8-4" stroke="#fff" stroke-width="1.8" stroke-linejoin="round"/></svg></div>
+      <b>Material Library</b><small>WORKBENCH</small>
+    </div>
+    <div class="gsearch">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <span class="ph">Search materials, brands, suppliers…</span><span class="kbd">⌘ K</span>
+    </div>
+    <nav class="topnav">
+      <a href="#" class="active">Materials</a>
+      <a href="#">Review <span class="badge">3</span></a>
+      <a href="#">Activity</a>
+      <a href="#">Settings</a>
+    </nav>
+    <div class="iconbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 8a6 6 0 00-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9z"/><path d="M10 21h4"/></svg><span class="dot"></span></div>
+    <div class="avatar">AL</div>
+  </header>
+
+  <!-- ICON RAIL -->
+  <aside class="rail">
+    <a href="#" class="active" title="Materials"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></a>
+    <a href="#" title="Review"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2h9"/></svg></a>
+    <a href="#" title="Families"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M7.5 8l3.5 8M16.5 8L13 16"/></svg></a>
+    <a href="#" title="Suppliers"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 9l1-5h16l1 5M4 9v10a1 1 0 001 1h14a1 1 0 001-1V9M3 9h18"/><path d="M9 20v-6h6v6"/></svg></a>
+    <div class="sp"></div>
+    <a href="#" title="Help"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 115 1c0 1.5-2.5 1.5-2.5 3M12 17h.01"/></svg></a>
+  </aside>
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <div class="side-head"><h3>Refine</h3><button>Clear all</button></div>
+    <div class="fgroup">
+      <h4>Category <span style="color:var(--ink-3);font-weight:500">9</span></h4>
+      <div class="facet"><span class="cb"></span><span class="nm">Boards &amp; panels</span><span class="ct">156</span></div>
+      <div class="facet on"><span class="cb"><svg viewBox="0 0 12 12" fill="none"><path d="M2 6l2.5 2.5L10 3" stroke="#fff" stroke-width="2"/></svg></span><span class="nm">Hardware / Hinge</span><span class="ct">112</span></div>
+      <div class="facet"><span class="cb"></span><span class="nm">Hardware / Runner</span><span class="ct">25</span></div>
+      <div class="facet"><span class="cb"></span><span class="nm">Edging</span><span class="ct">8</span></div>
+      <div class="facet"><span class="cb"></span><span class="nm">Adhesives</span><span class="ct">6</span></div>
+    </div>
+    <div class="fgroup">
+      <h4>Brand</h4>
+      <div class="facet on"><span class="cb"><svg viewBox="0 0 12 12" fill="none"><path d="M2 6l2.5 2.5L10 3" stroke="#fff" stroke-width="2"/></svg></span><span class="nm">Blum</span><span class="ct">105</span></div>
+      <div class="facet"><span class="cb"></span><span class="nm">Laminex</span><span class="ct">4</span></div>
+      <div class="facet"><span class="cb"></span><span class="nm">Hettich</span><span class="ct">4</span></div>
+      <div class="facet"><span class="cb"></span><span class="nm">Polytec</span><span class="ct">2</span></div>
+    </div>
+    <div class="fgroup">
+      <h4>Supplier</h4>
+      <div class="facet on"><span class="cb"><svg viewBox="0 0 12 12" fill="none"><path d="M2 6l2.5 2.5L10 3" stroke="#fff" stroke-width="2"/></svg></span><span class="nm">Blum AU</span><span class="ct">105</span></div>
+      <div class="facet"><span class="cb"></span><span class="nm">(not assigned)</span><span class="ct">166</span></div>
+    </div>
+    <div class="fgroup" style="margin-bottom:0">
+      <h4>Data quality</h4>
+      <div class="facet"><span class="cb"></span><span class="nm">Needs review</span><span class="ct">7</span></div>
+      <div class="facet"><span class="cb"></span><span class="nm">Possible duplicate</span><span class="ct">4</span></div>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main">
+    <div class="pagehead">
+      <div>
+        <h1>Materials</h1>
+        <p>Master catalogue · 322 records · last synced 2 h ago</p>
+      </div>
+      <div class="health">
+        <div class="metric"><span class="k">Valid records</span><span class="v good">98.4%</span></div>
+        <div class="metric"><span class="k">Open reviews</span><span class="v">3</span></div>
+        <button class="btn primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>Add material</button>
+      </div>
+    </div>
+
+    <div class="toolrow">
+      <div class="search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+        <input value="CLIP top hinge" readonly>
+        <span class="kbd">/</span>
+      </div>
+      <div class="seg">
+        <button class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg>Table</button>
+        <button><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Cards</button>
+      </div>
+      <select class="sortsel"><option>Sort: Relevance</option></select>
+    </div>
+
+    <div class="chips">
+      <span class="chip">Hinge <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3l6 6M9 3l-6 6"/></svg></span>
+      <span class="chip">Brand: Blum <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3l6 6M9 3l-6 6"/></svg></span>
+      <span class="chip">Supplier: Blum AU <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3l6 6M9 3l-6 6"/></svg></span>
+      <span class="chip add">+ Add filter</span>
+    </div>
+
+    <div class="tablewrap">
+      <div class="tbar">
+        <span class="cnt"><b>112</b> results</span>
+        <span class="sel">2 selected</span>
+        <div class="r">
+          <button class="mini">Export</button><button class="mini">Columns ▾</button>
+        </div>
+      </div>
+      <table>
+        <thead><tr>
+          <th style="width:34px"></th>
+          <th>Material <span class="sort">↕</span></th>
+          <th>Category</th>
+          <th>Variants</th>
+          <th>Unit</th>
+          <th>Unit cost</th>
+          <th>Confidence</th>
+          <th>Status</th>
+          <th>Updated</th>
+        </tr></thead>
+        <tbody>
+          <tr class="active">
+            <td><span class="cb2"></span></td>
+            <td><div class="mat"><div class="thumb" style="background:linear-gradient(135deg,#cfd4da,#8d97a3)"></div><div class="txt"><div class="nm">CLIP top BLUMOTION INSERTA hinge NI</div><div class="uid">mat_7f3a9c21d8e4b056</div></div></div></td>
+            <td><span class="tag">hardware.hinge</span></td>
+            <td><span class="tag v">boss: INSERTA</span></td>
+            <td>ea</td>
+            <td class="emptyprice">—</td>
+            <td><div class="conf"><span class="bar"><i style="width:100%"></i></span>100%</div></td>
+            <td><span class="badge ok"><i></i>Active</span></td>
+            <td>2 h ago</td>
+          </tr>
+          <tr class="sel2">
+            <td><span class="cb2"></span></td>
+            <td><div class="mat"><div class="thumb" style="background:linear-gradient(135deg,#e3e7eb,#aab2bd)"></div><div class="txt"><div class="nm">CLIP top Screw-on hinge NI/ONS</div><div class="uid">mat_b12e7d40a6f39c81</div></div></div></td>
+            <td><span class="tag">hardware.hinge</span></td>
+            <td><span class="tag v">boss: Screw-on</span></td>
+            <td>ea</td>
+            <td class="emptyprice">—</td>
+            <td><div class="conf"><span class="bar"><i style="width:100%"></i></span>100%</div></td>
+            <td><span class="badge ok"><i></i>Active</span></td>
+            <td>2 h ago</td>
+          </tr>
+          <tr>
+            <td><span class="cb2"></span></td>
+            <td><div class="mat"><div class="thumb" style="background:linear-gradient(135deg,#d8dde3,#9aa4b0)"></div><div class="txt"><div class="nm">CLIP top Knock-in hinge NI</div><div class="uid">mat_4c88f019e2b7a6d3</div></div></div></td>
+            <td><span class="tag">hardware.hinge</span></td>
+            <td><span class="tag v">boss: Knock-in</span></td>
+            <td>ea</td>
+            <td class="price">$8.90 <small>/ea</small></td>
+            <td><div class="conf"><span class="bar"><i style="width:88%"></i></span>88%</div></td>
+            <td><span class="badge warn"><i></i>Needs review</span></td>
+            <td>1 d ago</td>
+          </tr>
+          <tr>
+            <td><span class="cb2"></span></td>
+            <td><div class="mat"><div class="thumb" style="background:linear-gradient(135deg,#3a3f47,#11151b)"></div><div class="txt"><div class="nm">Laminex 18mm Black MDF</div><div class="uid">mat_91d4e6b7c0352fa8</div></div></div></td>
+            <td><span class="tag">board.melamine.mdf</span></td>
+            <td><span class="tag v">thickness: 18 mm</span></td>
+            <td>sheet</td>
+            <td class="price">$42.00 <small>/sheet</small></td>
+            <td><div class="conf"><span class="bar"><i style="width:100%"></i></span>100%</div></td>
+            <td><span class="badge ok"><i></i>Active</span></td>
+            <td>3 d ago</td>
+          </tr>
+          <tr>
+            <td><span class="cb2"></span></td>
+            <td><div class="mat"><div class="thumb" style="background:linear-gradient(135deg,#d9a86a,#8a5a2b)"></div><div class="txt"><div class="nm">Polytec 16mm Natural Oak</div><div class="uid">mat_0a6c92f1e8d47b35</div></div></div></td>
+            <td><span class="tag">board.melamine.mdf</span></td>
+            <td><span class="tag v">thickness: 16 mm</span></td>
+            <td>sheet</td>
+            <td class="price">$38.50 <small>/sheet</small></td>
+            <td><div class="conf"><span class="bar"><i style="width:92%"></i></span>92%</div></td>
+            <td><span class="badge rose"><i></i>Duplicate?</span></td>
+            <td>5 d ago</td>
+          </tr>
+          <tr>
+            <td><span class="cb2"></span></td>
+            <td><div class="mat"><div class="thumb" style="background:linear-gradient(135deg,#e0e4e9,#9fa9b5)"></div><div class="txt"><div class="nm">CLIP top BLUMOTION Knock-in hinge NI</div><div class="uid">mat_6e2b90d3f14a8c77</div></div></div></td>
+            <td><span class="tag">hardware.hinge</span></td>
+            <td><span class="tag v">boss: Knock-in</span></td>
+            <td>ea</td>
+            <td class="price">$9.40 <small>/ea</small></td>
+            <td><div class="conf"><span class="bar"><i style="width:100%"></i></span>100%</div></td>
+            <td><span class="badge ok"><i></i>Active</span></td>
+            <td>1 w ago</td>
+          </tr>
+          <tr>
+            <td><span class="cb2"></span></td>
+            <td><div class="mat"><div class="thumb" style="background:linear-gradient(135deg,#c9ced5,#7f8a97)"></div><div class="txt"><div class="nm">CLIP top Screw-on hinge 110° NI/ONS</div><div class="uid">mat_d3f7018a5b6c24e9</div></div></div></td>
+            <td><span class="tag">hardware.hinge</span></td>
+            <td><span class="tag v">boss: Screw-on</span></td>
+            <td>ea</td>
+            <td class="price">$8.90 <small>/ea</small></td>
+            <td><div class="conf"><span class="bar"><i style="width:95%"></i></span>95%</div></td>
+            <td><span class="badge ok"><i></i>Active</span></td>
+            <td>1 w ago</td>
+          </tr>
+          <tr>
+            <td><span class="cb2"></span></td>
+            <td><div class="mat"><div class="thumb" style="background:linear-gradient(135deg,#e6eaee,#b0b9c4)"></div><div class="txt"><div class="nm">BLUMOTION clip for hinge arm NI</div><div class="uid">mat_a84c2e10b7d63f95</div></div></div></td>
+            <td><span class="tag">hardware.hinge</span></td>
+            <td><span class="tag v dim">—</span></td>
+            <td>ea</td>
+            <td class="emptyprice">—</td>
+            <td><div class="conf"><span class="bar"><i style="width:100%"></i></span>100%</div></td>
+            <td><span class="badge ok"><i></i>Active</span></td>
+            <td>1 w ago</td>
+          </tr>
+          <tr>
+            <td><span class="cb2"></span></td>
+            <td><div class="mat"><div class="thumb" style="background:linear-gradient(135deg,#2f333a,#15181d)"></div><div class="txt"><div class="nm">Laminex 18mm Black MDF (backer)</div><div class="uid">mat_f5b81c047e329ad6</div></div></div></td>
+            <td><span class="tag">board.melamine.mdf</span></td>
+            <td><span class="tag v">thickness: 18 mm</span></td>
+            <td>sheet</td>
+            <td class="price">$44.00 <small>/sheet</small></td>
+            <td><div class="conf"><span class="bar"><i style="width:86%"></i></span>86%</div></td>
+            <td><span class="badge warn"><i></i>Needs review</span></td>
+            <td>2 w ago</td>
+          </tr>
+          <tr>
+            <td><span class="cb2"></span></td>
+            <td><div class="mat"><div class="thumb" style="background:linear-gradient(135deg,#cbb28c,#8f7350)"></div><div class="txt"><div class="nm">Laminex Natural Oak 16mm MR</div><div class="uid">mat_1d6a4f93c02b8e57</div></div></div></td>
+            <td><span class="tag">board.melamine.mdf</span></td>
+            <td><span class="tag v">thickness: 16 mm</span></td>
+            <td>sheet</td>
+            <td class="price">$51.20 <small>/sheet</small></td>
+            <td><div class="conf"><span class="bar"><i style="width:100%"></i></span>100%</div></td>
+            <td><span class="badge ok"><i></i>Active</span></td>
+            <td>2 w ago</td>
+          </tr>
+          <tr>
+            <td><span class="cb2"></span></td>
+            <td><div class="mat"><div class="thumb" style="background:linear-gradient(135deg,#1c1f24,#05070a)"></div><div class="txt"><div class="nm">Laminex Edging Matt Black 22mm × 50m</div><div class="uid">mat_77e0b6a1d4c3f928</div></div></div></td>
+            <td><span class="tag">edging</span></td>
+            <td><span class="tag v">width: 22 mm</span></td>
+            <td>roll</td>
+            <td class="price">$12.00 <small>/roll</small></td>
+            <td><div class="conf"><span class="bar"><i style="width:90%"></i></span>90%</div></td>
+            <td><span class="badge ok"><i></i>Active</span></td>
+            <td>2 w ago</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="pager">
+        <span>1–5 of 112</span>
+        <button>‹</button><button style="background:var(--accent);color:#fff;border-color:var(--accent)">1</button><button>2</button><button>3</button><button>…</button><button>›</button>
+      </div>
+    </div>
+  </main>
+
+  <!-- DETAIL PANEL -->
+  <aside class="detail">
+    <div class="dhead"><b>Material detail</b><button class="x">×</button></div>
+    <div class="dbody">
+      <div class="dhero">
+        <div class="thumb" style="background:linear-gradient(135deg,#cfd4da,#8d97a3)"></div>
+        <div>
+          <h2>CLIP top BLUMOTION INSERTA hinge NI</h2>
+          <div class="u">mat_7f3a9c21d8e4b056</div>
+          <span class="badge ok"><i></i>Active</span>
+        </div>
+      </div>
+      <div class="dtabs"><a href="#" class="active">Details</a><a href="#">Variants</a><a href="#">History</a><a href="#">Relations</a></div>
+
+      <div class="sec">
+        <h4>Classification</h4>
+        <div class="kv">
+          <span class="k">Category</span><span class="v">Hardware › Hinge</span>
+          <span class="k">Brand</span><span class="v">Blum</span>
+          <span class="k">Model no.</span><span class="v">70.7550</span>
+          <span class="k">Family</span><span class="v">CLIP top BLUMOTION</span>
+        </div>
+      </div>
+
+      <div class="sec">
+        <h4>Variants</h4>
+        <div class="vgroup">
+          <span class="vchip"><b>boss</b> &nbsp; INSERTA</span>
+          <span class="vchip"><b>finish</b> &nbsp; NI</span>
+        </div>
+      </div>
+
+      <div class="sec">
+        <h4>Commercial</h4>
+        <div class="pricebox">
+          <div><div class="lbl">Unit cost · ex GST</div><div style="font-size:11px;color:var(--ink-3)">AUD · per each</div></div>
+          <div class="amt">—</div>
+        </div>
+        <div class="kv" style="margin-top:10px">
+          <span class="k">Supplier</span><span class="v">Blum AU</span>
+          <span class="k">Unit</span><span class="v">ea</span>
+        </div>
+      </div>
+
+      <div class="sec">
+        <h4>Provenance</h4>
+        <div class="kv">
+          <span class="k">Source</span><span class="v">joineryflow</span>
+          <span class="k">Confidence</span><span class="v" style="color:var(--teal)">100%</span>
+          <span class="k">Synced</span><span class="v">2 h ago</span>
+        </div>
+      </div>
+
+      <div class="sec">
+        <h4>Recent activity</h4>
+        <div class="timeline">
+          <div>Created from supplier feed <span>· 2 h ago</span></div>
+          <div>Mapped to canonical family <span>· 2 h ago</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="dfoot">
+      <button class="btn">Edit</button>
+      <button class="btn primary">Create change request</button>
+    </div>
+  </aside>
+
+  <!-- STAGING BAR -->
+  <div class="stagebar">
+    <span class="pill">2 selected</span>
+    <span>Edits are staged — nothing is written until a change request is approved.</span>
+    <div class="acts">
+      <button>Clear</button><button>Compare</button><button class="go">Review changes →</button>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
